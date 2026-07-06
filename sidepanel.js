@@ -4,6 +4,11 @@
 (function () {
   "use strict";
   const APP_VERSION = "1.1.7";
+  const AUDIO_DECODE_TIMEOUT_MS = 30000;
+  const TRANSCRIPTION_TIMEOUT_MS = 120000;
+  const AUDIO_DB_NAME = "calllog-audio";
+  const AUDIO_DB_VERSION = 1;
+  const AUDIO_STORE = "recording_blobs";
 
   // ─── State ──────────────────────────────────────────────────────────────────
   let state = {
@@ -61,6 +66,14 @@
     }
   }
 
+  function withTimeout(promise, timeoutMs, message) {
+    let timeoutId;
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+  }
+
   function audioBufferHasSignal(audioBuffer) {
     const threshold = 0.0005;
     for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
@@ -70,6 +83,91 @@
       }
     }
     return false;
+  }
+
+  // ─── Durable audio storage ───────────────────────────────────────────────────
+  function audioKey(id, kind) {
+    return `${id}:${kind}`;
+  }
+
+  function openAudioDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(AUDIO_DB_NAME, AUDIO_DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(AUDIO_STORE)) {
+          db.createObjectStore(AUDIO_STORE, { keyPath: "key" });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error("Unable to open recording storage"));
+    });
+  }
+
+  async function requestDurableStorage() {
+    try {
+      if (navigator.storage?.persist) await navigator.storage.persist();
+    } catch (_) {
+      // Best effort. IndexedDB still works if persistence is not granted.
+    }
+  }
+
+  async function writeAudioBlob(id, kind, blob, meta = {}) {
+    if (!blob || blob.size === 0) throw new Error("No audio blob to save");
+    const db = await openAudioDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(AUDIO_STORE, "readwrite");
+      tx.objectStore(AUDIO_STORE).put({
+        key: audioKey(id, kind),
+        id,
+        kind,
+        type: blob.type || "",
+        size: blob.size,
+        savedAt: Date.now(),
+        ...meta,
+        blob,
+      });
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error || new Error("Unable to save recording audio")); };
+      tx.onabort = () => { db.close(); reject(tx.error || new Error("Recording audio save was aborted")); };
+    });
+  }
+
+  async function readAudioBlob(id, kind) {
+    const db = await openAudioDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(AUDIO_STORE, "readonly");
+      const req = tx.objectStore(AUDIO_STORE).get(audioKey(id, kind));
+      req.onsuccess = () => resolve(req.result?.blob || null);
+      req.onerror = () => reject(req.error || new Error("Unable to read saved recording audio"));
+      tx.oncomplete = () => db.close();
+      tx.onabort = () => { db.close(); reject(tx.error || new Error("Recording audio read was aborted")); };
+    });
+  }
+
+  async function listAudioRecords() {
+    const db = await openAudioDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(AUDIO_STORE, "readonly");
+      const req = tx.objectStore(AUDIO_STORE).getAll();
+      req.onsuccess = () => resolve((req.result || []).map(({ blob, ...record }) => record));
+      req.onerror = () => reject(req.error || new Error("Unable to list saved recording audio"));
+      tx.oncomplete = () => db.close();
+      tx.onabort = () => { db.close(); reject(tx.error || new Error("Recording audio list was aborted")); };
+    });
+  }
+
+  async function deleteAudioBlobs(id) {
+    const db = await openAudioDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(AUDIO_STORE, "readwrite");
+      const store = tx.objectStore(AUDIO_STORE);
+      store.delete(audioKey(id, "source"));
+      store.delete(audioKey(id, "converted"));
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error || new Error("Unable to delete saved recording audio")); };
+      tx.onabort = () => { db.close(); reject(tx.error || new Error("Recording audio delete was aborted")); };
+    });
   }
 
   async function convertAudio(webmBlob, format) {
@@ -195,10 +293,18 @@
       date: r.date,
       duration: r.duration,
       source: r.source,
-      transcript: r.transcript,
-      transcriptStatus: r.transcriptStatus, // 'pending'|'done'|'error'|'none'
-      size: r.size,
-      exportFormat: r.exportFormat,
+      transcript: r.transcript || "",
+      transcriptStatus: r.transcriptStatus || "none", // 'pending'|'transcribing'|'done'|'error'|'none'
+      size: r.size || 0,
+      sourceSize: r.sourceSize || r.size || 0,
+      sourceMimeType: r.sourceMimeType || "",
+      sourceSaved: !!r.sourceSaved,
+      sourceSaveError: r.sourceSaveError || "",
+      convertedSaved: !!r.convertedSaved,
+      convertedMimeType: r.convertedMimeType || "",
+      convertedSaveError: r.convertedSaveError || "",
+      convertError: r.convertError || "",
+      exportFormat: r.exportFormat || "webm",
     }));
     chrome.storage.local.set({ recordings_meta: meta });
   }
@@ -313,10 +419,12 @@
   async function transcribeWithGroq(blob, recId) {
     if (!state.groqApiKey) {
       updateTranscript(recId, "(no API key — add one in Settings)", "error");
+      render();
       return;
     }
     if (!blob || blob.size < 1000) {
       updateTranscript(recId, `Audio too small to transcribe (${blob?.size ?? 0} bytes) — recording may be empty`, "error");
+      render();
       return;
     }
 
@@ -325,7 +433,11 @@
     render();
 
     try {
-      const decoded = await decodeWebm(blob);
+      const decoded = await withTimeout(
+        decodeWebm(blob),
+        AUDIO_DECODE_TIMEOUT_MS,
+        "Audio decode timed out before transcription could start"
+      );
       if (!audioBufferHasSignal(decoded)) {
         updateTranscript(recId, "Recording is silent; no audio was sent to Groq.", "error");
         return;
@@ -341,11 +453,24 @@
       formData.append("language", "en");
       formData.append("prompt", "Transcribe exactly what is said.");
 
-      const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${state.groqApiKey}` },
-        body: formData,
-      });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), TRANSCRIPTION_TIMEOUT_MS);
+      let res;
+      try {
+        res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${state.groqApiKey}` },
+          body: formData,
+          signal: controller.signal,
+        });
+      } catch (err) {
+        if (err.name === "AbortError") {
+          throw new Error("Transcription timed out after 120 seconds");
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       if (!res.ok) {
         const errBody = await res.text().catch(() => "");
@@ -375,6 +500,118 @@
       r.id === id ? { ...r, transcript: text, transcriptStatus: status } : r
     );
     saveRecordings(state.recordings);
+  }
+
+  function restoreRecordingMeta(records) {
+    let changed = false;
+    const restored = (records || []).map((r) => {
+      if (r.transcriptStatus === "transcribing" || r.transcriptStatus === "pending") {
+        changed = true;
+        if (r.sourceSaved || r.convertedSaved) {
+          return {
+            ...r,
+            transcript: "",
+            transcriptStatus: "pending",
+          };
+        }
+        return {
+          ...r,
+          transcript: "Transcription was interrupted before completion. Recordings cannot resume transcription after the side panel reloads.",
+          transcriptStatus: "error",
+        };
+      }
+      return r;
+    });
+    return { recordings: restored, changed };
+  }
+
+  function mergeAudioStorageMeta(records, audioRecords) {
+    let changed = false;
+    const byKey = new Map((audioRecords || []).map((r) => [r.key, r]));
+    const seenIds = new Set((records || []).map((r) => r.id));
+    const merged = (records || []).map((r) => {
+      const sourceRecord = byKey.get(audioKey(r.id, "source"));
+      const convertedRecord = byKey.get(audioKey(r.id, "converted"));
+      if (!sourceRecord && !convertedRecord) {
+        if (r.sourceSaved || r.convertedSaved) {
+          changed = true;
+          return {
+            ...r,
+            sourceSaved: false,
+            convertedSaved: false,
+            convertedMimeType: "",
+          };
+        }
+        return r;
+      }
+      changed = changed ||
+        r.sourceSaved !== !!sourceRecord ||
+        r.convertedSaved !== !!convertedRecord ||
+        (!!sourceRecord && !r.sourceMimeType) ||
+        (!!convertedRecord && !r.convertedMimeType);
+      return {
+        ...r,
+        sourceSaved: !!sourceRecord,
+        sourceSize: r.sourceSize || sourceRecord?.size || r.size || 0,
+        sourceMimeType: r.sourceMimeType || sourceRecord?.type || "",
+        convertedSaved: !!convertedRecord,
+        convertedMimeType: r.convertedMimeType || convertedRecord?.type || "",
+      };
+    });
+
+    for (const sourceRecord of (audioRecords || []).filter((r) => r.kind === "source" && !seenIds.has(r.id))) {
+      changed = true;
+      merged.push({
+        id: sourceRecord.id,
+        date: sourceRecord.date || new Date(sourceRecord.savedAt || Number(sourceRecord.id) || Date.now()).toISOString(),
+        duration: sourceRecord.duration || 0,
+        source: sourceRecord.source || "unknown",
+        transcript: "",
+        transcriptStatus: "none",
+        size: sourceRecord.size || 0,
+        sourceSize: sourceRecord.size || 0,
+        sourceMimeType: sourceRecord.type || "audio/webm",
+        sourceSaved: true,
+        sourceSaveError: "",
+        convertedSaved: !!byKey.get(audioKey(sourceRecord.id, "converted")),
+        convertedMimeType: byKey.get(audioKey(sourceRecord.id, "converted"))?.type || "",
+        convertedSaveError: "",
+        convertError: "",
+        exportFormat: sourceRecord.exportFormat || "webm",
+      });
+    }
+
+    merged.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return { recordings: merged, changed };
+  }
+
+  async function resumePendingTranscriptions() {
+    for (const rec of state.recordings.filter((r) => r.transcriptStatus === "pending")) {
+      try {
+        const blob = rec.convertedSaved
+          ? await readAudioBlob(rec.id, "converted")
+          : await readAudioBlob(rec.id, "source");
+        if (!blob) {
+          updateTranscript(rec.id, "Transcription could not resume because saved audio was not found.", "error");
+          render();
+          continue;
+        }
+        await transcribeWithGroq(blob, rec.id);
+      } catch (err) {
+        updateTranscript(rec.id, `Transcription resume error: ${err.message}`, "error");
+        render();
+      }
+    }
+  }
+
+  async function savedBlobForTranscription(rec, blobs = {}) {
+    if (rec.convertedSaved) {
+      return blobs.convertedBlob || await readAudioBlob(rec.id, "converted");
+    }
+    if (rec.sourceSaved) {
+      return blobs.sourceBlob || await readAudioBlob(rec.id, "source");
+    }
+    return null;
   }
 
   // Listen for audio chunks from offscreen mic via background relay
@@ -864,15 +1101,38 @@
     }
     const duration = state.timer;
     const format = state.exportFormat;
+    const recId = Date.now();
+    const recDate = new Date().toISOString();
+    let sourceSaved = false;
+    let sourceSaveError = null;
+
+    try {
+      await writeAudioBlob(recId, "source", webmBlob, {
+        date: recDate,
+        duration,
+        source: state.sourceMode,
+        exportFormat: format,
+      });
+      sourceSaved = true;
+    } catch (err) {
+      sourceSaveError = `Recording is only in memory; save failed: ${err.message}`;
+      state.error = sourceSaveError;
+    }
 
     const rec = {
-      id: Date.now(),
-      date: new Date().toISOString(),
+      id: recId,
+      date: recDate,
       duration,
       source: state.sourceMode,
-      transcript: "",
-      transcriptStatus: "pending",
+      transcript: sourceSaved ? "" : "Recording was not transcribed because audio could not be saved first.",
+      transcriptStatus: sourceSaved ? "pending" : "error",
       size: webmBlob.size,
+      sourceSize: webmBlob.size,
+      sourceMimeType: webmBlob.type || "audio/webm",
+      sourceSaved,
+      sourceSaveError,
+      convertedSaved: false,
+      convertedMimeType: "",
       exportFormat: format,
       webmBlob,
       _micBlobForMerge: null,
@@ -887,7 +1147,21 @@
     render();
 
     convertAndCache(rec.id, webmBlob, format).then((convertedBlob) => {
-      transcribeWithGroq(convertedBlob || webmBlob, rec.id);
+      const savedRec = state.recordings.find((r) => r.id === rec.id);
+      if (!savedRec) return;
+      savedBlobForTranscription(savedRec, { convertedBlob, sourceBlob: webmBlob })
+        .then((savedBlob) => {
+          if (!savedBlob) {
+            updateTranscript(rec.id, "Recording was not transcribed because audio could not be saved first.", "error");
+            render();
+            return;
+          }
+          transcribeWithGroq(savedBlob, rec.id);
+        })
+        .catch((err) => {
+          updateTranscript(rec.id, `Saved audio could not be opened for transcription: ${err.message}`, "error");
+          render();
+        });
     });
   }
 
@@ -897,9 +1171,25 @@
       const outputBlob = rec?._micBlobForMerge
         ? await mergeAndConvert(webmBlob, rec._micBlobForMerge, format, rec._mergeOffsets)
         : await convertAudio(webmBlob, format);
+      let convertedSaved = false;
+      let convertedSaveError = null;
+      try {
+        await writeAudioBlob(id, "converted", outputBlob);
+        convertedSaved = true;
+      } catch (err) {
+        convertedSaveError = `${format.toUpperCase()} export is only in memory; save failed: ${err.message}`;
+      }
       const url = URL.createObjectURL(outputBlob);
       state.recordings = state.recordings.map((r) =>
-        r.id === id ? { ...r, convertedBlob: outputBlob, convertedUrl: url, size: outputBlob.size } : r
+        r.id === id ? {
+          ...r,
+          convertedBlob: outputBlob,
+          convertedUrl: url,
+          size: outputBlob.size,
+          convertedSaved,
+          convertedMimeType: outputBlob.type || "",
+          convertedSaveError,
+        } : r
       );
       saveRecordings(state.recordings);
       render();
@@ -908,6 +1198,7 @@
       state.recordings = state.recordings.map((r) =>
         r.id === id ? { ...r, convertedUrl: null, convertedBlob: null, convertError: `${format.toUpperCase()} export failed: ${err.message}` } : r
       );
+      saveRecordings(state.recordings);
       render();
       return null;
     }
@@ -1001,15 +1292,36 @@
     }
   }
 
-  function downloadRecording(rec) {
-    if (!rec.convertedUrl) return;
+  async function downloadRecording(rec) {
+    const convertedBlob = rec.convertedBlob || (rec.convertedSaved ? await readAudioBlob(rec.id, "converted") : null);
+    const sourceBlob = rec.webmBlob || (!convertedBlob && rec.sourceSaved ? await readAudioBlob(rec.id, "source") : null);
+    const blob = convertedBlob || sourceBlob;
+    if (!blob) {
+      state.error = "Saved audio was not found for this recording.";
+      render();
+      return;
+    }
+    const url = rec.convertedUrl && convertedBlob === rec.convertedBlob
+      ? rec.convertedUrl
+      : URL.createObjectURL(blob);
+    const ext = convertedBlob
+      ? (rec.exportFormat || audioExtension(blob))
+      : audioExtension(blob);
     const a = document.createElement("a");
-    a.href = rec.convertedUrl;
-    a.download = `call-${formatDate(rec.date).replace(/[^a-zA-Z0-9]/g, "-")}.${rec.exportFormat}`;
+    a.href = url;
+    a.download = `call-${formatDate(rec.date).replace(/[^a-zA-Z0-9]/g, "-")}.${ext}`;
     a.click();
+    if (url !== rec.convertedUrl) setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  function deleteRecording(id) {
+  async function deleteRecording(id) {
+    try {
+      await deleteAudioBlobs(id);
+    } catch (err) {
+      state.error = `Recording was not deleted because saved audio cleanup failed: ${err.message}`;
+      render();
+      return;
+    }
     state.recordings = state.recordings.filter((r) => r.id !== id);
     saveRecordings(state.recordings);
     render();
@@ -1155,12 +1467,24 @@
   // ─── Recording row (shared) ───────────────────────────────────────────────────
   function buildRecRow(r) {
     const isTranscribing = state.transcribingId === r.id;
-    const downloadReady = !!r.convertedUrl && !r.convertError;
+    const convertedReady = (!!r.convertedUrl || !!r.convertedBlob || !!r.convertedSaved) && !r.convertError;
+    const sourceReady = !!r.webmBlob || !!r.sourceSaved;
+    const downloadReady = convertedReady || sourceReady;
+    const downloadLabel = convertedReady
+      ? (r.exportFormat || "webm").toUpperCase()
+      : audioExtension({ type: r.sourceMimeType || "audio/webm" }).toUpperCase();
     const exportFailed = !!r.convertError;
 
+    let transcriptNotice = "";
     let transcriptSnippet = "";
+    if (r.sourceSaveError) {
+      transcriptNotice += `<div class="transcript-snippet error" style="margin-bottom:4px">${r.sourceSaveError}</div>`;
+    }
+    if (r.convertedSaveError) {
+      transcriptNotice += `<div class="transcript-snippet error" style="margin-bottom:4px">${r.convertedSaveError}</div>`;
+    }
     if (r.convertError) {
-      transcriptSnippet += `<div class="transcript-snippet error" style="margin-bottom:4px">${r.convertError}</div>`;
+      transcriptNotice += `<div class="transcript-snippet error" style="margin-bottom:4px">${r.convertError}</div>`;
     }
     if (r.transcriptStatus === "transcribing" || isTranscribing) {
       transcriptSnippet = `<div class="transcript-snippet transcribing"><span class="spin">⟳</span> Transcribing with Whisper…</div>`;
@@ -1183,10 +1507,10 @@
           ${r.size ? `<span class="chip mono">${formatBytes(r.size)}</span>` : ""}
         </div>
       </div>
-      ${transcriptSnippet}
+      ${transcriptNotice}${transcriptSnippet}
       <div class="rec-actions">
         ${downloadReady
-          ? `<button class="rec-btn" data-action="download" data-id="${r.id}">↓ ${(r.exportFormat || "webm").toUpperCase()}</button>`
+          ? `<button class="rec-btn" data-action="download" data-id="${r.id}">↓ ${downloadLabel}</button>`
           : exportFailed
             ? `<button class="rec-btn" disabled style="opacity:0.4">Export failed</button>`
             : `<button class="rec-btn" disabled style="opacity:0.4">⟳ Converting…</button>`}
@@ -1380,8 +1704,18 @@
         e.stopPropagation();
         const id = parseInt(el.dataset.id);
         const rec = state.recordings.find((r) => r.id === id);
-        if (el.dataset.action === "download" && rec) downloadRecording(rec);
-        if (el.dataset.action === "delete") deleteRecording(id);
+        if (el.dataset.action === "download" && rec) {
+          downloadRecording(rec).catch((err) => {
+            state.error = `Download failed: ${err.message}`;
+            render();
+          });
+        }
+        if (el.dataset.action === "delete") {
+          deleteRecording(id).catch((err) => {
+            state.error = `Delete failed: ${err.message}`;
+            render();
+          });
+        }
       });
     });
   }
@@ -1683,10 +2017,18 @@
 
   // ─── Init ─────────────────────────────────────────────────────────────────────
   async function init() {
+    await requestDurableStorage();
     const stored = await loadRecordings();
-    state.recordings = (stored.recordings_meta || []).map((r) => ({
+    const audioRecords = await listAudioRecords().catch((err) => {
+      state.error = `Saved audio index could not be read: ${err.message}`;
+      return [];
+    });
+    const merged = mergeAudioStorageMeta(stored.recordings_meta, audioRecords);
+    const restored = restoreRecordingMeta(merged.recordings);
+    state.recordings = restored.recordings.map((r) => ({
       ...r, webmBlob: null, convertedBlob: null, convertedUrl: null,
     }));
+    if (merged.changed || restored.changed) saveRecordings(state.recordings);
     state.groqApiKey = stored.groq_api_key || "";
     state.exportFormat = stored.export_format || "mp3";
     state.sourceMode = stored.source_mode || "both";
@@ -1695,6 +2037,7 @@
     await checkMicPermission();
     await loadMicDevices();
     render();
+    resumePendingTranscriptions();
     await maybeRequestMicOnFirstLaunch(!!stored.mic_permission_prompted);
   }
 
