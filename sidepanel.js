@@ -3,7 +3,7 @@
 
 (function () {
   "use strict";
-  const APP_VERSION = "1.1.7";
+  const APP_VERSION = "1.1.8";
   const AUDIO_DECODE_TIMEOUT_MS = 30000;
   const TRANSCRIPTION_TIMEOUT_MS = 120000;
   const AUDIO_DB_NAME = "calllog-audio";

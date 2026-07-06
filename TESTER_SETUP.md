@@ -2,18 +2,18 @@
 
 ## Install
 
-1. Download and unzip `calllog-test-v1.1.7.zip`.
+1. Download and unzip `calllog-test-v1.1.8.zip`.
 2. Open Chrome and go to `chrome://extensions`.
 3. Turn on **Developer mode** in the top-right corner.
 4. Click **Load unpacked**.
-5. Select the unzipped `calllog-test-v1.1.7` folder.
+5. Select the unzipped `calllog-test-v1.1.8` folder.
 6. Pin **CallLog** from the Chrome extensions menu.
 
 ## First Run
 
 1. Open the browser tab where the call/dialer will run.
 2. Click the CallLog extension icon to open the side panel.
-3. Go to **Settings** and confirm it says `CallLog v1.1.7`.
+3. Go to **Settings** and confirm it says `CallLog v1.1.8`.
 4. Choose **Mic** first and start a short test recording.
 5. If prompted, allow microphone access.
 6. Confirm the mic line shows the expected input and a level above `0.000` while speaking.
