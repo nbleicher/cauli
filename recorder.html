@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CallLog Recorder</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #0e0e11;
+      color: #e8e8ec;
+      font-family: Inter, system-ui, sans-serif;
+    }
+    main {
+      width: min(460px, calc(100vw - 32px));
+      border: 1px solid #23232d;
+      border-radius: 8px;
+      background: #14141a;
+      padding: 22px;
+    }
+    h1 { margin: 0 0 10px; font-size: 18px; }
+    p { margin: 0 0 14px; color: #9a9aa5; font-size: 13px; line-height: 1.55; }
+    .status { color: #4ade80; font-size: 12px; line-height: 1.5; word-break: break-word; }
+    .status.error { color: #f87171; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>CallLog recording</h1>
+    <p>This tab is mixing your microphone and browser call audio. Keep it open until you stop recording from the side panel.</p>
+    <div id="status" class="status">Starting...</div>
+  </main>
+  <script src="recorder.js"></script>
+</body>
+</html>

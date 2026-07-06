@@ -1,6 +1,6 @@
 # CallLog — Open Source Call Recorder & Transcriber
 
-A Chrome/Edge extension for recording browser calls with **mic + tab audio mixed into one file**, with live speech-to-text transcription.
+A Chrome/Edge extension for recording browser calls with **mic + tab audio mixed into one file**, MP3/WAV downloads, and Groq Whisper transcription.
 
 Built for agencies doing call QA and feedback workflows.
 
@@ -9,9 +9,11 @@ Built for agencies doing call QA and feedback workflows.
 - 🎙 **Mic only** — just your voice
 - 🔊 **Tab audio** — record any browser tab (Zoom, Meet, phone dialers, anything)
 - 🎙+🔊 **Both** — mic and tab mixed into a single track
-- 📝 **Live transcript** — Web Speech API, no external service needed
+- 📝 **Transcript** — Groq audio transcription with `whisper-large-v3-turbo`
 - 🗃 **Call log** — timestamped history with full transcripts
-- ⬇️ **Download** — exports as `.webm` (plays in Chrome, VLC, ffmpeg-convertible)
+- ⬇️ **Download** — exports as `.mp3` or `.wav`
+- 🎚 **Microphone selection** — choose the input device used for mic recording
+- 🔐 **Mic permission page** — opens a Chrome extension tab so Chrome can grant microphone access reliably
 
 ## Install (Developer Mode)
 
@@ -35,26 +37,31 @@ Built for agencies doing call QA and feedback workflows.
 
 ```
 manifest.json          — MV3 config, permissions
-background.js          — Service worker, handles tabCapture API
+background.js          — Service worker, manages offscreen mic capture
+permissions.html/js    — Visible extension page that requests Chrome microphone permission
+content.js             — Injects the hidden microphone iframe into the active page
+recorder.html/js       — Synchronized mic + tab recorder used for Both mode
+offscreen.js/html      — Offscreen helper for microphone device checks
 sidepanel.html         — Side panel shell
-sidepanel.js           — Full app: recording engine, transcript, UI
+sidepanel.js           — Full app: recording engine, Groq transcription, MP3/WAV export, UI
 icons/                 — Extension icons
 ```
 
 ## Notes & Limitations
 
-- **Tab capture** requires the user to be on the tab they want to record when hitting Start. Chrome's `tabCapture` API captures the currently focused tab.
-- **Speech recognition** uses the browser's built-in Web Speech API (Chrome only). No API key needed, no data sent externally.
-- **Downloads** are `.webm` (Opus codec). Convert to MP3 with: `ffmpeg -i recording.webm -q:a 2 output.mp3`
-- Recordings (metadata + transcripts) are saved to `chrome.storage.local`. Audio blobs are in-memory per session — download before closing.
+- **Tab audio** uses Chrome's screen/tab picker. Select the dialer tab and make sure **Share tab audio** is enabled.
+- **Mic capture** runs in a hidden extension iframe injected into the active page. Chrome can suppress native mic prompts from side panels/offscreen documents, so the iframe requests and records the microphone, then relays chunks back to the side panel.
+- **Both mode** uses a dedicated extension recorder page so mic and tab audio are mixed in one `AudioContext` and recorded by one `MediaRecorder`.
+- **Transcription** sends the recorded audio to Groq's OpenAI-compatible audio transcription endpoint using `whisper-large-v3-turbo`.
+- **Downloads** are converted in-browser to `.mp3` or `.wav`. Audio blobs are in-memory per session, so download before closing the side panel.
+- Recordings metadata and transcripts are saved to `chrome.storage.local`.
 
 ## Roadmap / Ideas
 
-- [ ] Whisper API integration for higher-accuracy transcripts
+- [ ] Persist audio blobs across side panel/browser restarts
 - [ ] Speaker diarization ("Agent" vs "Customer" labels)
 - [ ] Auto-export to Google Drive or Notion
 - [ ] Waveform visualizer during recording
-- [ ] MP3 export via ffmpeg.wasm
 
 ## License
 
