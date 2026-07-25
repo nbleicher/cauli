@@ -41,9 +41,20 @@ export async function getAuthContext(): Promise<AuthContext | null> {
   };
 }
 
+// True when the user has a verified second factor but has not presented it on
+// this session. Enforced on the server: a client-side check would be trivially
+// bypassed by calling the API directly.
+async function needsSecondFactor() {
+  const supabase = await createServerSupabaseClient();
+  const { data, error } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (error || !data) return false;
+  return data.nextLevel === "aal2" && data.currentLevel !== "aal2";
+}
+
 export async function requirePageAuth() {
   const context = await getAuthContext();
   if (!context) redirect(isSupabaseConfigured() ? "/login" : "/setup");
+  if (await needsSecondFactor()) redirect("/auth/mfa");
   return context;
 }
 
@@ -53,6 +64,9 @@ export async function requireApiAuth(
   const context = await getAuthContext();
   if (!context) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (await needsSecondFactor()) {
+    return NextResponse.json({ error: "Second factor required" }, { status: 401 });
   }
   if (allowedRoles && !allowedRoles.includes(context.member.role)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });

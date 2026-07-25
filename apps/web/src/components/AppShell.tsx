@@ -5,6 +5,7 @@ import {
   LogOut,
   Mic2,
   Settings2,
+  ShieldCheck,
   Users,
 } from "lucide-react";
 import Image from "next/image";
@@ -21,6 +22,10 @@ const memberNav = [
   { href: "/calls", label: "My Calls", icon: Headphones },
 ];
 
+const accountNav = [
+  { href: "/account", label: "Account", icon: ShieldCheck },
+];
+
 const managerNav = [
   { href: "/team", label: "Team Calls", icon: ClipboardCheck },
 ];
@@ -35,6 +40,7 @@ export function AppShell({ children, email, role }: AppShellProps) {
     ...memberNav,
     ...(role === "manager" || role === "admin" ? managerNav : []),
     ...(role === "admin" ? adminNav : []),
+    ...accountNav,
   ];
 
   return (

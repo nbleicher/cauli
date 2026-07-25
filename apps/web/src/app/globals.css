@@ -1288,6 +1288,113 @@ textarea:focus {
   font-size: 12px;
 }
 
+.label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.link-button {
+  background: transparent;
+  border: 0;
+  color: var(--coral-strong);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.security-form {
+  max-width: 420px;
+  margin-top: 0;
+}
+
+.otp-input {
+  font-size: 22px;
+  letter-spacing: 0.32em;
+  text-align: center;
+}
+
+.mfa-icon {
+  display: block;
+  margin: 0 auto 12px;
+  color: var(--coral);
+}
+
+.mfa-escape {
+  margin-top: 18px;
+  text-align: center;
+}
+
+.mfa-enabled {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mfa-enroll {
+  display: grid;
+  gap: 10px;
+  max-width: 420px;
+}
+
+.mfa-steps {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mfa-qr {
+  width: 200px;
+  height: 200px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.mfa-secret summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.mfa-secret code {
+  display: inline-block;
+  margin-top: 7px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.mfa-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-pill svg {
+  margin-right: 4px;
+}
+
 .mono {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-variant-numeric: tabular-nums;
