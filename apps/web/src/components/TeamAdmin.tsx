@@ -1,7 +1,7 @@
 "use client";
 
 import type { Role } from "@calllog/shared";
-import { LoaderCircle, MailPlus, Trash2, UserRound } from "lucide-react";
+import { LoaderCircle, MailPlus, ShieldCheck, ShieldOff, Trash2, UserRound } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
@@ -11,6 +11,7 @@ interface Member {
   displayName: string;
   role: Role;
   joinedAt: string;
+  mfaEnabled: boolean;
 }
 
 interface Invite {
@@ -34,6 +35,7 @@ export function TeamAdmin({
   const [role, setRole] = useState<Role>("member");
   const [working, setWorking] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   async function invite(event: FormEvent) {
     event.preventDefault();
@@ -78,9 +80,30 @@ export function TeamAdmin({
     }
   }
 
+  async function resetMfa(userId: string, email: string) {
+    setWorking(`mfa:${userId}`);
+    setError("");
+    try {
+      const response = await fetch(`/api/admin/members/${userId}/mfa`, { method: "DELETE" });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "Could not reset two-factor");
+      setNotice(
+        result.removed
+          ? `Two-factor reset for ${email}. They can sign in with their password and enroll a new device.`
+          : `${email} did not have two-factor enabled.`,
+      );
+      router.refresh();
+    } catch (mfaError) {
+      setError(mfaError instanceof Error ? mfaError.message : "Could not reset two-factor");
+    } finally {
+      setWorking("");
+    }
+  }
+
   return (
     <>
       {error && <p className="error-banner">{error}</p>}
+      {notice && <p className="notice-banner">{notice}</p>}
       <section className="admin-section">
         <div className="section-heading">
           <div>
@@ -130,6 +153,28 @@ export function TeamAdmin({
                 <strong>{member.displayName || member.email}</strong>
                 <span>{member.email}</span>
               </div>
+              {member.mfaEnabled ? (
+                <button
+                  className="mfa-reset on"
+                  title={`Reset two-factor for ${member.email}`}
+                  disabled={Boolean(working)}
+                  onClick={() => {
+                    if (window.confirm(
+                      `Reset two-factor for ${member.email}?\n\nThey will be able to sign in with just their password until they enroll a new device.`,
+                    )) void resetMfa(member.userId, member.email);
+                  }}
+                >
+                  {working === `mfa:${member.userId}`
+                    ? <LoaderCircle className="spin" size={13} />
+                    : <ShieldCheck size={13} />}
+                  <span>2FA on</span>
+                </button>
+              ) : (
+                <span className="mfa-reset off" title="No second factor enrolled">
+                  <ShieldOff size={13} />
+                  <span>No 2FA</span>
+                </span>
+              )}
               <select
                 value={member.role}
                 disabled={Boolean(working)}

@@ -1050,7 +1050,7 @@ textarea:focus {
 .member-row {
   min-height: 62px;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 140px 34px;
+  grid-template-columns: 34px minmax(0, 1fr) 96px 140px 34px;
   gap: 10px;
   align-items: center;
   border-bottom: 1px solid var(--line);
@@ -1189,7 +1189,7 @@ textarea:focus {
   }
 
   .member-row {
-    grid-template-columns: 34px minmax(0, 1fr) 100px 34px;
+    grid-template-columns: 34px minmax(0, 1fr) 84px 100px 34px;
   }
 
   .criterion-builder-row {
@@ -1393,6 +1393,40 @@ textarea:focus {
 
 .status-pill svg {
   margin-right: 4px;
+}
+
+.mfa-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mfa-reset.on {
+  border-color: var(--green-line);
+  background: var(--green-soft);
+  color: var(--green-text);
+  cursor: pointer;
+}
+
+.mfa-reset.on:hover:not(:disabled) {
+  border-color: var(--red-line);
+  background: var(--red-soft);
+  color: var(--red-text);
+}
+
+.mfa-reset:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .mono {

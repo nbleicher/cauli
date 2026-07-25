@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/PageHeader";
 import { TeamAdmin } from "@/components/TeamAdmin";
 import { requirePageAuth } from "@/lib/server/auth";
+import { createAdminSupabaseClient } from "@/lib/supabase/admin";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 interface ProfileRelation {
@@ -38,6 +39,20 @@ export default async function TeamAdminPage() {
       .order("created_at", { ascending: false }),
   ]);
 
+  // Which members have a verified second factor. Needs the service role, so it
+  // is resolved here rather than in the client component.
+  const adminClient = createAdminSupabaseClient();
+  const mfaEntries = await Promise.all(
+    (memberships ?? []).map(async (membership) => {
+      const { data } = await adminClient.auth.admin.mfa.listFactors({
+        userId: membership.user_id,
+      });
+      const enabled = (data?.factors ?? []).some((factor) => factor.status === "verified");
+      return [membership.user_id, enabled] as const;
+    }),
+  );
+  const mfaByUser = new Map(mfaEntries);
+
   return (
     <main className="page page-narrow">
       <PageHeader
@@ -54,6 +69,7 @@ export default async function TeamAdminPage() {
             displayName: profile?.display_name ?? "",
             role: membership.role as Role,
             joinedAt: membership.joined_at,
+            mfaEnabled: mfaByUser.get(membership.user_id) ?? false,
           };
         })}
         invites={(invites ?? []).map((invite) => ({
