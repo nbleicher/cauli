@@ -1,0 +1,15 @@
+.git
+.context
+.next
+.turbo
+coverage
+dist
+node_modules
+**/.next
+**/coverage
+**/dist
+**/node_modules
+apps/extension/dist
+.env
+.env.*
+!.env.example

@@ -1,68 +1,83 @@
-# CallLog — Open Source Call Recorder & Transcriber
+# cauli
 
-A Chrome/Edge extension for recording browser calls with **mic + tab audio mixed into one file**, MP3/WAV downloads, and Groq Whisper transcription.
+cauli is a deployable call recording, transcription, and QA review application. It records microphone and browser-tab audio in the browser, uploads durable chunks to private storage, transcribes recordings asynchronously, and gives managers a versioned weighted scorecard.
 
-Built for agencies doing call QA and feedback workflows.
+The legacy Chrome extension is retained as a launcher and one-time migration bridge.
 
-## Features
+## Documentation
 
-- 🎙 **Mic only** — just your voice
-- 🔊 **Tab audio** — record any browser tab (Zoom, Meet, phone dialers, anything)
-- 🎙+🔊 **Both** — mic and tab mixed into a single track
-- 📝 **Transcript** — Groq audio transcription with `whisper-large-v3-turbo`
-- 🗃 **Call log** — timestamped history with full transcripts
-- ⬇️ **Download** — exports as `.mp3` or `.wav`
-- 🎚 **Microphone selection** — choose the input device used for mic recording
-- 🔐 **Mic permission page** — opens a Chrome extension tab so Chrome can grant microphone access reliably
+- [Technical reference](docs/TECHNICAL_REFERENCE.md)
+- [Deployment guide](docs/DEPLOYMENT.md)
+- [Manual verification](docs/MANUAL_TESTING.md)
 
-## Install (Developer Mode)
+## Repository
 
-1. Clone or download this repo
-2. Open `chrome://extensions` in Chrome (or `edge://extensions` in Edge)
-3. Enable **Developer Mode** (top right toggle)
-4. Click **Load unpacked**
-5. Select this folder (`call-recorder-extension/`)
-6. Pin the extension → click it to open the side panel
-
-## Usage
-
-1. Navigate to the tab you want to record (Zoom, Google Meet, a softphone, etc.)
-2. Click the CallLog icon → side panel opens
-3. Choose your audio source: **Mic**, **Tab**, or **Both**
-4. Hit **Start Recording**
-5. When done → **Stop & Save**
-6. View full transcript + download audio in the **Log** tab
-
-## Architecture
-
-```
-manifest.json          — MV3 config, permissions
-background.js          — Service worker, manages offscreen mic capture
-permissions.html/js    — Visible extension page that requests Chrome microphone permission
-content.js             — Injects the hidden microphone iframe into the active page
-recorder.html/js       — Synchronized mic + tab recorder used for Both mode
-offscreen.js/html      — Offscreen helper for microphone device checks
-sidepanel.html         — Side panel shell
-sidepanel.js           — Full app: recording engine, Groq transcription, MP3/WAV export, UI
-icons/                 — Extension icons
+```text
+apps/web         Next.js application and API routes
+apps/worker      Railway FFmpeg and transcription worker
+apps/extension   Chrome MV3 companion and legacy recorder
+packages/shared  Domain types, validation, authorization, and scoring
+supabase         Database migrations, RLS, and Storage policies
 ```
 
-## Notes & Limitations
+## Local development
 
-- **Tab audio** uses Chrome's screen/tab picker. Select the dialer tab and make sure **Share tab audio** is enabled.
-- **Mic capture** runs in a hidden extension iframe injected into the active page. Chrome can suppress native mic prompts from side panels/offscreen documents, so the iframe requests and records the microphone, then relays chunks back to the side panel.
-- **Both mode** uses a dedicated extension recorder page so mic and tab audio are mixed in one `AudioContext` and recorded by one `MediaRecorder`.
-- **Transcription** sends the recorded audio to Groq's OpenAI-compatible audio transcription endpoint using `whisper-large-v3-turbo`.
-- **Downloads** are converted in-browser to `.mp3` or `.wav`. Audio blobs are in-memory per session, so download before closing the side panel.
-- Recordings metadata and transcripts are saved to `chrome.storage.local`.
+Requirements: Node 22, npm, a Supabase project or local Supabase CLI, and FFmpeg for worker development.
 
-## Roadmap / Ideas
+```bash
+npm install
+cp apps/web/.env.example apps/web/.env.local
+cp apps/worker/.env.example apps/worker/.env
+npm run dev
+```
 
-- [ ] Persist audio blobs across side panel/browser restarts
-- [ ] Speaker diarization ("Agent" vs "Customer" labels)
-- [ ] Auto-export to Google Drive or Notion
-- [ ] Waveform visualizer during recording
+Without Supabase variables, the web app intentionally opens a setup screen at `http://localhost:3000/setup`.
 
-## License
+Apply the database:
 
-MIT — fork it, ship it, build on it.
+```bash
+supabase link --project-ref YOUR_PROJECT_REF
+supabase db push
+npm run bootstrap -w @calllog/web
+```
+
+Run the worker after setting its environment:
+
+```bash
+npm run dev:worker
+```
+
+## Verification
+
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+Runtime dependencies currently pass `npm audit --omit=dev`. The remaining
+audit findings are in the ESLint development toolchain; the React, import, and
+accessibility plugins shipped with the current Next.js preset declare
+compatibility only through ESLint 9.
+
+## Deployment
+
+Create separate Railway services from this repository:
+
+- Web service: config file `/railway.web.toml`
+- Worker service: config file `/railway.worker.toml`
+
+Both services use the same Supabase and OpenRouter secrets. See [Deployment](docs/DEPLOYMENT.md) for the complete setup and [Manual verification](docs/MANUAL_TESTING.md) for the release checklist.
+
+## Companion extension
+
+Build the extension for the exact deployed origin:
+
+```bash
+CALLLOG_WEB_ORIGIN=https://your-calllog-domain.example \
+CALLLOG_SUPABASE_ORIGIN=https://your-project.supabase.co \
+  npm run build -w @calllog/extension
+```
+
+Load `apps/extension/dist` as the unpacked extension or package that directory for Chrome distribution. The production origin is compiled into both the manifest match pattern and the runtime origin check.
