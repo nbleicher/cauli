@@ -20,5 +20,8 @@ ENV NODE_ENV=production
 ENV PORT=3000
 COPY --from=build /app/apps/web/.next/standalone ./
 COPY --from=build /app/apps/web/.next/static ./apps/web/.next/static
+# standalone output excludes public/ by design — favicons, PWA icons and Cal
+# 404 without this.
+COPY --from=build /app/apps/web/public ./apps/web/public
 EXPOSE 3000
 CMD ["node", "apps/web/server.js"]
