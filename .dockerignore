@@ -13,4 +13,3 @@ apps/extension/dist
 .env
 .env.*
 !.env.example
-
