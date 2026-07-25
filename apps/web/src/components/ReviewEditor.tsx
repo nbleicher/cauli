@@ -1,7 +1,10 @@
 "use client";
 
 import type { ReviewStatus } from "@calllog/shared";
-import { calculateNormalizedScore } from "@calllog/shared";
+import {
+  calculateNormalizedScore,
+  validateReviewCompletion,
+} from "@calllog/shared";
 import { Check, History, LoaderCircle, Save } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -44,6 +47,7 @@ export interface ReviewEditorProps {
     version: number;
     status: ReviewStatus;
     summary: string;
+    followUp: string;
     answers: ReviewAnswer[];
   } | null;
   revisions: Revision[];
@@ -62,7 +66,10 @@ export function ReviewEditor({
   const router = useRouter();
   const [answers, setAnswers] = useState<Record<string, ReviewAnswer>>(() => {
     const current = Object.fromEntries(
-      (initialReview?.answers ?? []).map((answer) => [answer.criterionId, answer]),
+      (initialReview?.answers ?? []).map((answer) => [
+        answer.criterionId,
+        answer,
+      ])
     );
     for (const category of categories) {
       for (const criterion of category.criteria) {
@@ -76,26 +83,30 @@ export function ReviewEditor({
     return current;
   });
   const [summary, setSummary] = useState(initialReview?.summary ?? "");
+  const [followUp, setFollowUp] = useState(initialReview?.followUp ?? "");
   const [status, setStatus] = useState<Exclude<ReviewStatus, "unreviewed">>(
     initialReview?.status === "unreviewed" || !initialReview
       ? "in_progress"
-      : initialReview.status,
+      : initialReview.status
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const score = useMemo(() => calculateNormalizedScore(
-    categories.flatMap((category) => category.criteria.map((criterion) => ({
-      criterionId: criterion.id,
-      weight: criterion.weight,
-      value: answers[criterion.id]?.value ?? null,
-    }))),
-  ), [answers, categories]);
+  const score = useMemo(
+    () =>
+      calculateNormalizedScore(
+        categories.flatMap((category) =>
+          category.criteria.map((criterion) => ({
+            criterionId: criterion.id,
+            weight: criterion.weight,
+            value: answers[criterion.id]?.value ?? null,
+          }))
+        )
+      ),
+    [answers, categories]
+  );
 
-  function updateAnswer(
-    criterionId: string,
-    patch: Partial<ReviewAnswer>,
-  ) {
+  function updateAnswer(criterionId: string, patch: Partial<ReviewAnswer>) {
     setAnswers((current) => ({
       ...current,
       [criterionId]: {
@@ -108,6 +119,20 @@ export function ReviewEditor({
   }
 
   async function submit() {
+    const reviewAnswers = Object.values(answers);
+    const issues = validateReviewCompletion(
+      {
+        status,
+        summary,
+        followUp,
+        answers: reviewAnswers,
+      },
+      categories.flatMap((category) => category.criteria)
+    );
+    if (issues.length) {
+      setError(issues.map((issue) => issue.message).join(" "));
+      return;
+    }
     setSaving(true);
     setError("");
     try {
@@ -120,21 +145,26 @@ export function ReviewEditor({
             expectedVersion: initialReview?.version ?? 0,
             status,
             summary,
-            answers: Object.values(answers),
+            followUp,
+            answers: reviewAnswers,
           }),
-        },
+        }
       );
       const result = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(
           response.status === 409
             ? "This review changed in another session. Refresh before submitting."
-            : result.error || "Review could not be saved",
+            : result.error || "Review could not be saved"
         );
       }
       router.refresh();
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Review could not be saved");
+      setError(
+        submitError instanceof Error
+          ? submitError.message
+          : "Review could not be saved"
+      );
     } finally {
       setSaving(false);
     }
@@ -149,7 +179,10 @@ export function ReviewEditor({
           <small>/ 100</small>
         </div>
         {!readOnly && (
-          <select value={status} onChange={(event) => setStatus(event.target.value as typeof status)}>
+          <select
+            value={status}
+            onChange={(event) => setStatus(event.target.value as typeof status)}
+          >
             <option value="in_progress">In progress</option>
             <option value="reviewed">Reviewed</option>
             <option value="needs_follow_up">Needs follow-up</option>
@@ -171,29 +204,45 @@ export function ReviewEditor({
                   </div>
                   <span>×{criterion.weight}</span>
                 </div>
-                <div className="score-options" role="group" aria-label={criterion.label}>
+                <div
+                  className="score-options"
+                  role="group"
+                  aria-label={criterion.label}
+                >
                   {[1, 2, 3, 4, 5].map((value) => (
                     <button
                       key={value}
                       className={answer?.value === value ? "active" : ""}
-                      onClick={() => updateAnswer(criterion.id, { value: value as 1 | 2 | 3 | 4 | 5 })}
+                      onClick={() =>
+                        updateAnswer(criterion.id, {
+                          value: value as 1 | 2 | 3 | 4 | 5,
+                        })
+                      }
                       disabled={readOnly}
                     >
                       {value}
                     </button>
                   ))}
-                  <button
-                    className={answer?.value === null ? "active na" : "na"}
-                    onClick={() => updateAnswer(criterion.id, { value: null })}
-                    disabled={readOnly}
-                  >
-                    N/A
-                  </button>
+                  {!criterion.required && (
+                    <button
+                      className={answer?.value === null ? "active na" : "na"}
+                      onClick={() =>
+                        updateAnswer(criterion.id, { value: null })
+                      }
+                      disabled={readOnly}
+                    >
+                      N/A
+                    </button>
+                  )}
                 </div>
                 {!readOnly && (
                   <input
                     value={answer?.comment ?? ""}
-                    onChange={(event) => updateAnswer(criterion.id, { comment: event.target.value })}
+                    onChange={(event) =>
+                      updateAnswer(criterion.id, {
+                        comment: event.target.value,
+                      })
+                    }
                     placeholder="Criterion note"
                     maxLength={4_000}
                   />
@@ -207,7 +256,9 @@ export function ReviewEditor({
       <div className="field">
         <label htmlFor="review-summary">Review summary</label>
         {readOnly ? (
-          <p className="review-summary-readonly">{summary || "No summary provided."}</p>
+          <p className="review-summary-readonly">
+            {summary || "No summary provided."}
+          </p>
         ) : (
           <textarea
             id="review-summary"
@@ -219,22 +270,53 @@ export function ReviewEditor({
         )}
       </div>
 
+      {status === "needs_follow_up" && (
+        <div className="field">
+          <label htmlFor="review-follow-up">Required follow-up</label>
+          {readOnly ? (
+            <p className="review-summary-readonly">
+              {followUp || "No follow-up explanation provided."}
+            </p>
+          ) : (
+            <textarea
+              id="review-follow-up"
+              value={followUp}
+              onChange={(event) => setFollowUp(event.target.value)}
+              placeholder="What specific action needs to happen, and who should own it?"
+              maxLength={10_000}
+            />
+          )}
+        </div>
+      )}
+
       {error && <p className="form-error">{error}</p>}
       {!readOnly && (
-        <button className="button button-primary button-full" onClick={() => void submit()} disabled={saving}>
-          {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+        <button
+          className="button button-primary button-full"
+          onClick={() => void submit()}
+          disabled={saving}
+        >
+          {saving ? (
+            <LoaderCircle className="spin" size={16} />
+          ) : (
+            <Save size={16} />
+          )}
           Submit review
         </button>
       )}
 
       {revisions.length > 0 && (
         <details className="review-history">
-          <summary><History size={14} /> {revisions.length} submitted revision{revisions.length === 1 ? "" : "s"}</summary>
+          <summary>
+            <History size={14} /> {revisions.length} submitted revision
+            {revisions.length === 1 ? "" : "s"}
+          </summary>
           <div>
             {revisions.map((revision) => (
               <p key={revision.id}>
-                <Check size={13} />
-                v{revision.revision} · {revision.status.replaceAll("_", " ")} · {revision.score ?? "—"} · {revision.submittedBy}
+                <Check size={13} />v{revision.revision} ·{" "}
+                {revision.status.replaceAll("_", " ")} · {revision.score ?? "—"}{" "}
+                · {revision.submittedBy}
               </p>
             ))}
           </div>

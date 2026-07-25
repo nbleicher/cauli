@@ -4,6 +4,7 @@ import {
   Headphones,
   LogOut,
   Mic2,
+  TriangleAlert,
   Settings2,
   ShieldCheck,
   Users,
@@ -14,6 +15,7 @@ import { NavItem } from "@/components/NavItem";
 interface AppShellProps {
   children: React.ReactNode;
   email: string;
+  needsAttentionCount?: number;
   role: Role;
 }
 
@@ -22,20 +24,24 @@ const memberNav = [
   { href: "/calls", label: "My Calls", icon: Headphones },
 ];
 
-const accountNav = [
-  { href: "/account", label: "Account", icon: ShieldCheck },
-];
+const accountNav = [{ href: "/account", label: "Account", icon: ShieldCheck }];
 
 const managerNav = [
   { href: "/team", label: "Team Calls", icon: ClipboardCheck },
 ];
 
 const adminNav = [
+  { href: "/admin/attention", label: "Needs Attention", icon: TriangleAlert },
   { href: "/admin/team", label: "Team Admin", icon: Users },
   { href: "/admin/scorecards", label: "Scorecards", icon: Settings2 },
 ];
 
-export function AppShell({ children, email, role }: AppShellProps) {
+export function AppShell({
+  children,
+  email,
+  needsAttentionCount = 0,
+  role,
+}: AppShellProps) {
   const nav = [
     ...memberNav,
     ...(role === "manager" || role === "admin" ? managerNav : []),
@@ -61,19 +67,32 @@ export function AppShell({ children, email, role }: AppShellProps) {
         </div>
         <nav className="side-nav" aria-label="Primary navigation">
           {nav.map(({ href, label, icon: Icon }) => (
-            <NavItem key={href} href={href} label={label}>
+            <NavItem
+              key={href}
+              href={href}
+              label={label}
+              badge={
+                href === "/admin/attention" ? needsAttentionCount : undefined
+              }
+            >
               <Icon size={18} />
             </NavItem>
           ))}
         </nav>
         <div className="account-block">
-          <div className="account-avatar">{email.slice(0, 1).toUpperCase()}</div>
+          <div className="account-avatar">
+            {email.slice(0, 1).toUpperCase()}
+          </div>
           <div className="account-copy">
             <span title={email}>{email}</span>
             <small>{role}</small>
           </div>
           <form action="/api/auth/signout" method="post">
-            <button className="icon-button" title="Sign out" aria-label="Sign out">
+            <button
+              className="icon-button"
+              title="Sign out"
+              aria-label="Sign out"
+            >
               <LogOut size={16} />
             </button>
           </form>

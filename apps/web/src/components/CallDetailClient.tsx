@@ -19,7 +19,10 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { StatusPill } from "@/components/StatusPill";
 import { formatBytes, formatDate, formatDuration } from "@/lib/format";
-import { ReviewEditor, type ReviewEditorProps } from "@/components/ReviewEditor";
+import {
+  ReviewEditor,
+  type ReviewEditorProps,
+} from "@/components/ReviewEditor";
 
 interface Segment {
   id: string;
@@ -37,6 +40,8 @@ interface CallDetail {
   startedAt: string;
   durationMs: number;
   sourceMode: SourceMode;
+  degraded: boolean;
+  degradedIntervalCount: number;
   status: CallStatus;
   reviewStatus: ReviewStatus;
   micLabel: string;
@@ -75,7 +80,8 @@ export function CallDetailClient({
     fetch(`/api/calls/${call.id}/media?format=${format}`)
       .then(async (response) => {
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Playback unavailable");
+        if (!response.ok)
+          throw new Error(result.error || "Playback unavailable");
         setAudioUrl(result.url);
       })
       .catch((error: Error) => setMediaError(error.message));
@@ -91,7 +97,7 @@ export function CallDetailClient({
           : action === "export"
             ? `/api/calls/${call.id}/exports`
             : `/api/calls/${call.id}/retry`,
-        { method: action === "delete" ? "DELETE" : "POST" },
+        { method: action === "delete" ? "DELETE" : "POST" }
       );
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
@@ -103,7 +109,9 @@ export function CallDetailClient({
         router.refresh();
       }
     } catch (error) {
-      setMediaError(error instanceof Error ? error.message : `${action} failed`);
+      setMediaError(
+        error instanceof Error ? error.message : `${action} failed`
+      );
     } finally {
       setWorking("");
     }
@@ -112,7 +120,9 @@ export function CallDetailClient({
   async function download(format: "mp3" | "source" | "wav") {
     setWorking(`download-${format}`);
     try {
-      const response = await fetch(`/api/calls/${call.id}/media?format=${format}&download=1`);
+      const response = await fetch(
+        `/api/calls/${call.id}/media?format=${format}&download=1`
+      );
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Download unavailable");
       window.location.assign(result.url);
@@ -147,10 +157,16 @@ export function CallDetailClient({
             <audio ref={audioRef} controls src={audioUrl} preload="metadata" />
           ) : (
             <div className="audio-pending">
-              {call.status === "ready"
-                ? <AlertTriangle size={18} />
-                : <LoaderCircle className="spin" size={18} />}
-              <span>{call.status === "ready" ? "Audio unavailable" : "Audio processing"}</span>
+              {call.status === "ready" ? (
+                <AlertTriangle size={18} />
+              ) : (
+                <LoaderCircle className="spin" size={18} />
+              )}
+              <span>
+                {call.status === "ready"
+                  ? "Audio unavailable"
+                  : "Audio processing"}
+              </span>
             </div>
           )}
           <div className="audio-downloads">
@@ -182,19 +198,51 @@ export function CallDetailClient({
                 disabled={call.status !== "ready" || Boolean(working)}
                 onClick={() => void runAction("export")}
               >
-                {working === "export" ? <LoaderCircle className="spin" size={14} /> : <FileAudio size={14} />}
+                {working === "export" ? (
+                  <LoaderCircle className="spin" size={14} />
+                ) : (
+                  <FileAudio size={14} />
+                )}
                 Prepare WAV
               </button>
             )}
           </div>
         </div>
         <dl className="call-facts">
-          <div><dt>Recorded</dt><dd>{formatDate(call.startedAt)}</dd></div>
-          <div><dt>Owner</dt><dd>{call.ownerName}</dd></div>
-          <div><dt>Duration</dt><dd className="mono">{formatDuration(call.durationMs)}</dd></div>
-          <div><dt>Source</dt><dd className="capitalize">{call.sourceMode}</dd></div>
-          <div><dt>Size</dt><dd>{formatBytes(call.sourceBytes)}</dd></div>
-          <div><dt>Processing</dt><dd><StatusPill status={call.status} /></dd></div>
+          <div>
+            <dt>Recorded</dt>
+            <dd>{formatDate(call.startedAt)}</dd>
+          </div>
+          <div>
+            <dt>Owner</dt>
+            <dd>{call.ownerName}</dd>
+          </div>
+          <div>
+            <dt>Duration</dt>
+            <dd className="mono">{formatDuration(call.durationMs)}</dd>
+          </div>
+          <div>
+            <dt>Source</dt>
+            <dd className="capitalize">{call.sourceMode}</dd>
+          </div>
+          <div>
+            <dt>Quality</dt>
+            <dd>
+              {call.degraded
+                ? `Degraded · ${call.degradedIntervalCount} source loss interval${call.degradedIntervalCount === 1 ? "" : "s"}`
+                : "Complete"}
+            </dd>
+          </div>
+          <div>
+            <dt>Size</dt>
+            <dd>{formatBytes(call.sourceBytes)}</dd>
+          </div>
+          <div>
+            <dt>Processing</dt>
+            <dd>
+              <StatusPill status={call.status} />
+            </dd>
+          </div>
         </dl>
       </section>
 
@@ -205,8 +253,15 @@ export function CallDetailClient({
             <span>{call.errorMessage}</span>
           </div>
           {call.status === "failed" && (
-            <button className="button button-secondary" onClick={() => void runAction("retry")}>
-              {working === "retry" ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}
+            <button
+              className="button button-secondary"
+              onClick={() => void runAction("retry")}
+            >
+              {working === "retry" ? (
+                <LoaderCircle className="spin" size={15} />
+              ) : (
+                <RefreshCw size={15} />
+              )}
               Retry processing
             </button>
           )}
@@ -218,22 +273,31 @@ export function CallDetailClient({
           <div className="section-heading">
             <div>
               <h2>Transcript</h2>
-              <p>{segments.length ? `${segments.length} timestamped segments` : "Waiting for transcription"}</p>
+              <p>
+                {segments.length
+                  ? `${segments.length} timestamped segments`
+                  : "Waiting for transcription"}
+              </p>
             </div>
-            {segments.length > 0 && <CheckCircle2 size={17} className="success-icon" />}
+            {segments.length > 0 && (
+              <CheckCircle2 size={17} className="success-icon" />
+            )}
           </div>
           {segments.length > 0 ? (
             <div className="transcript-list">
               {segments.map((segment) => (
                 <button key={segment.id} onClick={() => seek(segment.start_ms)}>
-                  <span className="mono">{formatDuration(segment.start_ms)}</span>
+                  <span className="mono">
+                    {formatDuration(segment.start_ms)}
+                  </span>
                   <p>{segment.text}</p>
                 </button>
               ))}
             </div>
           ) : (
             <div className="transcript-empty">
-              {transcriptText || "Transcript segments will appear when processing completes."}
+              {transcriptText ||
+                "Transcript segments will appear when processing completes."}
             </div>
           )}
         </section>

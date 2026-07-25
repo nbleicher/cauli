@@ -55,16 +55,16 @@ flowchart LR
 
 ### Runtime services
 
-| Service | Technology | Responsibility |
-| --- | --- | --- |
-| Web | Next.js App Router, React, TypeScript | Pages, session handling, server rendering, API routes, signed media URLs |
-| Worker | Node.js, TypeScript, FFmpeg | Job claiming, audio assembly, format generation, transcription, deletion, cleanup |
-| Database | Supabase Postgres | Application records, roles, RLS, idempotent jobs, reviews, revisions |
-| Object storage | Supabase Storage | Private chunks, source WebM, MP3, WAV exports, imported audio |
-| Authentication | Supabase Auth | Invite-only users, magic links, session cookies |
-| Email | Resend SMTP through Supabase | Invitation and magic-link delivery |
-| Transcription | OpenRouter | Timestamped speech-to-text |
-| Companion | Chrome Manifest V3 extension | Opens the web app and migrates legacy recordings |
+| Service        | Technology                            | Responsibility                                                                    |
+| -------------- | ------------------------------------- | --------------------------------------------------------------------------------- |
+| Web            | Next.js App Router, React, TypeScript | Pages, session handling, server rendering, API routes, signed media URLs          |
+| Worker         | Node.js, TypeScript, FFmpeg           | Job claiming, audio assembly, format generation, transcription, deletion, cleanup |
+| Database       | Supabase Postgres                     | Application records, roles, RLS, idempotent jobs, reviews, revisions              |
+| Object storage | Supabase Storage                      | Private chunks, source WebM, MP3, WAV exports, imported audio                     |
+| Authentication | Supabase Auth                         | Invite-only users, magic links, session cookies                                   |
+| Email          | Resend SMTP through Supabase          | Invitation and magic-link delivery                                                |
+| Transcription  | OpenRouter                            | Timestamped speech-to-text                                                        |
+| Companion      | Chrome Manifest V3 extension          | Opens the web app and migrates legacy recordings                                  |
 
 ### Trust boundaries
 
@@ -104,12 +104,12 @@ branding is `cauli`.
 
 ### Public and routing pages
 
-| Route | Access | Component | Behavior |
-| --- | --- | --- | --- |
-| `/` | Public | `HomePage` | Redirects to `/setup`, `/login`, or `/record` based on configuration and session |
-| `/setup` | Public | `SetupPage` | Reports whether public Supabase and service-role configuration is present |
-| `/login` | Signed-out | `LoginPage`, `LoginForm` | Sends an invite-only Supabase magic link; user creation is disabled |
-| `/auth/callback` | Public callback | Route handler | Exchanges the PKCE code for a session and redirects to `/record` |
+| Route            | Access          | Component                | Behavior                                                                         |
+| ---------------- | --------------- | ------------------------ | -------------------------------------------------------------------------------- |
+| `/`              | Public          | `HomePage`               | Redirects to `/setup`, `/login`, or `/record` based on configuration and session |
+| `/setup`         | Public          | `SetupPage`              | Reports whether public Supabase and service-role configuration is present        |
+| `/login`         | Signed-out      | `LoginPage`, `LoginForm` | Sends an invite-only Supabase magic link; user creation is disabled              |
+| `/auth/callback` | Public callback | Route handler            | Exchanges the PKCE code for a session and redirects to `/record`                 |
 
 ### Authenticated application pages
 
@@ -117,14 +117,14 @@ The `(app)` route group uses `AuthenticatedLayout`. It calls
 `requirePageAuth()`, forces dynamic rendering, and wraps every page in
 `AppShell`.
 
-| Route | Roles | Page behavior |
-| --- | --- | --- |
-| `/record` | Member, manager, admin | Records Mic, Tab, or Both; shows interrupted drafts and recovery actions |
-| `/calls` | Member, manager, admin | Lists the current user's calls and exposes extension import when available |
-| `/team` | Manager, admin | Lists all visible workspace calls; members redirect to `/calls` |
-| `/calls/[id]` | Authorized viewer | Playback, metadata, transcript seeking, downloads, exports, processing errors, reviews, deletion |
-| `/admin/team` | Admin | Sends invitations, changes roles, removes members, lists pending invites |
-| `/admin/scorecards` | Admin | Edits and publishes immutable scorecard versions |
+| Route               | Roles                  | Page behavior                                                                                    |
+| ------------------- | ---------------------- | ------------------------------------------------------------------------------------------------ |
+| `/record`           | Member, manager, admin | Records Mic, Tab, or Both; shows interrupted drafts and recovery actions                         |
+| `/calls`            | Member, manager, admin | Lists the current user's calls and exposes extension import when available                       |
+| `/team`             | Manager, admin         | Lists all visible workspace calls; members redirect to `/calls`                                  |
+| `/calls/[id]`       | Authorized viewer      | Playback, metadata, transcript seeking, downloads, exports, processing errors, reviews, deletion |
+| `/admin/team`       | Admin                  | Sends invitations, changes roles, removes members, lists pending invites                         |
+| `/admin/scorecards` | Admin                  | Edits and publishes immutable scorecard versions                                                 |
 
 ### Navigation
 
@@ -138,20 +138,20 @@ The account block displays the email, role, and a sign-out action.
 
 ## 5. Primary UI Components
 
-| Component | Responsibility |
-| --- | --- |
-| `AppShell` | Role-aware navigation and account controls |
-| `LoginForm` | Magic-link sign-in using `signInWithOtp` and `shouldCreateUser: false` |
-| `RecorderPanel` | Media acquisition, mixing, chunk persistence, upload, stop/finalize, and recovery |
-| `CallTable` | Responsive call list with processing and review statuses |
-| `CallDetailClient` | Signed playback, timestamp seeking, downloads, WAV requests, retries, and deletion |
-| `ReviewEditor` | Criterion answers, comments, summary, score preview, status, optimistic submission, revision display |
-| `TeamAdmin` | Invitations, role updates, member removal, and pending invites |
-| `ScorecardAdmin` | Category and criterion editor; publishes a new immutable version |
-| `ExtensionImport` | Detects the companion extension and coordinates resumable migration |
-| `StatusPill` | Consistent call and review status presentation |
-| `PageHeader` | Page title and descriptive copy |
-| `NavItem` | Active route navigation item |
+| Component          | Responsibility                                                                                       |
+| ------------------ | ---------------------------------------------------------------------------------------------------- |
+| `AppShell`         | Role-aware navigation and account controls                                                           |
+| `LoginForm`        | Magic-link sign-in using `signInWithOtp` and `shouldCreateUser: false`                               |
+| `RecorderPanel`    | Media acquisition, mixing, chunk persistence, upload, stop/finalize, and recovery                    |
+| `CallTable`        | Responsive call list with processing and review statuses                                             |
+| `CallDetailClient` | Signed playback, timestamp seeking, downloads, WAV requests, retries, and deletion                   |
+| `ReviewEditor`     | Criterion answers, comments, summary, score preview, status, optimistic submission, revision display |
+| `TeamAdmin`        | Invitations, role updates, member removal, and pending invites                                       |
+| `ScorecardAdmin`   | Category and criterion editor; publishes a new immutable version                                     |
+| `ExtensionImport`  | Detects the companion extension and coordinates resumable migration                                  |
+| `StatusPill`       | Consistent call and review status presentation                                                       |
+| `PageHeader`       | Page title and descriptive copy                                                                      |
+| `NavItem`          | Active route navigation item                                                                         |
 
 ## 6. Authentication and Authorization
 
@@ -171,20 +171,20 @@ Normal login uses the same callback flow but calls `signInWithOtp` with
 
 ### Role matrix
 
-| Capability | Member | Manager | Admin |
-| --- | --- | --- | --- |
-| Record calls | Yes | Yes | Yes |
-| View own calls | Yes | Yes | Yes |
-| View all workspace calls | No | Yes | Yes |
-| Download visible calls | Own only | All visible | All |
-| Read reviews on visible calls | Yes | Yes | Yes |
-| Create or revise reviews | No | Yes | Yes |
-| Delete own calls | Yes | Yes | Yes |
-| Delete another user's call | No | No | Yes |
-| Retry failed visible calls | Own only | Yes | Yes |
-| Request WAV for visible calls | Own only | Yes | Yes |
-| Invite users and manage roles | No | No | Yes |
-| Publish scorecards | No | No | Yes |
+| Capability                    | Member   | Manager     | Admin |
+| ----------------------------- | -------- | ----------- | ----- |
+| Record calls                  | Yes      | Yes         | Yes   |
+| View own calls                | Yes      | Yes         | Yes   |
+| View all workspace calls      | No       | Yes         | Yes   |
+| Download visible calls        | Own only | All visible | All   |
+| Read reviews on visible calls | Yes      | Yes         | Yes   |
+| Create or revise reviews      | No       | Yes         | Yes   |
+| Delete own calls              | Yes      | Yes         | Yes   |
+| Delete another user's call    | No       | No          | Yes   |
+| Retry failed visible calls    | Own only | Yes         | Yes   |
+| Request WAV for visible calls | Own only | Yes         | Yes   |
+| Invite users and manage roles | No       | No          | Yes   |
+| Publish scorecards            | No       | No          | Yes   |
 
 ### Enforcement layers
 
@@ -368,11 +368,11 @@ audio-less records as failed.
 
 ### Session and health
 
-| Endpoint | Behavior |
-| --- | --- |
-| `POST /api/auth/signout` | Clears Supabase session and redirects to `/login` |
-| `GET /auth/callback` | Exchanges authentication code for a session |
-| `GET /api/health` | Reports process health and whether Supabase settings are present |
+| Endpoint                 | Behavior                                                         |
+| ------------------------ | ---------------------------------------------------------------- |
+| `POST /api/auth/signout` | Clears Supabase session and redirects to `/login`                |
+| `GET /auth/callback`     | Exchanges authentication code for a session                      |
+| `GET /api/health`        | Reports process health and whether Supabase settings are present |
 
 ## 8. Browser Recording System
 
@@ -440,10 +440,10 @@ Stopping:
 
 Database: `calllog-recorder`, version 1.
 
-| Store | Key | Contents |
-| --- | --- | --- |
-| `drafts` | `callId` | Source mode, storage prefix, MIME type, labels, timestamps, duration, final sequence |
-| `chunks` | `<callId>:<10-digit-sequence>` | Blob, call ID, sequence, creation time |
+| Store    | Key                            | Contents                                                                             |
+| -------- | ------------------------------ | ------------------------------------------------------------------------------------ |
+| `drafts` | `callId`                       | Source mode, storage prefix, MIME type, labels, timestamps, duration, final sequence |
+| `chunks` | `<callId>:<10-digit-sequence>` | Blob, call ID, sequence, creation time                                               |
 
 ## 9. State Models
 
@@ -511,9 +511,12 @@ replicas can claim jobs without processing the same row concurrently.
 6. Generate a 128 kbps MP3.
 7. Upload source and MP3 artifacts.
 8. Unless import metadata says to preserve an existing transcript:
-   - Generate 10-minute, 16 kHz, mono, 32 kbps MP3 segments.
+   - Generate overlapping 10-minute, 16 kHz, mono, 32 kbps MP3 segments,
+     starting every 598 seconds.
    - Transcribe at most three segments concurrently.
-   - Offset segment timestamps by their 10-minute source position.
+   - Load completed per-chunk checkpoints and submit only unfinished chunks.
+   - Offset segment timestamps by their 598-second source position and
+     de-duplicate boundary words.
    - Upsert transcript metadata.
    - Replace timestamp segment rows in batches of 500.
 9. Set the call to `ready`.
@@ -531,17 +534,23 @@ Artifact paths:
 
 ### Transcription
 
-The worker posts multipart audio to OpenRouter:
+The worker posts base64-encoded MP3 audio in OpenRouter's JSON transcription
+request format:
 
 - Default model: `openai/whisper-large-v3-turbo`
-- Response format: `verbose_json`
-- Timestamp granularity: `segment`
-- Language: auto-detected unless `TRANSCRIPTION_LANGUAGE` is configured
+- Availability fallback: `openai/whisper-large-v3`
+- Language: English
+- Provider privacy: `zdr: true` and `data_collection: deny`
+- Retryable failures: network, timeout, 408, 429, and 5xx
+- Permanent failures: authentication, billing, and invalid requests
+- Maximum attempts per model/chunk: 5 with Retry-After or exponential
+  backoff and jitter
 - Per-call segment request concurrency: 3
 - Request timeout: 60 seconds per segment
 
-Stored provider metadata includes generation IDs, model, language, reported
-cost, and reported duration.
+Each completed chunk is stored before the next worker lifecycle can begin.
+Stored provider metadata includes chunk index, generation ID, model, language,
+reported cost, reported duration, and completion time.
 
 ### WAV export
 
@@ -603,55 +612,55 @@ database recalculates the authoritative score during submission.
 
 ### Workspace and identity
 
-| Table | Purpose |
-| --- | --- |
-| `workspaces` | Workspace identity; currently seeded with one cauli workspace |
-| `profiles` | Application profile corresponding to `auth.users` |
-| `workspace_members` | Workspace role assignment |
-| `workspace_invites` | Seven-day email invitation and requested role |
+| Table               | Purpose                                                       |
+| ------------------- | ------------------------------------------------------------- |
+| `workspaces`        | Workspace identity; currently seeded with one cauli workspace |
+| `profiles`          | Application profile corresponding to `auth.users`             |
+| `workspace_members` | Workspace role assignment                                     |
+| `workspace_invites` | Seven-day email invitation and requested role                 |
 
 ### Calls and processing
 
-| Table | Purpose |
-| --- | --- |
-| `calls` | Recording metadata, state, artifact paths, labels, duration, soft deletion |
-| `transcripts` | One transcript and provider metadata per call |
-| `transcript_segments` | Ordered timestamped transcript segments |
-| `processing_jobs` | Idempotent worker queue with locking, attempts, and backoff |
-| `export_jobs` | User-requested WAV export state |
+| Table                 | Purpose                                                                    |
+| --------------------- | -------------------------------------------------------------------------- |
+| `calls`               | Recording metadata, state, artifact paths, labels, duration, soft deletion |
+| `transcripts`         | One transcript and provider metadata per call                              |
+| `transcript_segments` | Ordered timestamped transcript segments                                    |
+| `processing_jobs`     | Idempotent worker queue with locking, attempts, and backoff                |
+| `export_jobs`         | User-requested WAV export state                                            |
 
 ### Scorecards and reviews
 
-| Table | Purpose |
-| --- | --- |
-| `scorecard_templates` | Stable named scorecard |
-| `scorecard_versions` | Immutable published version header |
-| `scorecard_categories` | Ordered version categories |
-| `scorecard_criteria` | Ordered weighted criteria |
-| `call_reviews` | One canonical review per call |
-| `call_review_answers` | Current answer and comment per criterion |
-| `review_revisions` | Immutable submission snapshots |
+| Table                  | Purpose                                  |
+| ---------------------- | ---------------------------------------- |
+| `scorecard_templates`  | Stable named scorecard                   |
+| `scorecard_versions`   | Immutable published version header       |
+| `scorecard_categories` | Ordered version categories               |
+| `scorecard_criteria`   | Ordered weighted criteria                |
+| `call_reviews`         | One canonical review per call            |
+| `call_review_answers`  | Current answer and comment per criterion |
+| `review_revisions`     | Immutable submission snapshots           |
 
 ### Migration and audit
 
-| Table | Purpose |
-| --- | --- |
-| `extension_imports` | Deduplicated, resumable legacy import state |
-| `audit_events` | Administrative event log; currently invitation creation is recorded |
+| Table               | Purpose                                                             |
+| ------------------- | ------------------------------------------------------------------- |
+| `extension_imports` | Deduplicated, resumable legacy import state                         |
+| `audit_events`      | Administrative event log; currently invitation creation is recorded |
 
 ## 13. Database Functions and Triggers
 
-| Function | Responsibility |
-| --- | --- |
-| `set_updated_at()` | Maintains `updated_at` on mutable tables |
-| `handle_new_user()` | Creates/updates profile, accepts matching invite, creates membership |
-| `current_user_role(workspace_id)` | Returns the signed-in user's workspace role |
-| `can_view_call(call_id)` | Applies owner/member versus manager/admin visibility |
-| `can_review_call(call_id)` | Allows managers/admins in the call workspace |
-| `submit_call_review(...)` | Locks review, checks version, replaces current answers, calculates score, writes revision |
-| `claim_processing_job(worker_name)` | Atomically claims one eligible job with `SKIP LOCKED` |
-| `finalize_call(...)` | Idempotently finalizes call metadata and creates/resets processing job |
-| `publish_scorecard(...)` | Creates a template if needed and publishes ordered immutable content |
+| Function                            | Responsibility                                                                            |
+| ----------------------------------- | ----------------------------------------------------------------------------------------- |
+| `set_updated_at()`                  | Maintains `updated_at` on mutable tables                                                  |
+| `handle_new_user()`                 | Creates/updates profile, accepts matching invite, creates membership                      |
+| `current_user_role(workspace_id)`   | Returns the signed-in user's workspace role                                               |
+| `can_view_call(call_id)`            | Applies owner/member versus manager/admin visibility                                      |
+| `can_review_call(call_id)`          | Allows managers/admins in the call workspace                                              |
+| `submit_call_review(...)`           | Locks review, checks version, replaces current answers, calculates score, writes revision |
+| `claim_processing_job(worker_name)` | Atomically claims one eligible job with `SKIP LOCKED`                                     |
+| `finalize_call(...)`                | Idempotently finalizes call metadata and creates/resets processing job                    |
+| `publish_scorecard(...)`            | Creates a template if needed and publishes ordered immutable content                      |
 
 `claim_processing_job`, `finalize_call`, and `publish_scorecard` are restricted
 to the service role. `submit_call_review` is executable by authenticated users
@@ -777,76 +786,76 @@ completed legacy transcript is not available.
 
 #### Types and constants
 
-| Export | Purpose |
-| --- | --- |
-| `ROLES`, `Role` | `member`, `manager`, `admin` |
-| `SOURCE_MODES`, `SourceMode` | `mic`, `tab`, `both` |
-| `CALL_STATUSES`, `CallStatus` | Persisted call lifecycle |
-| `REVIEW_STATUSES`, `ReviewStatus` | Review lifecycle |
-| `JobStatus`, `ProcessingJobKind` | Worker job contract |
-| `WorkspaceMember` | User/workspace/role authorization subject |
-| `CallAccessSubject` | Minimal call authorization subject |
-| `ScoreAnswer` | Weighted criterion answer |
-| `TranscriptSegment` | Normalized timestamp segment in milliseconds |
-| `ProviderTranscriptSegment` | Provider timestamp segment in seconds |
-| `CallSummary` | Shared call list representation |
+| Export                            | Purpose                                      |
+| --------------------------------- | -------------------------------------------- |
+| `ROLES`, `Role`                   | `member`, `manager`, `admin`                 |
+| `SOURCE_MODES`, `SourceMode`      | `mic`, `tab`, `both`                         |
+| `CALL_STATUSES`, `CallStatus`     | Persisted call lifecycle                     |
+| `REVIEW_STATUSES`, `ReviewStatus` | Review lifecycle                             |
+| `JobStatus`, `ProcessingJobKind`  | Worker job contract                          |
+| `WorkspaceMember`                 | User/workspace/role authorization subject    |
+| `CallAccessSubject`               | Minimal call authorization subject           |
+| `ScoreAnswer`                     | Weighted criterion answer                    |
+| `TranscriptSegment`               | Normalized timestamp segment in milliseconds |
+| `ProviderTranscriptSegment`       | Provider timestamp segment in seconds        |
+| `CallSummary`                     | Shared call list representation              |
 
 #### Validation
 
-| Export | Purpose |
-| --- | --- |
-| `roleSchema` | Valid role |
-| `sourceModeSchema` | Valid capture source |
-| `callStatusSchema` | Valid call state |
-| `reviewStatusSchema` | Valid review state |
-| `createCallSchema` | Capture mode and device label validation |
-| `finalizeCallSchema` | Final sequence, positive duration, MIME, mode, labels |
-| `reviewAnswerSchema` | Criterion UUID, 1-5 or N/A, 4,000-char comment |
-| `submitReviewSchema` | Expected version, non-unreviewed state, summary, answers |
-| `extensionRecordingSchema` | Normalized legacy metadata |
-| `prepareExtensionImportSchema` | Nonce plus up to 2,000 recordings |
-| `completeExtensionImportSchema` | Nonce plus up to 2,000 upload results |
-| `createScorecardTemplateSchema` | Name, categories, criteria, weights, limits |
+| Export                          | Purpose                                                  |
+| ------------------------------- | -------------------------------------------------------- |
+| `roleSchema`                    | Valid role                                               |
+| `sourceModeSchema`              | Valid capture source                                     |
+| `callStatusSchema`              | Valid call state                                         |
+| `reviewStatusSchema`            | Valid review state                                       |
+| `createCallSchema`              | Capture mode and device label validation                 |
+| `finalizeCallSchema`            | Final sequence, positive duration, MIME, mode, labels    |
+| `reviewAnswerSchema`            | Criterion UUID, 1-5 or N/A, 4,000-char comment           |
+| `submitReviewSchema`            | Expected version, non-unreviewed state, summary, answers |
+| `extensionRecordingSchema`      | Normalized legacy metadata                               |
+| `prepareExtensionImportSchema`  | Nonce plus up to 2,000 recordings                        |
+| `completeExtensionImportSchema` | Nonce plus up to 2,000 upload results                    |
+| `createScorecardTemplateSchema` | Name, categories, criteria, weights, limits              |
 
 #### Authorization and state
 
-| Function | Behavior |
-| --- | --- |
-| `canViewCall(member, call)` | Workspace match and owner-or-manager/admin rule |
-| `canDeleteCall(member, call)` | Workspace match and owner-or-admin rule |
-| `canReviewCall(member, call)` | Workspace manager/admin rule |
-| `canManageWorkspace(role)` | Admin-only workspace management |
-| `canTransitionCall(from, to)` | Boolean persisted-state transition check |
-| `assertCallTransition(from, to)` | Throws on an invalid transition |
+| Function                         | Behavior                                        |
+| -------------------------------- | ----------------------------------------------- |
+| `canViewCall(member, call)`      | Workspace match and owner-or-manager/admin rule |
+| `canDeleteCall(member, call)`    | Workspace match and owner-or-admin rule         |
+| `canReviewCall(member, call)`    | Workspace manager/admin rule                    |
+| `canManageWorkspace(role)`       | Admin-only workspace management                 |
+| `canTransitionCall(from, to)`    | Boolean persisted-state transition check        |
+| `assertCallTransition(from, to)` | Throws on an invalid transition                 |
 
 #### Scoring and transcripts
 
-| Function | Behavior |
-| --- | --- |
-| `calculateNormalizedScore(answers)` | Returns weighted 0-100 score or `null` |
+| Function                                                      | Behavior                                                |
+| ------------------------------------------------------------- | ------------------------------------------------------- |
+| `calculateNormalizedScore(answers)`                           | Returns weighted 0-100 score or `null`                  |
 | `offsetTranscriptSegments(segments, offsetMs, sequenceStart)` | Converts seconds to milliseconds and adds source offset |
-| `transcriptText(segments)` | Sorts segments and joins non-empty text |
+| `transcriptText(segments)`                                    | Sorts segments and joins non-empty text                 |
 
 ### Web utilities: `apps/web/src/lib`
 
 #### Environment
 
-| Export | Behavior |
-| --- | --- |
-| `publicEnv` | Supabase URL, anonymous key, normalized app URL |
-| `serverEnv` | Public settings plus service role and bootstrap email |
-| `isSupabaseConfigured()` | Checks URL and anonymous key |
-| `isServiceRoleConfigured()` | Checks public settings plus service role |
-| `requireSupabaseEnv()` | Returns public settings or throws |
-| `requireServiceRoleEnv()` | Returns privileged settings or throws |
+| Export                      | Behavior                                              |
+| --------------------------- | ----------------------------------------------------- |
+| `publicEnv`                 | Supabase URL, anonymous key, normalized app URL       |
+| `serverEnv`                 | Public settings plus service role and bootstrap email |
+| `isSupabaseConfigured()`    | Checks URL and anonymous key                          |
+| `isServiceRoleConfigured()` | Checks public settings plus service role              |
+| `requireSupabaseEnv()`      | Returns public settings or throws                     |
+| `requireServiceRoleEnv()`   | Returns privileged settings or throws                 |
 
 #### Formatting
 
-| Function | Behavior |
-| --- | --- |
-| `formatDuration(durationMs)` | Formats `MM:SS` or `HH:MM:SS` |
-| `formatDate(value)` | Locale-aware medium date and short time |
-| `formatBytes(bytes)` | Formats B, KB, MB, or GB |
+| Function                     | Behavior                                |
+| ---------------------------- | --------------------------------------- |
+| `formatDuration(durationMs)` | Formats `MM:SS` or `HH:MM:SS`           |
+| `formatDate(value)`          | Locale-aware medium date and short time |
+| `formatBytes(bytes)`         | Formats B, KB, MB, or GB                |
 
 #### IndexedDB recording persistence
 
@@ -854,17 +863,17 @@ completed legacy transcript is not available.
 session to its server call, workspace, Storage prefix, capture metadata, timing,
 and final chunk sequence.
 
-| Function | Behavior |
-| --- | --- |
-| `openDatabase()` | Opens/upgrades the browser recording database |
+| Function                                 | Behavior                                         |
+| ---------------------------------------- | ------------------------------------------------ |
+| `openDatabase()`                         | Opens/upgrades the browser recording database    |
 | `runTransaction(store, mode, operation)` | Executes one IDB request and closes the database |
-| `saveDraft(draft)` | Upserts recording draft metadata |
-| `deleteDraft(callId)` | Deletes draft metadata |
-| `listDrafts()` | Returns all local drafts |
-| `saveChunk(callId, sequence, blob)` | Stores a deterministic chunk record |
-| `deleteChunk(callId, sequence)` | Removes one uploaded local chunk |
-| `listChunks(callId)` | Returns call chunks sorted by sequence |
-| `deleteCallDraft(callId)` | Removes all local chunks and draft metadata |
+| `saveDraft(draft)`                       | Upserts recording draft metadata                 |
+| `deleteDraft(callId)`                    | Deletes draft metadata                           |
+| `listDrafts()`                           | Returns all local drafts                         |
+| `saveChunk(callId, sequence, blob)`      | Stores a deterministic chunk record              |
+| `deleteChunk(callId, sequence)`          | Removes one uploaded local chunk                 |
+| `listChunks(callId)`                     | Returns call chunks sorted by sequence           |
+| `deleteCallDraft(callId)`                | Removes all local chunks and draft metadata      |
 
 #### Authentication
 
@@ -872,174 +881,175 @@ and final chunk sequence.
 deployment. `AuthContext` combines the authenticated user's ID/email with their
 `WorkspaceMember` authorization subject.
 
-| Function | Behavior |
-| --- | --- |
-| `getAuthContext()` | Resolves Supabase user and first workspace membership |
-| `requirePageAuth()` | Redirects unauthenticated pages to login/setup |
-| `requireApiAuth(roles?)` | Returns auth context or JSON 401/403 response |
-| `isAuthError(value)` | Type guard for an auth error response |
+| Function                 | Behavior                                              |
+| ------------------------ | ----------------------------------------------------- |
+| `getAuthContext()`       | Resolves Supabase user and first workspace membership |
+| `requirePageAuth()`      | Redirects unauthenticated pages to login/setup        |
+| `requireApiAuth(roles?)` | Returns auth context or JSON 401/403 response         |
+| `isAuthError(value)`     | Type guard for an auth error response                 |
 
 #### Call authorization and queries
 
-| Function | Behavior |
-| --- | --- |
-| `getCallAccessSubject(callId)` | Service-role fetch of minimal call access fields |
-| `authorizeCall(context, id, action)` | Applies view/delete/review/owner rule |
-| `listCalls(ownerId?)` | RLS-protected newest-first call list, limited to 250 |
-| `ownerLabel(owner)` | Chooses profile display name, email, or `Unknown` |
+| Function                             | Behavior                                             |
+| ------------------------------------ | ---------------------------------------------------- |
+| `getCallAccessSubject(callId)`       | Service-role fetch of minimal call access fields     |
+| `authorizeCall(context, id, action)` | Applies view/delete/review/owner rule                |
+| `listCalls(ownerId?)`                | RLS-protected newest-first call list, limited to 250 |
+| `ownerLabel(owner)`                  | Chooses profile display name, email, or `Unknown`    |
 
 #### HTTP and crypto
 
-| Function | Behavior |
-| --- | --- |
-| `parseJson(request, schema)` | Parses JSON and returns structured Zod validation errors |
-| `sanitizeError(error)` | Redacts bearer tokens/signed URLs and limits text to 1,000 chars |
-| `sha256(value)` | Browser-compatible SHA-256 hex digest |
-| `audioExtension(mimeType)` | Maps MIME type to `mp3`, `wav`, `ogg`, `m4a`, or default `webm` |
+| Function                     | Behavior                                                         |
+| ---------------------------- | ---------------------------------------------------------------- |
+| `parseJson(request, schema)` | Parses JSON and returns structured Zod validation errors         |
+| `sanitizeError(error)`       | Redacts bearer tokens/signed URLs and limits text to 1,000 chars |
+| `sha256(value)`              | Browser-compatible SHA-256 hex digest                            |
+| `audioExtension(mimeType)`   | Maps MIME type to `mp3`, `wav`, `ogg`, `m4a`, or default `webm`  |
 
 #### Supabase clients
 
-| Function | Behavior |
-| --- | --- |
-| `createBrowserSupabaseClient()` | Memoized browser client using session cookies |
-| `createServerSupabaseClient()` | Request-scoped SSR client with cookie integration |
-| `createAdminSupabaseClient()` | Non-persistent service-role client |
-| `proxy(request)` | Refreshes the user session and propagates updated cookies |
+| Function                        | Behavior                                                  |
+| ------------------------------- | --------------------------------------------------------- |
+| `createBrowserSupabaseClient()` | Memoized browser client using session cookies             |
+| `createServerSupabaseClient()`  | Request-scoped SSR client with cookie integration         |
+| `createAdminSupabaseClient()`   | Non-persistent service-role client                        |
+| `proxy(request)`                | Refreshes the user session and propagates updated cookies |
 
 ### Recorder workflow helpers
 
-| Function | Behavior |
-| --- | --- |
-| `formatElapsed(ms)` | Recorder-specific elapsed display |
-| `supportedMimeType()` | Selects supported Opus WebM MIME |
-| `acquireCapture(mode)` | Requests devices, validates tab audio, and mixes sources |
-| `uploadChunk(prefix, callId, sequence, blob)` | Uploads deterministic chunk and deletes local copy |
-| `finalizeDraft(draft)` | Replays local chunks, calls finalize API, deletes local draft |
-| `refreshDrafts()` | Reloads/sorts interrupted drafts |
-| `cleanCapture()` | Stops tracks and closes the audio context |
-| `stopRecording(reason?)` | Stops, persists, drains upload pipeline, and finalizes |
-| `startRecording()` | Acquires media, creates call/draft/recorder, and starts chunking |
-| `recoverDraft(draft)` | Uploads/finalizes an interrupted recording |
-| `discardDraft(draft)` | Deletes server call and local recording data |
+| Function                                      | Behavior                                                         |
+| --------------------------------------------- | ---------------------------------------------------------------- |
+| `formatElapsed(ms)`                           | Recorder-specific elapsed display                                |
+| `supportedMimeType()`                         | Selects supported Opus WebM MIME                                 |
+| `acquireCapture(mode)`                        | Requests devices, validates tab audio, and mixes sources         |
+| `uploadChunk(prefix, callId, sequence, blob)` | Uploads deterministic chunk and deletes local copy               |
+| `finalizeDraft(draft)`                        | Replays local chunks, calls finalize API, deletes local draft    |
+| `refreshDrafts()`                             | Reloads/sorts interrupted drafts                                 |
+| `cleanCapture()`                              | Stops tracks and closes the audio context                        |
+| `stopRecording(reason?)`                      | Stops, persists, drains upload pipeline, and finalizes           |
+| `startRecording()`                            | Acquires media, creates call/draft/recorder, and starts chunking |
+| `recoverDraft(draft)`                         | Uploads/finalizes an interrupted recording                       |
+| `discardDraft(draft)`                         | Deletes server call and local recording data                     |
 
 ### Worker utilities: `apps/worker/src`
 
 #### Configuration and logging
 
-| Function/export | Behavior |
-| --- | --- |
-| `required(name)` | Reads a required environment value |
-| `positiveInteger(name, fallback)` | Parses a positive integer setting |
-| `config` | Validated worker runtime settings |
-| `supabase` | Non-persistent service-role client used by the worker |
-| `log.info/error` | Structured JSON log output |
-| `sanitizedError(error)` | Redacts bearer credentials and signed URLs, then limits text to 1,000 chars |
+| Function/export                   | Behavior                                                                    |
+| --------------------------------- | --------------------------------------------------------------------------- |
+| `required(name)`                  | Reads a required environment value                                          |
+| `positiveInteger(name, fallback)` | Parses a positive integer setting                                           |
+| `config`                          | Validated worker runtime settings                                           |
+| `supabase`                        | Non-persistent service-role client used by the worker                       |
+| `log.info/error`                  | Structured JSON log output                                                  |
+| `sanitizedError(error)`           | Redacts bearer credentials and signed URLs, then limits text to 1,000 chars |
 
 #### Process and file helpers
 
-| Function | Behavior |
-| --- | --- |
-| `runProcess(command, args)` | Spawns a process and retains bounded stderr for errors |
-| `runFfmpeg(args)` | Runs configured FFmpeg with quiet, overwrite-safe flags |
-| `ensureDirectory(path)` | Recursive directory creation |
-| `writeResponseBody(response, path)` | Streams a Fetch response to disk |
-| `concatenateFiles(paths, output)` | Reads ordered files and concatenates buffers |
-| `listMatchingFiles(directory, pattern)` | Returns sorted matching paths |
-| `fileExists(path)` | Boolean filesystem access check |
-| `fileSize(path)` | Returns file byte size |
-| `removeDirectory(path)` | Recursive, forceful temporary cleanup |
+| Function                                | Behavior                                                |
+| --------------------------------------- | ------------------------------------------------------- |
+| `runProcess(command, args)`             | Spawns a process and retains bounded stderr for errors  |
+| `runFfmpeg(args)`                       | Runs configured FFmpeg with quiet, overwrite-safe flags |
+| `ensureDirectory(path)`                 | Recursive directory creation                            |
+| `writeResponseBody(response, path)`     | Streams a Fetch response to disk                        |
+| `concatenateFiles(paths, output)`       | Reads ordered files and concatenates buffers            |
+| `listMatchingFiles(directory, pattern)` | Returns sorted matching paths                           |
+| `fileExists(path)`                      | Boolean filesystem access check                         |
+| `fileSize(path)`                        | Returns file byte size                                  |
+| `removeDirectory(path)`                 | Recursive, forceful temporary cleanup                   |
 
 #### Storage helpers
 
-| Function | Behavior |
-| --- | --- |
-| `listStorageFiles(prefix)` | Paginates Storage objects in pages of 1,000 |
-| `downloadStorageFile(storagePath, localPath)` | Streams private object to local disk |
-| `uploadStorageFile(localPath, storagePath, contentType)` | Upserts an artifact |
-| `removeStorageFiles(paths)` | Deletes objects in batches of 100 |
-| `downloadChunkSequence(prefix, final, directory)` | Verifies continuity and downloads ordered chunks |
+| Function                                                 | Behavior                                         |
+| -------------------------------------------------------- | ------------------------------------------------ |
+| `listStorageFiles(prefix)`                               | Paginates Storage objects in pages of 1,000      |
+| `downloadStorageFile(storagePath, localPath)`            | Streams private object to local disk             |
+| `uploadStorageFile(localPath, storagePath, contentType)` | Upserts an artifact                              |
+| `removeStorageFiles(paths)`                              | Deletes objects in batches of 100                |
+| `downloadChunkSequence(prefix, final, directory)`        | Verifies continuity and downloads ordered chunks |
 
 #### Transcription helpers
 
 `TranscriptionResult` contains normalized segments, merged text, detected
 language, reported duration/cost, and provider generation IDs.
 
-| Function | Behavior |
-| --- | --- |
-| `mapConcurrent(items, concurrency, operation)` | Order-preserving bounded concurrency |
-| `transcribeSegment(path, index)` | Sends one segment to OpenRouter and captures generation ID |
-| `transcribeAudioSegments(paths)` | Merges text, timestamps, cost, duration, language, and IDs |
+| Function                                       | Behavior                                                   |
+| ---------------------------------------------- | ---------------------------------------------------------- |
+| `mapConcurrent(items, concurrency, operation)` | Order-preserving bounded concurrency                       |
+| `transcribeSegment(path, index)`               | Sends one segment to OpenRouter and captures generation ID |
+| `transcribeAudioSegments(paths)`               | Merges text, timestamps, cost, duration, language, and IDs |
 
 #### Job functions
 
-| Function | Behavior |
-| --- | --- |
-| `loadCall(callId)` | Loads processing fields for one call |
-| `processRecording(job)` | Assembles, converts, transcribes, uploads, and completes a call |
-| `generateWav(job)` | Produces and records a WAV artifact |
-| `deleteCall(job)` | Deletes all storage prefixes and then the call row |
-| `handleJob(job)` | Dispatches by job kind |
-| `claimJob()` | Calls the atomic Postgres claim function |
-| `runJob(job)` | Handles logging, completion, exponential retry, and terminal failure |
-| `cleanupAbandonedCalls()` | Expires seven-day incomplete recordings and removes chunks |
-| `workerLoop(index)` | Polls and runs jobs until shutdown |
-| `shutdown(signal)` | Stops accepting work and gives active jobs up to 30 seconds |
+| Function                  | Behavior                                                             |
+| ------------------------- | -------------------------------------------------------------------- |
+| `loadCall(callId)`        | Loads processing fields for one call                                 |
+| `processRecording(job)`   | Assembles, converts, transcribes, uploads, and completes a call      |
+| `generateWav(job)`        | Produces and records a WAV artifact                                  |
+| `deleteCall(job)`         | Deletes all storage prefixes and then the call row                   |
+| `handleJob(job)`          | Dispatches by job kind                                               |
+| `claimJob()`              | Calls the atomic Postgres claim function                             |
+| `runJob(job)`             | Handles logging, completion, exponential retry, and terminal failure |
+| `cleanupAbandonedCalls()` | Expires seven-day incomplete recordings and removes chunks           |
+| `workerLoop(index)`       | Polls and runs jobs until shutdown                                   |
+| `shutdown(signal)`        | Stops accepting work and gives active jobs up to 30 seconds          |
 
 ### Extension utilities: `apps/extension`
 
-| Function/module | Behavior |
-| --- | --- |
-| `openAudioDatabase()` | Opens the legacy extension IndexedDB |
-| `readAudioRecords()` | Reads all legacy audio blob records |
-| `legacyAudioMap(records)` | Indexes valid blobs by recording ID and kind |
-| `listLegacyRecordings()` | Joins Chrome metadata with blob availability |
-| `validateUploadUrl(value)` | Restricts upload URL origin and path |
-| `uploadSigned(upload, blob)` | Posts one blob to a signed Storage target |
-| `uploadLegacyRecordings(items)` | Uploads source/converted blobs and reports per-item results |
-| `migration-bridge.js` | Validates page messages and relays requests to the service worker |
-| `background.js` | App launcher, migration authorization, and retained legacy capture routing |
-| `content.js` | Retained microphone permission/capture bridge for legacy behavior |
-| `offscreen.js` | Retained offscreen microphone capture |
-| `recorder.js` | Retained synchronized tab and microphone recorder |
-| `sidepanel.js` | Retained transition-release legacy recorder UI and local library |
-| `build.mjs` | Produces an origin-restricted distributable extension |
+| Function/module                 | Behavior                                                                   |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| `openAudioDatabase()`           | Opens the legacy extension IndexedDB                                       |
+| `readAudioRecords()`            | Reads all legacy audio blob records                                        |
+| `legacyAudioMap(records)`       | Indexes valid blobs by recording ID and kind                               |
+| `listLegacyRecordings()`        | Joins Chrome metadata with blob availability                               |
+| `validateUploadUrl(value)`      | Restricts upload URL origin and path                                       |
+| `uploadSigned(upload, blob)`    | Posts one blob to a signed Storage target                                  |
+| `uploadLegacyRecordings(items)` | Uploads source/converted blobs and reports per-item results                |
+| `migration-bridge.js`           | Validates page messages and relays requests to the service worker          |
+| `background.js`                 | App launcher, migration authorization, and retained legacy capture routing |
+| `content.js`                    | Retained microphone permission/capture bridge for legacy behavior          |
+| `offscreen.js`                  | Retained offscreen microphone capture                                      |
+| `recorder.js`                   | Retained synchronized tab and microphone recorder                          |
+| `sidepanel.js`                  | Retained transition-release legacy recorder UI and local library           |
+| `build.mjs`                     | Produces an origin-restricted distributable extension                      |
 
 ## 18. Environment Variables
 
 ### Web service
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `NEXT_PUBLIC_SUPABASE_URL` | Yes | Browser/server Supabase origin |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes | Public RLS-bound API key |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Privileged API operations |
-| `APP_URL` | Yes in production | Auth callback and public origin |
-| `BOOTSTRAP_ADMIN_EMAIL` | Bootstrap only | First admin identity |
-| `OPENROUTER_API_KEY` | Not used by current web runtime | Shared deployment convenience |
-| `OPENROUTER_STT_MODEL` | Not used by current web runtime | Shared deployment convenience |
-| `TRANSCRIPTION_LANGUAGE` | Not used by current web runtime | Shared deployment convenience |
-| `CALLLOG_WEB_ORIGIN` | Extension build | Exact companion web origin |
+| Variable                        | Required                        | Purpose                         |
+| ------------------------------- | ------------------------------- | ------------------------------- |
+| `NEXT_PUBLIC_SUPABASE_URL`      | Yes                             | Browser/server Supabase origin  |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes                             | Public RLS-bound API key        |
+| `SUPABASE_SERVICE_ROLE_KEY`     | Yes                             | Privileged API operations       |
+| `APP_URL`                       | Yes in production               | Auth callback and public origin |
+| `BOOTSTRAP_ADMIN_EMAIL`         | Bootstrap only                  | First admin identity            |
+| `OPENROUTER_API_KEY`            | Not used by current web runtime | Shared deployment convenience   |
+| `OPENROUTER_STT_MODEL`          | Not used by current web runtime | Shared deployment convenience   |
+| `TRANSCRIPTION_LANGUAGE`        | Not used by current web runtime | Shared deployment convenience   |
+| `CALLLOG_WEB_ORIGIN`            | Extension build                 | Exact companion web origin      |
 
 ### Worker service
 
-| Variable | Required | Default/purpose |
-| --- | --- | --- |
-| `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase origin |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Database and private Storage access |
-| `OPENROUTER_API_KEY` | Yes | Speech-to-text provider credential |
-| `OPENROUTER_STT_MODEL` | No | `openai/whisper-large-v3-turbo` |
-| `TRANSCRIPTION_LANGUAGE` | No | Empty means auto-detect |
-| `WORKER_POLL_MS` | No | `2000` |
-| `WORKER_CONCURRENCY` | No | `1` |
-| `FFMPEG_PATH` | No | `ffmpeg` |
-| `PORT` | No | `8080` |
-| `RAILWAY_REPLICA_ID` | Railway | Stable worker lock/log identity |
+| Variable                    | Required | Default/purpose                     |
+| --------------------------- | -------- | ----------------------------------- |
+| `NEXT_PUBLIC_SUPABASE_URL`  | Yes      | Supabase origin                     |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes      | Database and private Storage access |
+| `OPENROUTER_API_KEY`        | Yes      | Speech-to-text provider credential  |
+| `OPENROUTER_STT_MODEL`      | No       | `openai/whisper-large-v3-turbo`     |
+| `TRANSCRIPTION_LANGUAGE`    | No       | `en`                                |
+| `WORKER_POLL_MS`            | No       | `2000`                              |
+| `WORKER_CONCURRENCY`        | No       | `1`                                 |
+| `FFMPEG_PATH`               | No       | `ffmpeg`                            |
+| `FFPROBE_PATH`              | No       | `ffprobe`                           |
+| `PORT`                      | No       | `8080`                              |
+| `RAILWAY_REPLICA_ID`        | Railway  | Stable worker lock/log identity     |
 
 ### Extension build
 
-| Variable | Purpose |
-| --- | --- |
-| `CALLLOG_WEB_ORIGIN` | Exact allowed cauli web origin |
+| Variable                  | Purpose                            |
+| ------------------------- | ---------------------------------- |
+| `CALLLOG_WEB_ORIGIN`      | Exact allowed cauli web origin     |
 | `CALLLOG_SUPABASE_ORIGIN` | Exact allowed signed-upload origin |
 
 Resend settings are configured in Supabase Auth SMTP, not in this repository's
@@ -1097,10 +1107,12 @@ npm run lint
 npm run test:e2e -w @calllog/web
 ```
 
-Manual release testing should additionally cover real Chrome and Edge media
-permissions, tab-audio selection, stopped sharing, microphone disconnect,
-network loss, refresh recovery, long recordings, worker restarts, role
-boundaries, and migration from a populated legacy extension profile.
+Manual release testing should additionally cover real Chrome stable on macOS
+and Windows 11, with full SalesGod CRM and Athena Text coverage plus Google Meet
+and Zoom smoke tests. Exercise media permissions, tab-audio selection, stopped
+sharing, microphone disconnect, network loss, refresh recovery, the three-hour
+soak, worker restarts, role boundaries, and migration from a populated legacy
+extension profile.
 
 ## 21. Security and Operational Notes
 
@@ -1114,9 +1126,10 @@ boundaries, and migration from a populated legacy extension profile.
   branding changes; they are compatibility identifiers.
 - `sanitizeError` and worker `sanitizedError` are the final logging boundary.
   Do not log request bodies containing transcripts or signed media URLs.
-- The current Storage object limit can constrain long assembled artifacts.
-- `concatenateFiles` currently holds all chunk buffers in worker memory while
-  assembling; memory requirements grow with recording duration.
+- The private recordings bucket allows 512 MB objects. Re-evaluate this limit
+  before increasing the three-hour call maximum or audio bitrate.
+- Recording chunks are concatenated as streams, so assembly does not retain the
+  full source audio in worker memory.
 - The call list intentionally limits results to the newest 250 calls and does
   not yet expose pagination.
 - Calls have a nullable title but no title-editing endpoint in the current UI.
@@ -1129,17 +1142,17 @@ boundaries, and migration from a populated legacy extension profile.
 
 ## 22. Common Change Locations
 
-| Change | Primary files |
-| --- | --- |
-| Add a page | `apps/web/src/app`, `AppShell.tsx` |
-| Add an API endpoint | `apps/web/src/app/api`, shared Zod schema |
-| Change role behavior | `packages/shared/src/authorization.ts`, API authorization, migration RLS |
-| Change call states | `packages/shared/src/types.ts`, `states.ts`, Postgres enum/functions |
-| Change recording behavior | `RecorderPanel.tsx`, `recording-db.ts` |
-| Change processing | `apps/worker/src/jobs.ts`, `process.ts`, `storage.ts` |
-| Change transcription | `apps/worker/src/transcribe.ts`, worker environment |
-| Change score calculation | shared `scoring.ts` and `submit_call_review` SQL |
-| Change database structure | new file in `supabase/migrations` |
-| Change migration protocol | `ExtensionImport.tsx`, extension bridge/background, import API |
-| Change production origin | Railway `APP_URL`, Supabase redirect URLs, extension rebuild |
-| Change email sender | Supabase Auth SMTP configuration |
+| Change                    | Primary files                                                            |
+| ------------------------- | ------------------------------------------------------------------------ |
+| Add a page                | `apps/web/src/app`, `AppShell.tsx`                                       |
+| Add an API endpoint       | `apps/web/src/app/api`, shared Zod schema                                |
+| Change role behavior      | `packages/shared/src/authorization.ts`, API authorization, migration RLS |
+| Change call states        | `packages/shared/src/types.ts`, `states.ts`, Postgres enum/functions     |
+| Change recording behavior | `RecorderPanel.tsx`, `recording-db.ts`                                   |
+| Change processing         | `apps/worker/src/jobs.ts`, `process.ts`, `storage.ts`                    |
+| Change transcription      | `apps/worker/src/transcribe.ts`, worker environment                      |
+| Change score calculation  | shared `scoring.ts` and `submit_call_review` SQL                         |
+| Change database structure | new file in `supabase/migrations`                                        |
+| Change migration protocol | `ExtensionImport.tsx`, extension bridge/background, import API           |
+| Change production origin  | Railway `APP_URL`, Supabase redirect URLs, extension rebuild             |
+| Change email sender       | Supabase Auth SMTP configuration                                         |

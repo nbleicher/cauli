@@ -1,8 +1,4 @@
-import type {
-  CallStatus,
-  ReviewStatus,
-  SourceMode,
-} from "@calllog/shared";
+import type { CallStatus, ReviewStatus, SourceMode } from "@calllog/shared";
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -19,7 +15,7 @@ interface ProfileRelation {
 }
 
 function firstRelation<T>(relation: T | T[] | null): T | null {
-  return Array.isArray(relation) ? relation[0] ?? null : relation;
+  return Array.isArray(relation) ? (relation[0] ?? null) : relation;
 }
 
 export default async function CallDetailPage({
@@ -33,18 +29,23 @@ export default async function CallDetailPage({
 
   const { data: rawCall } = await supabase
     .from("calls")
-    .select(`
+    .select(
+      `
       id, workspace_id, owner_id, title, source_mode, status, review_status,
       started_at, duration_ms, mic_label, tab_label, source_bytes, error_message,
+      degraded, degraded_intervals,
       source_path, mp3_path, wav_path,
       owner:profiles!calls_owner_id_fkey(display_name, email)
-    `)
+    `
+    )
     .eq("id", id)
     .is("deleted_at", null)
     .maybeSingle();
 
   if (!rawCall) notFound();
-  const owner = firstRelation(rawCall.owner as unknown as ProfileRelation | ProfileRelation[] | null);
+  const owner = firstRelation(
+    rawCall.owner as unknown as ProfileRelation | ProfileRelation[] | null
+  );
 
   const { data: transcript } = await supabase
     .from("transcripts")
@@ -54,15 +55,15 @@ export default async function CallDetailPage({
 
   const { data: segments } = transcript
     ? await supabase
-      .from("transcript_segments")
-      .select("id, sequence, start_ms, end_ms, text")
-      .eq("transcript_id", transcript.id)
-      .order("sequence")
+        .from("transcript_segments")
+        .select("id, sequence, start_ms, end_ms, text")
+        .eq("transcript_id", transcript.id)
+        .order("sequence")
     : { data: [] };
 
   const { data: existingReview } = await supabase
     .from("call_reviews")
-    .select("id, scorecard_version_id, status, summary, version")
+    .select("id, scorecard_version_id, status, summary, follow_up, version")
     .eq("call_id", id)
     .maybeSingle();
 
@@ -97,28 +98,32 @@ export default async function CallDetailPage({
     const categoryIds = (categories ?? []).map((category) => category.id);
     const { data: criteria } = categoryIds.length
       ? await supabase
-        .from("scorecard_criteria")
-        .select("id, category_id, label, description, weight, required, position")
-        .in("category_id", categoryIds)
-        .order("position")
+          .from("scorecard_criteria")
+          .select(
+            "id, category_id, label, description, weight, required, position"
+          )
+          .in("category_id", categoryIds)
+          .order("position")
       : { data: [] };
 
     const { data: currentAnswers } = existingReview
       ? await supabase
-        .from("call_review_answers")
-        .select("criterion_id, value, comment")
-        .eq("review_id", existingReview.id)
+          .from("call_review_answers")
+          .select("criterion_id, value, comment")
+          .eq("review_id", existingReview.id)
       : { data: [] };
 
     const { data: revisions } = existingReview
       ? await supabase
-        .from("review_revisions")
-        .select(`
+          .from("review_revisions")
+          .select(
+            `
           id, revision, status, score, submitted_at,
           submitter:profiles!review_revisions_submitted_by_fkey(display_name, email)
-        `)
-        .eq("review_id", existingReview.id)
-        .order("revision", { ascending: false })
+        `
+          )
+          .eq("review_id", existingReview.id)
+          .order("revision", { ascending: false })
       : { data: [] };
 
     reviewProps = {
@@ -138,19 +143,23 @@ export default async function CallDetailPage({
             required: criterion.required,
           })),
       })),
-      initialReview: existingReview ? {
-        version: existingReview.version,
-        status: existingReview.status as ReviewStatus,
-        summary: existingReview.summary,
-        answers: (currentAnswers ?? []).map((answer) => ({
-          criterionId: answer.criterion_id,
-          value: answer.value as 1 | 2 | 3 | 4 | 5 | null,
-          comment: answer.comment,
-        })),
-      } : null,
+      initialReview: existingReview
+        ? {
+            version: existingReview.version,
+            status: existingReview.status as ReviewStatus,
+            summary: existingReview.summary,
+            followUp: existingReview.follow_up,
+            answers: (currentAnswers ?? []).map((answer) => ({
+              criterionId: answer.criterion_id,
+              value: answer.value as 1 | 2 | 3 | 4 | 5 | null,
+              comment: answer.comment,
+            })),
+          }
+        : null,
       revisions: (revisions ?? []).map((revision) => {
         const submitter = firstRelation(
-          revision.submitter as unknown as ProfileRelation | ProfileRelation[] | null,
+          revision.submitter as unknown as
+            ProfileRelation | ProfileRelation[] | null
         );
         return {
           id: revision.id,
@@ -166,7 +175,10 @@ export default async function CallDetailPage({
 
   return (
     <main className="page">
-      <Link href={member.role === "member" ? "/calls" : "/team"} className="back-link">
+      <Link
+        href={member.role === "member" ? "/calls" : "/team"}
+        className="back-link"
+      >
         <ArrowLeft size={15} /> Back to calls
       </Link>
       <PageHeader
@@ -182,6 +194,10 @@ export default async function CallDetailPage({
           startedAt: rawCall.started_at,
           durationMs: rawCall.duration_ms,
           sourceMode: rawCall.source_mode as SourceMode,
+          degraded: rawCall.degraded,
+          degradedIntervalCount: Array.isArray(rawCall.degraded_intervals)
+            ? rawCall.degraded_intervals.length
+            : 0,
           status: rawCall.status as CallStatus,
           reviewStatus: rawCall.review_status as ReviewStatus,
           micLabel: rawCall.mic_label,

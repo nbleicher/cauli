@@ -1,5 +1,5 @@
 {
-  "name": "calllog",
+  "name": "cauli",
   "version": "2.0.0",
   "private": true,
   "workspaces": [
@@ -11,9 +11,13 @@
     "dev": "npm run dev -w @calllog/web",
     "dev:web": "npm run dev -w @calllog/web",
     "dev:worker": "npm run dev -w @calllog/worker",
+    "pretest": "npm run build -w @calllog/shared",
     "test": "npm run test -ws --if-present",
+    "pretypecheck": "npm run build -w @calllog/shared",
     "typecheck": "npm run typecheck -ws --if-present",
-    "lint": "npm run lint -ws --if-present"
+    "prelint": "npm run build -w @calllog/shared",
+    "lint": "npm run lint -ws --if-present",
+    "prepare": "husky"
   },
   "engines": {
     "node": ">=22"
@@ -23,5 +27,10 @@
       "postcss": "8.5.23",
       "sharp": "0.35.3"
     }
+  },
+  "devDependencies": {
+    "husky": "^9.1.7",
+    "lint-staged": "^17.2.0",
+    "prettier": "^3.9.6"
   }
 }

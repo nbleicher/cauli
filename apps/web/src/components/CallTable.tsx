@@ -13,6 +13,7 @@ export interface CallTableRow {
   reviewStatus: ReviewStatus;
   startedAt: string;
   durationMs: number;
+  degraded: boolean;
 }
 
 export function CallTable({
@@ -25,9 +26,18 @@ export function CallTable({
   if (calls.length === 0) {
     return (
       <div className="empty-state">
-        <Image src="/cal-head.png" alt="" width={80} height={80} className="empty-cal" />
+        <Image
+          src="/cal-head.png"
+          alt=""
+          width={80}
+          height={80}
+          className="empty-cal"
+        />
         <h2>No calls yet</h2>
-        <p>Cal&rsquo;s ready when you are. New recordings appear here as soon as their upload begins.</p>
+        <p>
+          Cal&rsquo;s ready when you are. New recordings appear here as soon as
+          their upload begins.
+        </p>
       </div>
     );
   }
@@ -51,13 +61,24 @@ export function CallTable({
               <td>
                 <Link href={`/calls/${call.id}`} className="table-primary">
                   <strong>{call.title || formatDate(call.startedAt)}</strong>
-                  <span>{call.title ? formatDate(call.startedAt) : call.id.slice(0, 8)}</span>
+                  <span>
+                    {call.title
+                      ? formatDate(call.startedAt)
+                      : call.id.slice(0, 8)}
+                  </span>
                 </Link>
               </td>
               {showOwner && <td className="hide-mobile">{call.ownerName}</td>}
-              <td className="hide-mobile call-source">{call.sourceMode}</td>
-              <td><StatusPill status={call.status} /></td>
-              <td className="hide-mobile"><StatusPill status={call.reviewStatus} /></td>
+              <td className="hide-mobile call-source">
+                {call.sourceMode}
+                {call.degraded ? " · degraded" : ""}
+              </td>
+              <td>
+                <StatusPill status={call.status} />
+              </td>
+              <td className="hide-mobile">
+                <StatusPill status={call.reviewStatus} />
+              </td>
               <td className="mono">{formatDuration(call.durationMs)}</td>
             </tr>
           ))}

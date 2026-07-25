@@ -1,6 +1,11 @@
 "use client";
 
-import type { SourceMode } from "@calllog/shared";
+import {
+  decideCaptureSourceLoss,
+  type CaptureSource,
+  type DegradedInterval,
+  type SourceMode,
+} from "@calllog/shared";
 import {
   AlertTriangle,
   Check,
@@ -38,7 +43,10 @@ type RecorderState =
 
 interface ActiveCapture {
   outputStream: MediaStream;
-  sourceStreams: MediaStream[];
+  sourceStreams: Array<{
+    source: CaptureSource;
+    stream: MediaStream;
+  }>;
   audioContext: AudioContext | null;
   micLabel: string;
   tabLabel: string;
@@ -49,18 +57,13 @@ function formatElapsed(ms: number) {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  return [
-    ...(hours > 0 ? [hours] : []),
-    minutes,
-    seconds,
-  ].map((value) => String(value).padStart(2, "0")).join(":");
+  return [...(hours > 0 ? [hours] : []), minutes, seconds]
+    .map((value) => String(value).padStart(2, "0"))
+    .join(":");
 }
 
 function supportedMimeType() {
-  const options = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-  ];
+  const options = ["audio/webm;codecs=opus", "audio/webm"];
   return options.find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
 }
 
@@ -76,7 +79,9 @@ async function acquireCapture(mode: SourceMode): Promise<ActiveCapture> {
         audio: true,
       });
       if (displayStream.getAudioTracks().length === 0) {
-        throw new Error("No tab audio was shared. Choose the call tab and enable Share tab audio.");
+        throw new Error(
+          "No tab audio was shared. Choose the call tab and enable Share tab audio."
+        );
       }
     }
 
@@ -92,18 +97,23 @@ async function acquireCapture(mode: SourceMode): Promise<ActiveCapture> {
     }
 
     const micLabel = micStream?.getAudioTracks()[0]?.label ?? "";
-    const tabLabel = displayStream?.getVideoTracks()[0]?.label
-      || displayStream?.getAudioTracks()[0]?.label
-      || "";
+    const tabLabel =
+      displayStream?.getVideoTracks()[0]?.label ||
+      displayStream?.getAudioTracks()[0]?.label ||
+      "";
 
     displayStream?.getVideoTracks().forEach((track) => track.stop());
-    const sourceStreams = [micStream, displayStream].filter(
-      (stream): stream is MediaStream => Boolean(stream),
-    );
+    const sourceStreams: ActiveCapture["sourceStreams"] = [
+      ...(micStream ? [{ source: "mic" as const, stream: micStream }] : []),
+      ...(displayStream
+        ? [{ source: "tab" as const, stream: displayStream }]
+        : []),
+    ];
 
     if (mode !== "both") {
       const stream = mode === "mic" ? micStream : displayStream;
-      if (!stream) throw new Error("The selected audio source was unavailable.");
+      if (!stream)
+        throw new Error("The selected audio source was unavailable.");
       return {
         outputStream: new MediaStream(stream.getAudioTracks()),
         sourceStreams,
@@ -113,12 +123,13 @@ async function acquireCapture(mode: SourceMode): Promise<ActiveCapture> {
       };
     }
 
-    if (!micStream || !displayStream) throw new Error("Both audio sources are required.");
+    if (!micStream || !displayStream)
+      throw new Error("Both audio sources are required.");
     audioContext = new AudioContext();
     await audioContext.resume();
     const destination = audioContext.createMediaStreamDestination();
     const tabSource = audioContext.createMediaStreamSource(
-      new MediaStream(displayStream.getAudioTracks()),
+      new MediaStream(displayStream.getAudioTracks())
     );
     const micSource = audioContext.createMediaStreamSource(micStream);
     const tabGain = audioContext.createGain();
@@ -147,7 +158,7 @@ async function uploadChunk(
   storagePrefix: string,
   callId: string,
   sequence: number,
-  blob: Blob,
+  blob: Blob
 ) {
   const supabase = createBrowserSupabaseClient();
   const path = `${storagePrefix}/${sequence.toString().padStart(8, "0")}.webm`;
@@ -168,7 +179,7 @@ async function finalizeDraft(draft: RecordingDraft) {
       draft.storagePrefix,
       draft.callId,
       chunk.sequence,
-      chunk.blob,
+      chunk.blob
     );
   }
 
@@ -182,10 +193,12 @@ async function finalizeDraft(draft: RecordingDraft) {
       sourceMode: draft.sourceMode,
       micLabel: draft.micLabel,
       tabLabel: draft.tabLabel,
+      degradedIntervals: draft.degradedIntervals ?? [],
     }),
   });
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || "Unable to finalize recording");
+  if (!response.ok)
+    throw new Error(result.error || "Unable to finalize recording");
   await deleteDraft(draft.callId);
 }
 
@@ -196,6 +209,7 @@ export function RecorderPanel() {
   const [uploadedChunks, setUploadedChunks] = useState(0);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [degraded, setDegraded] = useState(false);
   const [drafts, setDrafts] = useState<RecordingDraft[]>([]);
   const [recoveringId, setRecoveringId] = useState("");
 
@@ -206,6 +220,7 @@ export function RecorderPanel() {
   const pipelineRef = useRef<Promise<void>>(Promise.resolve());
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stoppingRef = useRef(false);
+  const activeSourcesRef = useRef<Set<CaptureSource>>(new Set());
 
   const refreshDrafts = useCallback(async () => {
     const restored = await listDrafts();
@@ -230,66 +245,84 @@ export function RecorderPanel() {
   const cleanCapture = useCallback(async () => {
     const capture = captureRef.current;
     captureRef.current = null;
-    capture?.sourceStreams.forEach((stream) => {
+    capture?.sourceStreams.forEach(({ stream }) => {
       stream.getTracks().forEach((track) => track.stop());
     });
     capture?.outputStream.getTracks().forEach((track) => track.stop());
     await capture?.audioContext?.close().catch(() => undefined);
   }, []);
 
-  const stopRecording = useCallback(async (reason?: string) => {
-    if (stoppingRef.current || !recorderRef.current || !draftRef.current) return;
-    stoppingRef.current = true;
-    setState("stopping");
-    if (reason) setNotice(reason);
-    if (timerRef.current) clearInterval(timerRef.current);
+  const stopRecording = useCallback(
+    async (reason?: string) => {
+      if (stoppingRef.current || !recorderRef.current || !draftRef.current)
+        return;
+      stoppingRef.current = true;
+      setState("stopping");
+      if (reason) setNotice(reason);
+      if (timerRef.current) clearInterval(timerRef.current);
 
-    const recorder = recorderRef.current;
-    await new Promise<void>((resolve) => {
-      recorder.addEventListener("stop", () => resolve(), { once: true });
-      if (recorder.state !== "inactive") recorder.stop();
-      else resolve();
-    });
+      const recorder = recorderRef.current;
+      await new Promise<void>((resolve) => {
+        recorder.addEventListener("stop", () => resolve(), { once: true });
+        if (recorder.state !== "inactive") recorder.stop();
+        else resolve();
+      });
 
-    const durationMs = Date.now() - draftRef.current.startedAt;
-    const stoppedDraft: RecordingDraft = {
-      ...draftRef.current,
-      durationMs,
-      finalChunkSequence: sequenceRef.current,
-      stopped: true,
-      updatedAt: Date.now(),
-    };
-    draftRef.current = stoppedDraft;
-    await saveDraft(stoppedDraft);
-    await cleanCapture();
-    recorderRef.current = null;
-    setElapsedMs(durationMs);
-    setState("uploading");
+      const durationMs = Date.now() - draftRef.current.startedAt;
+      const degradedIntervals = (draftRef.current.degradedIntervals ?? []).map(
+        (interval): DegradedInterval => ({
+          ...interval,
+          endMs: interval.endMs ?? durationMs,
+        })
+      );
+      const stoppedDraft: RecordingDraft = {
+        ...draftRef.current,
+        durationMs,
+        degradedIntervals,
+        finalChunkSequence: sequenceRef.current,
+        stopped: true,
+        updatedAt: Date.now(),
+      };
+      draftRef.current = stoppedDraft;
+      await saveDraft(stoppedDraft);
+      await cleanCapture();
+      recorderRef.current = null;
+      setElapsedMs(durationMs);
+      setState("uploading");
 
-    try {
-      await pipelineRef.current;
-      if (stoppedDraft.finalChunkSequence < 0) {
-        throw new Error("No audio data was recorded.");
+      try {
+        await pipelineRef.current;
+        if (stoppedDraft.finalChunkSequence < 0) {
+          throw new Error("No audio data was recorded.");
+        }
+        await finalizeDraft(stoppedDraft);
+        setState("queued");
+        setNotice(
+          "Recording saved. Audio processing and transcription are queued."
+        );
+        await refreshDrafts();
+      } catch (stopError) {
+        setState("failed");
+        setError(
+          stopError instanceof Error
+            ? stopError.message
+            : "Unable to finish upload"
+        );
+        await refreshDrafts();
+      } finally {
+        stoppingRef.current = false;
+        draftRef.current = null;
       }
-      await finalizeDraft(stoppedDraft);
-      setState("queued");
-      setNotice("Recording saved. Audio processing and transcription are queued.");
-      await refreshDrafts();
-    } catch (stopError) {
-      setState("failed");
-      setError(stopError instanceof Error ? stopError.message : "Unable to finish upload");
-      await refreshDrafts();
-    } finally {
-      stoppingRef.current = false;
-      draftRef.current = null;
-    }
-  }, [cleanCapture, refreshDrafts]);
+    },
+    [cleanCapture, refreshDrafts]
+  );
 
   async function startRecording() {
     setError("");
     setNotice("");
     setElapsedMs(0);
     setUploadedChunks(0);
+    setDegraded(false);
     setState("requesting");
     sequenceRef.current = -1;
     pipelineRef.current = Promise.resolve();
@@ -298,6 +331,9 @@ export function RecorderPanel() {
     try {
       capture = await acquireCapture(mode);
       captureRef.current = capture;
+      activeSourcesRef.current = new Set(
+        capture.sourceStreams.map(({ source }) => source)
+      );
       const response = await fetch("/api/calls", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -308,12 +344,13 @@ export function RecorderPanel() {
         }),
       });
       const created = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(created.error || "Unable to create recording");
+      if (!response.ok)
+        throw new Error(created.error || "Unable to create recording");
 
       const mimeType = supportedMimeType();
       const recorder = new MediaRecorder(
         capture.outputStream,
-        mimeType ? { mimeType, audioBitsPerSecond: 128_000 } : undefined,
+        mimeType ? { mimeType, audioBitsPerSecond: 128_000 } : undefined
       );
       const draft: RecordingDraft = {
         callId: created.callId,
@@ -327,6 +364,7 @@ export function RecorderPanel() {
         micLabel: capture.micLabel,
         tabLabel: capture.tabLabel,
         stopped: false,
+        degradedIntervals: [],
         updatedAt: Date.now(),
       };
       await saveDraft(draft);
@@ -353,46 +391,97 @@ export function RecorderPanel() {
               currentDraft.storagePrefix,
               currentDraft.callId,
               sequence,
-              event.data,
+              event.data
             );
             setUploadedChunks((count) => count + 1);
           })
           .catch((chunkError) => {
-            setError(chunkError instanceof Error ? chunkError.message : "Chunk upload failed");
+            setError(
+              chunkError instanceof Error
+                ? chunkError.message
+                : "Chunk upload failed"
+            );
             if (
-              chunkError instanceof DOMException
-              && ["QuotaExceededError", "UnknownError"].includes(chunkError.name)
+              chunkError instanceof DOMException &&
+              ["QuotaExceededError", "UnknownError"].includes(chunkError.name)
             ) {
-              void stopRecording("Local recording storage became unavailable. Saving the completed portion.");
+              void stopRecording(
+                "Local recording storage became unavailable. Saving the completed portion."
+              );
             }
             throw chunkError;
           });
       });
 
-      const handleTrackEnded = () => {
-        if (!stoppingRef.current && recorder.state === "recording") {
-          void stopRecording("An audio source ended. The completed portion is being saved.");
+      const handleTrackEnded = (source: CaptureSource) => {
+        if (stoppingRef.current || recorder.state !== "recording") return;
+        activeSourcesRef.current.delete(source);
+        const remainingSources = [...activeSourcesRef.current];
+        if (
+          decideCaptureSourceLoss(mode, source, remainingSources) ===
+          "continue_degraded"
+        ) {
+          const draft = draftRef.current;
+          if (!draft) return;
+          const degradedDraft: RecordingDraft = {
+            ...draft,
+            degradedIntervals: [
+              ...(draft.degradedIntervals ?? []),
+              {
+                source,
+                startMs: Date.now() - draft.startedAt,
+                endMs: null,
+              },
+            ],
+            updatedAt: Date.now(),
+          };
+          draftRef.current = degradedDraft;
+          setDegraded(true);
+          setNotice(
+            `${source === "mic" ? "Microphone" : "Tab"} audio ended. Recording is continuing with ${
+              remainingSources[0] === "mic" ? "microphone" : "tab"
+            } audio.`
+          );
+          void saveDraft(degradedDraft);
+          return;
         }
+        void stopRecording(
+          "All required audio sources ended. The completed portion is being saved."
+        );
       };
-      capture.sourceStreams
-        .flatMap((stream) => stream.getAudioTracks())
-        .forEach((track) => track.addEventListener("ended", handleTrackEnded, { once: true }));
+      capture.sourceStreams.forEach(({ source, stream }) => {
+        stream.getAudioTracks().forEach((track) => {
+          track.addEventListener("ended", () => handleTrackEnded(source), {
+            once: true,
+          });
+        });
+      });
 
       recorder.start(10_000);
       setState("recording");
       timerRef.current = setInterval(() => {
         if (draftRef.current) {
-          setElapsedMs(Date.now() - draftRef.current.startedAt);
+          const currentElapsed = Date.now() - draftRef.current.startedAt;
+          setElapsedMs(currentElapsed);
+          if (currentElapsed >= 3 * 60 * 60 * 1_000) {
+            void stopRecording(
+              "The three-hour recording limit was reached. Saving now."
+            );
+          }
         }
       }, 250);
     } catch (startError) {
-      capture?.sourceStreams.forEach((stream) => {
+      capture?.sourceStreams.forEach(({ stream }) => {
         stream.getTracks().forEach((track) => track.stop());
       });
       await capture?.audioContext?.close().catch(() => undefined);
       captureRef.current = null;
       setState("failed");
-      setError(startError instanceof Error ? startError.message : "Recording could not start");
+      setError(
+        startError instanceof Error
+          ? startError.message
+          : "Recording could not start"
+      );
     }
   }
 
@@ -403,12 +492,17 @@ export function RecorderPanel() {
       await finalizeDraft({
         ...draft,
         stopped: true,
-        durationMs: Math.max(draft.durationMs, draft.updatedAt - draft.startedAt),
+        durationMs: Math.max(
+          draft.durationMs,
+          draft.updatedAt - draft.startedAt
+        ),
       });
       setNotice("Interrupted recording recovered and queued for processing.");
       await refreshDrafts();
     } catch (recoverError) {
-      setError(recoverError instanceof Error ? recoverError.message : "Recovery failed");
+      setError(
+        recoverError instanceof Error ? recoverError.message : "Recovery failed"
+      );
     } finally {
       setRecoveringId("");
     }
@@ -448,11 +542,13 @@ export function RecorderPanel() {
           <div>
             <span className="toolbar-label">Audio source</span>
             <div className="segmented" role="group" aria-label="Audio source">
-              {([
-                ["mic", Mic2, "Mic"],
-                ["tab", Headphones, "Tab"],
-                ["both", Radio, "Both"],
-              ] as const).map(([value, Icon, label]) => (
+              {(
+                [
+                  ["mic", Mic2, "Mic"],
+                  ["tab", Headphones, "Tab"],
+                  ["both", Radio, "Both"],
+                ] as const
+              ).map(([value, Icon, label]) => (
                 <button
                   key={value}
                   className={mode === value ? "active" : ""}
@@ -465,7 +561,10 @@ export function RecorderPanel() {
               ))}
             </div>
           </div>
-          <div className="upload-counter" title="Successfully uploaded recording chunks">
+          <div
+            className="upload-counter"
+            title="Successfully uploaded recording chunks"
+          >
             <CloudUpload size={16} />
             <span>{uploadedChunks} uploaded</span>
           </div>
@@ -473,7 +572,13 @@ export function RecorderPanel() {
 
         <div className={`recording-stage${active ? " active" : ""}`}>
           {state === "idle" ? (
-            <Image src="/cal-head.png" alt="" width={72} height={72} className="stage-cal" />
+            <Image
+              src="/cal-head.png"
+              alt=""
+              width={72}
+              height={72}
+              className="stage-cal"
+            />
           ) : (
             <div className="recording-indicator">
               <span className="recording-core" />
@@ -484,7 +589,10 @@ export function RecorderPanel() {
           <div className="recording-state">
             {state === "idle" && "Ready to record"}
             {state === "requesting" && "Waiting for browser permissions"}
-            {state === "recording" && `Recording ${mode === "both" ? "mic + tab" : mode} audio`}
+            {state === "recording" &&
+              (degraded
+                ? "Recording remaining audio · Degraded"
+                : `Recording ${mode === "both" ? "mic + tab" : mode} audio`)}
             {state === "stopping" && "Closing audio streams"}
             {state === "uploading" && "Finishing upload"}
             {state === "queued" && "Queued for processing"}
@@ -492,14 +600,20 @@ export function RecorderPanel() {
           </div>
           <div className="wave-bars" aria-hidden="true">
             {Array.from({ length: 24 }, (_, index) => (
-              <i key={index} style={{ animationDelay: `${(index % 8) * 55}ms` }} />
+              <i
+                key={index}
+                style={{ animationDelay: `${(index % 8) * 55}ms` }}
+              />
             ))}
           </div>
         </div>
 
         <div className="recorder-actions">
           {active ? (
-            <button className="button button-danger record-action" onClick={() => void stopRecording()}>
+            <button
+              className="button button-danger record-action"
+              onClick={() => void stopRecording()}
+            >
               <Square size={17} fill="currentColor" />
               Stop and save
             </button>
@@ -509,7 +623,11 @@ export function RecorderPanel() {
               onClick={() => void startRecording()}
               disabled={busy}
             >
-              {busy ? <LoaderCircle className="spin" size={17} /> : <Radio size={17} />}
+              {busy ? (
+                <LoaderCircle className="spin" size={17} />
+              ) : (
+                <Radio size={17} />
+              )}
               {busy ? "Working" : "Start recording"}
             </button>
           )}
@@ -521,7 +639,10 @@ export function RecorderPanel() {
           <div className="section-heading">
             <div>
               <h2>Interrupted recordings</h2>
-              <p>Audio buffered on this device can be recovered without recording again.</p>
+              <p>
+                Audio buffered on this device can be recovered without recording
+                again.
+              </p>
             </div>
           </div>
           <div className="recovery-list">
@@ -530,7 +651,8 @@ export function RecorderPanel() {
                 <div>
                   <strong>{new Date(draft.startedAt).toLocaleString()}</strong>
                   <span>
-                    {formatElapsed(draft.durationMs)} · {draft.sourceMode} · chunk {draft.finalChunkSequence + 1}
+                    {formatElapsed(draft.durationMs)} · {draft.sourceMode} ·
+                    chunk {draft.finalChunkSequence + 1}
                   </span>
                 </div>
                 <div className="recovery-actions">
@@ -539,9 +661,11 @@ export function RecorderPanel() {
                     onClick={() => void recoverDraft(draft)}
                     disabled={Boolean(recoveringId)}
                   >
-                    {recoveringId === draft.callId
-                      ? <LoaderCircle className="spin" size={15} />
-                      : <RotateCcw size={15} />}
+                    {recoveringId === draft.callId ? (
+                      <LoaderCircle className="spin" size={15} />
+                    ) : (
+                      <RotateCcw size={15} />
+                    )}
                     Recover
                   </button>
                   <button

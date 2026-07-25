@@ -10,7 +10,11 @@ interface RawCallRow {
   review_status: ReviewStatus;
   started_at: string;
   duration_ms: number;
-  owner: { display_name: string; email: string } | { display_name: string; email: string }[] | null;
+  degraded: boolean;
+  owner:
+    | { display_name: string; email: string }
+    | { display_name: string; email: string }[]
+    | null;
 }
 
 function ownerLabel(owner: RawCallRow["owner"]) {
@@ -22,10 +26,12 @@ export async function listCalls(ownerId?: string): Promise<CallTableRow[]> {
   const supabase = await createServerSupabaseClient();
   let query = supabase
     .from("calls")
-    .select(`
-      id, title, source_mode, status, review_status, started_at, duration_ms,
+    .select(
+      `
+      id, title, source_mode, status, review_status, started_at, duration_ms, degraded,
       owner:profiles!calls_owner_id_fkey(display_name, email)
-    `)
+    `
+    )
     .is("deleted_at", null)
     .order("started_at", { ascending: false })
     .limit(250);
@@ -43,5 +49,6 @@ export async function listCalls(ownerId?: string): Promise<CallTableRow[]> {
     reviewStatus: call.review_status,
     startedAt: call.started_at,
     durationMs: call.duration_ms,
+    degraded: call.degraded,
   }));
 }

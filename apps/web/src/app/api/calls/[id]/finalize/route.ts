@@ -7,13 +7,13 @@ import { parseJson, sanitizeError } from "@/lib/server/http";
 
 export async function POST(
   request: Request,
-  { params }: { params: Promise<{ id: string }> },
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const auth = await requireApiAuth();
   if (isAuthError(auth)) return auth;
   const { id } = await params;
 
-  if (!await authorizeCall(auth, id, "own")) {
+  if (!(await authorizeCall(auth, id, "own"))) {
     return NextResponse.json({ error: "Call not found" }, { status: 404 });
   }
 
@@ -30,6 +30,7 @@ export async function POST(
     target_source_mode: body.sourceMode,
     target_mic_label: body.micLabel ?? "",
     target_tab_label: body.tabLabel ?? "",
+    target_degraded_intervals: body.degradedIntervals,
   });
 
   if (error) {

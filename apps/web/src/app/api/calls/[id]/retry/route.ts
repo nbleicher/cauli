@@ -6,15 +6,19 @@ import { sanitizeError } from "@/lib/server/http";
 
 export async function POST(
   _request: Request,
-  { params }: { params: Promise<{ id: string }> },
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const auth = await requireApiAuth();
   if (isAuthError(auth)) return auth;
   const { id } = await params;
   const call = await authorizeCall(auth, id, "view");
-  if (!call) return NextResponse.json({ error: "Call not found" }, { status: 404 });
+  if (!call)
+    return NextResponse.json({ error: "Call not found" }, { status: 404 });
   if (call.row.status !== "failed") {
-    return NextResponse.json({ error: "Only failed calls can be retried" }, { status: 409 });
+    return NextResponse.json(
+      { error: "Only failed calls can be retried" },
+      { status: 409 }
+    );
   }
 
   const admin = createAdminSupabaseClient();
@@ -22,9 +26,8 @@ export async function POST(
     .from("calls")
     .update({ status: "queued", error_message: null })
     .eq("id", id);
-  const { error: jobError } = await admin
-    .from("processing_jobs")
-    .upsert({
+  const { error: jobError } = await admin.from("processing_jobs").upsert(
+    {
       workspace_id: call.access.workspaceId,
       call_id: id,
       kind: "process_recording",
@@ -33,12 +36,20 @@ export async function POST(
       attempts: 0,
       next_attempt_at: new Date().toISOString(),
       error_message: null,
-    }, { onConflict: "idempotency_key" });
+      error_category: null,
+      error_chunk_index: null,
+      provider_generation_id: null,
+    },
+    { onConflict: "idempotency_key" }
+  );
 
   if (callError || jobError) {
-    return NextResponse.json({
-      error: sanitizeError(callError ?? jobError),
-    }, { status: 500 });
+    return NextResponse.json(
+      {
+        error: sanitizeError(callError ?? jobError),
+      },
+      { status: 500 }
+    );
   }
   return NextResponse.json({ status: "queued" });
 }

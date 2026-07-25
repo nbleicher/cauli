@@ -1,6 +1,6 @@
 "use client";
 
-import type { SourceMode } from "@calllog/shared";
+import type { DegradedInterval, SourceMode } from "@calllog/shared";
 
 const DB_NAME = "calllog-recorder";
 const DB_VERSION = 1;
@@ -19,6 +19,7 @@ export interface RecordingDraft {
   micLabel: string;
   tabLabel: string;
   stopped: boolean;
+  degradedIntervals: DegradedInterval[];
   updatedAt: number;
 }
 
@@ -39,31 +40,43 @@ function openDatabase() {
         database.createObjectStore(DRAFT_STORE, { keyPath: "callId" });
       }
       if (!database.objectStoreNames.contains(CHUNK_STORE)) {
-        const chunks = database.createObjectStore(CHUNK_STORE, { keyPath: "key" });
+        const chunks = database.createObjectStore(CHUNK_STORE, {
+          keyPath: "key",
+        });
         chunks.createIndex("callId", "callId", { unique: false });
       }
     };
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Unable to open recording storage"));
+    request.onerror = () =>
+      reject(request.error ?? new Error("Unable to open recording storage"));
   });
 }
 
 function runTransaction<T>(
   storeName: string,
   mode: IDBTransactionMode,
-  operation: (store: IDBObjectStore) => IDBRequest<T>,
+  operation: (store: IDBObjectStore) => IDBRequest<T>
 ) {
-  return openDatabase().then((database) => new Promise<T>((resolve, reject) => {
-    const transaction = database.transaction(storeName, mode);
-    const request = operation(transaction.objectStore(storeName));
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Recording storage request failed"));
-    transaction.oncomplete = () => database.close();
-    transaction.onabort = () => {
-      database.close();
-      reject(transaction.error ?? new Error("Recording storage transaction aborted"));
-    };
-  }));
+  return openDatabase().then(
+    (database) =>
+      new Promise<T>((resolve, reject) => {
+        const transaction = database.transaction(storeName, mode);
+        const request = operation(transaction.objectStore(storeName));
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () =>
+          reject(
+            request.error ?? new Error("Recording storage request failed")
+          );
+        transaction.oncomplete = () => database.close();
+        transaction.onabort = () => {
+          database.close();
+          reject(
+            transaction.error ??
+              new Error("Recording storage transaction aborted")
+          );
+        };
+      })
+  );
 }
 
 export function saveDraft(draft: RecordingDraft) {
@@ -71,11 +84,15 @@ export function saveDraft(draft: RecordingDraft) {
 }
 
 export function deleteDraft(callId: string) {
-  return runTransaction(DRAFT_STORE, "readwrite", (store) => store.delete(callId));
+  return runTransaction(DRAFT_STORE, "readwrite", (store) =>
+    store.delete(callId)
+  );
 }
 
 export function listDrafts() {
-  return runTransaction<RecordingDraft[]>(DRAFT_STORE, "readonly", (store) => store.getAll());
+  return runTransaction<RecordingDraft[]>(DRAFT_STORE, "readonly", (store) =>
+    store.getAll()
+  );
 }
 
 export function saveChunk(callId: string, sequence: number, blob: Blob) {
@@ -90,10 +107,8 @@ export function saveChunk(callId: string, sequence: number, blob: Blob) {
 }
 
 export function deleteChunk(callId: string, sequence: number) {
-  return runTransaction(
-    CHUNK_STORE,
-    "readwrite",
-    (store) => store.delete(`${callId}:${sequence.toString().padStart(10, "0")}`),
+  return runTransaction(CHUNK_STORE, "readwrite", (store) =>
+    store.delete(`${callId}:${sequence.toString().padStart(10, "0")}`)
   );
 }
 
@@ -106,7 +121,8 @@ export async function listChunks(callId: string) {
     request.onsuccess = () => {
       resolve(request.result.sort((a, b) => a.sequence - b.sequence));
     };
-    request.onerror = () => reject(request.error ?? new Error("Unable to restore recording chunks"));
+    request.onerror = () =>
+      reject(request.error ?? new Error("Unable to restore recording chunks"));
     transaction.oncomplete = () => database.close();
     transaction.onabort = () => {
       database.close();

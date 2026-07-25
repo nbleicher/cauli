@@ -4,6 +4,12 @@ export type Role = (typeof ROLES)[number];
 export const SOURCE_MODES = ["mic", "tab", "both"] as const;
 export type SourceMode = (typeof SOURCE_MODES)[number];
 
+export interface DegradedInterval {
+  source: "mic" | "tab";
+  startMs: number;
+  endMs: number | null;
+}
+
 export const CALL_STATUSES = [
   "recording",
   "uploading",
@@ -23,12 +29,10 @@ export const REVIEW_STATUSES = [
 ] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
 
-export type JobStatus = "queued" | "processing" | "retrying" | "complete" | "failed";
+export type JobStatus =
+  "queued" | "processing" | "retrying" | "complete" | "failed";
 export type ProcessingJobKind =
-  | "process_recording"
-  | "generate_wav"
-  | "delete_call"
-  | "cleanup_abandoned";
+  "process_recording" | "generate_wav" | "delete_call" | "cleanup_abandoned";
 
 export interface WorkspaceMember {
   userId: string;

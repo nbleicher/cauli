@@ -30,7 +30,7 @@ APP_URL
 BOOTSTRAP_ADMIN_EMAIL
 OPENROUTER_API_KEY
 OPENROUTER_STT_MODEL=openai/whisper-large-v3-turbo
-TRANSCRIPTION_LANGUAGE=
+TRANSCRIPTION_LANGUAGE=en
 ```
 
 `APP_URL` must be the final public origin with no trailing slash. Railway variables must be available during the Docker build because `NEXT_PUBLIC_*` values are embedded in the browser bundle.
@@ -54,9 +54,11 @@ NEXT_PUBLIC_SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 OPENROUTER_API_KEY
 OPENROUTER_STT_MODEL=openai/whisper-large-v3-turbo
-TRANSCRIPTION_LANGUAGE=
+TRANSCRIPTION_LANGUAGE=en
 WORKER_POLL_MS=2000
 WORKER_CONCURRENCY=1
+FFMPEG_PATH=ffmpeg
+FFPROBE_PATH=ffprobe
 PORT=8080
 ```
 

@@ -56,7 +56,10 @@ npm test
 npm run build
 ```
 
-Runtime dependencies currently pass `npm audit --omit=dev`. The remaining audit findings are in the ESLint development toolchain; ESLint 10 cannot be adopted until the React plugin shipped with the current Next.js preset supports its context API.
+Runtime dependencies currently pass `npm audit --omit=dev`. The remaining
+audit findings are in the ESLint development toolchain; the React, import, and
+accessibility plugins shipped with the current Next.js preset declare
+compatibility only through ESLint 9.
 
 ## Deployment
 

@@ -1,7 +1,14 @@
 "use client";
 
 import type { Role } from "@calllog/shared";
-import { LoaderCircle, MailPlus, ShieldCheck, ShieldOff, Trash2, UserRound } from "lucide-react";
+import {
+  LoaderCircle,
+  MailPlus,
+  ShieldCheck,
+  ShieldOff,
+  Trash2,
+  UserRound,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
@@ -52,7 +59,9 @@ export function TeamAdmin({
       setEmail("");
       router.refresh();
     } catch (inviteError) {
-      setError(inviteError instanceof Error ? inviteError.message : "Invitation failed");
+      setError(
+        inviteError instanceof Error ? inviteError.message : "Invitation failed"
+      );
     } finally {
       setWorking("");
     }
@@ -74,7 +83,11 @@ export function TeamAdmin({
       }
       router.refresh();
     } catch (memberError) {
-      setError(memberError instanceof Error ? memberError.message : "Member update failed");
+      setError(
+        memberError instanceof Error
+          ? memberError.message
+          : "Member update failed"
+      );
     } finally {
       setWorking("");
     }
@@ -84,17 +97,47 @@ export function TeamAdmin({
     setWorking(`mfa:${userId}`);
     setError("");
     try {
-      const response = await fetch(`/api/admin/members/${userId}/mfa`, { method: "DELETE" });
+      const response = await fetch(`/api/admin/members/${userId}/mfa`, {
+        method: "DELETE",
+      });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || "Could not reset two-factor");
+      if (!response.ok)
+        throw new Error(result.error || "Could not reset two-factor");
       setNotice(
         result.removed
           ? `Two-factor reset for ${email}. They can sign in with their password and enroll a new device.`
-          : `${email} did not have two-factor enabled.`,
+          : `${email} did not have two-factor enabled.`
       );
       router.refresh();
     } catch (mfaError) {
-      setError(mfaError instanceof Error ? mfaError.message : "Could not reset two-factor");
+      setError(
+        mfaError instanceof Error
+          ? mfaError.message
+          : "Could not reset two-factor"
+      );
+    } finally {
+      setWorking("");
+    }
+  }
+
+  async function revokeInvite(inviteId: string) {
+    setWorking(`invite:${inviteId}`);
+    setError("");
+    try {
+      const response = await fetch(`/api/admin/invites?id=${inviteId}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Invitation could not be revoked");
+      }
+      router.refresh();
+    } catch (inviteError) {
+      setError(
+        inviteError instanceof Error
+          ? inviteError.message
+          : "Invitation could not be revoked"
+      );
     } finally {
       setWorking("");
     }
@@ -125,14 +168,25 @@ export function TeamAdmin({
           </div>
           <div className="field">
             <label htmlFor="invite-role">Role</label>
-            <select id="invite-role" value={role} onChange={(event) => setRole(event.target.value as Role)}>
+            <select
+              id="invite-role"
+              value={role}
+              onChange={(event) => setRole(event.target.value as Role)}
+            >
               <option value="member">Member</option>
               <option value="manager">Manager</option>
               <option value="admin">Admin</option>
             </select>
           </div>
-          <button className="button button-primary" disabled={working === "invite"}>
-            {working === "invite" ? <LoaderCircle className="spin" size={16} /> : <MailPlus size={16} />}
+          <button
+            className="button button-primary"
+            disabled={working === "invite"}
+          >
+            {working === "invite" ? (
+              <LoaderCircle className="spin" size={16} />
+            ) : (
+              <MailPlus size={16} />
+            )}
             Send invite
           </button>
         </form>
@@ -142,13 +196,17 @@ export function TeamAdmin({
         <div className="section-heading">
           <div>
             <h2>Workspace members</h2>
-            <p>{members.length} active member{members.length === 1 ? "" : "s"}</p>
+            <p>
+              {members.length} active member{members.length === 1 ? "" : "s"}
+            </p>
           </div>
         </div>
         <div className="member-list">
           {members.map((member) => (
             <div className="member-row" key={member.userId}>
-              <div className="account-avatar"><UserRound size={15} /></div>
+              <div className="account-avatar">
+                <UserRound size={15} />
+              </div>
               <div className="member-identity">
                 <strong>{member.displayName || member.email}</strong>
                 <span>{member.email}</span>
@@ -159,18 +217,26 @@ export function TeamAdmin({
                   title={`Reset two-factor for ${member.email}`}
                   disabled={Boolean(working)}
                   onClick={() => {
-                    if (window.confirm(
-                      `Reset two-factor for ${member.email}?\n\nThey will be able to sign in with just their password until they enroll a new device.`,
-                    )) void resetMfa(member.userId, member.email);
+                    if (
+                      window.confirm(
+                        `Reset two-factor for ${member.email}?\n\nThey will be able to sign in with just their password until they enroll a new device.`
+                      )
+                    )
+                      void resetMfa(member.userId, member.email);
                   }}
                 >
-                  {working === `mfa:${member.userId}`
-                    ? <LoaderCircle className="spin" size={13} />
-                    : <ShieldCheck size={13} />}
+                  {working === `mfa:${member.userId}` ? (
+                    <LoaderCircle className="spin" size={13} />
+                  ) : (
+                    <ShieldCheck size={13} />
+                  )}
                   <span>2FA on</span>
                 </button>
               ) : (
-                <span className="mfa-reset off" title="No second factor enrolled">
+                <span
+                  className="mfa-reset off"
+                  title="No second factor enrolled"
+                >
                   <ShieldOff size={13} />
                   <span>No 2FA</span>
                 </span>
@@ -178,7 +244,9 @@ export function TeamAdmin({
               <select
                 value={member.role}
                 disabled={Boolean(working)}
-                onChange={(event) => void updateMember(member.userId, event.target.value as Role)}
+                onChange={(event) =>
+                  void updateMember(member.userId, event.target.value as Role)
+                }
                 aria-label={`Role for ${member.email}`}
               >
                 <option value="member">Member</option>
@@ -187,18 +255,28 @@ export function TeamAdmin({
               </select>
               <button
                 className="icon-button"
-                title={member.userId === currentUserId ? "Remove your membership" : "Remove member"}
+                title={
+                  member.userId === currentUserId
+                    ? "Remove your membership"
+                    : "Remove member"
+                }
                 aria-label={`Remove ${member.email}`}
                 disabled={Boolean(working)}
                 onClick={() => {
-                  if (window.confirm(`Remove ${member.email} from this workspace?`)) {
+                  if (
+                    window.confirm(
+                      `Remove ${member.email} from this workspace?`
+                    )
+                  ) {
                     void updateMember(member.userId);
                   }
                 }}
               >
-                {working === `remove:${member.userId}`
-                  ? <LoaderCircle className="spin" size={15} />
-                  : <Trash2 size={15} />}
+                {working === `remove:${member.userId}` ? (
+                  <LoaderCircle className="spin" size={15} />
+                ) : (
+                  <Trash2 size={15} />
+                )}
               </button>
             </div>
           ))}
@@ -210,18 +288,45 @@ export function TeamAdmin({
           <div className="section-heading">
             <div>
               <h2>Pending invitations</h2>
-              <p>Users appear above once they accept their secure sign-in link.</p>
+              <p>
+                Users appear above once they accept their secure sign-in link.
+              </p>
             </div>
           </div>
           <div className="member-list">
             {invites.map((invite) => (
               <div className="member-row invite-row" key={invite.id}>
-                <div className="account-avatar"><MailPlus size={15} /></div>
+                <div className="account-avatar">
+                  <MailPlus size={15} />
+                </div>
                 <div className="member-identity">
                   <strong>{invite.email}</strong>
-                  <span>Expires {new Date(invite.expiresAt).toLocaleDateString()}</span>
+                  <span>
+                    Expires {new Date(invite.expiresAt).toLocaleDateString()}
+                  </span>
                 </div>
                 <span className="status-pill">{invite.role}</span>
+                <button
+                  className="icon-button"
+                  title={`Revoke invitation for ${invite.email}`}
+                  aria-label={`Revoke invitation for ${invite.email}`}
+                  disabled={Boolean(working)}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `Revoke the invitation for ${invite.email}?`
+                      )
+                    ) {
+                      void revokeInvite(invite.id);
+                    }
+                  }}
+                >
+                  {working === `invite:${invite.id}` ? (
+                    <LoaderCircle className="spin" size={15} />
+                  ) : (
+                    <Trash2 size={15} />
+                  )}
+                </button>
               </div>
             ))}
           </div>

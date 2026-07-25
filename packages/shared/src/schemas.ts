@@ -24,6 +24,21 @@ export const finalizeCallSchema = z.object({
   sourceMode: sourceModeSchema,
   micLabel: z.string().trim().max(256).optional(),
   tabLabel: z.string().trim().max(256).optional(),
+  degradedIntervals: z
+    .array(
+      z
+        .object({
+          source: z.enum(["mic", "tab"]),
+          startMs: z.number().int().nonnegative(),
+          endMs: z.number().int().nonnegative().nullable(),
+        })
+        .refine(
+          (interval) =>
+            interval.endMs === null || interval.endMs >= interval.startMs,
+          { message: "A degraded interval cannot end before it starts." }
+        )
+    )
+    .max(2),
 });
 
 export const reviewAnswerSchema = z.object({
@@ -36,6 +51,7 @@ export const submitReviewSchema = z.object({
   expectedVersion: z.number().int().min(0),
   status: reviewStatusSchema.exclude(["unreviewed"]),
   summary: z.string().trim().max(10_000).default(""),
+  followUp: z.string().trim().max(10_000).default(""),
   answers: z.array(reviewAnswerSchema),
 });
 
@@ -59,22 +75,36 @@ export const prepareExtensionImportSchema = z.object({
 
 export const completeExtensionImportSchema = z.object({
   nonce: z.string().min(16).max(256),
-  items: z.array(z.object({
-    importId: z.uuid(),
-    sourceUploaded: z.boolean(),
-    convertedUploaded: z.boolean(),
-  })).max(2_000),
+  items: z
+    .array(
+      z.object({
+        importId: z.uuid(),
+        sourceUploaded: z.boolean(),
+        convertedUploaded: z.boolean(),
+      })
+    )
+    .max(2_000),
 });
 
 export const createScorecardTemplateSchema = z.object({
   name: z.string().trim().min(1).max(120),
-  categories: z.array(z.object({
-    name: z.string().trim().min(1).max(120),
-    criteria: z.array(z.object({
-      label: z.string().trim().min(1).max(240),
-      description: z.string().trim().max(1_000).default(""),
-      weight: z.number().int().positive().max(10_000),
-      required: z.boolean().default(true),
-    })).min(1).max(100),
-  })).min(1).max(30),
+  categories: z
+    .array(
+      z.object({
+        name: z.string().trim().min(1).max(120),
+        criteria: z
+          .array(
+            z.object({
+              label: z.string().trim().min(1).max(240),
+              description: z.string().trim().max(1_000).default(""),
+              weight: z.number().int().positive().max(10_000),
+              required: z.boolean().default(true),
+            })
+          )
+          .min(1)
+          .max(100),
+      })
+    )
+    .min(1)
+    .max(30),
 });
