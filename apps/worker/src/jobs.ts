@@ -1,0 +1,292 @@
+import type { ProcessingJobKind } from "@calllog/shared";
+import { copyFile, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { config } from "./config.js";
+import { log, sanitizedError } from "./log.js";
+import {
+  concatenateFiles,
+  fileSize,
+  listMatchingFiles,
+  removeDirectory,
+  runFfmpeg,
+} from "./process.js";
+import {
+  downloadChunkSequence,
+  downloadStorageFile,
+  listStorageFiles,
+  removeStorageFiles,
+  uploadStorageFile,
+} from "./storage.js";
+import { supabase } from "./supabase.js";
+import { transcribeAudioSegments } from "./transcribe.js";
+
+interface ProcessingJob {
+  id: string;
+  workspace_id: string;
+  call_id: string | null;
+  kind: ProcessingJobKind;
+  attempts: number;
+  max_attempts: number;
+  payload: Record<string, unknown>;
+}
+
+interface CallRow {
+  id: string;
+  workspace_id: string;
+  expected_final_chunk: number | null;
+  chunk_prefix: string;
+  source_path: string | null;
+  mp3_path: string | null;
+  mime_type: string;
+}
+
+async function loadCall(callId: string) {
+  const { data, error } = await supabase
+    .from("calls")
+    .select("id, workspace_id, expected_final_chunk, chunk_prefix, source_path, mp3_path, mime_type")
+    .eq("id", callId)
+    .single();
+  if (error) throw error;
+  return data as CallRow;
+}
+
+async function processRecording(job: ProcessingJob) {
+  if (!job.call_id) throw new Error("Recording job has no call");
+  const call = await loadCall(job.call_id);
+  await supabase.from("calls").update({
+    status: "processing",
+    error_message: null,
+  }).eq("id", call.id);
+
+  const directory = await mkdtemp(join(tmpdir(), `calllog-${call.id}-`));
+  try {
+    const inputPath = join(directory, "input-audio");
+    const sourcePath = join(directory, "source.webm");
+    let chunkStoragePaths: string[] = [];
+
+    if (call.source_path) {
+      await downloadStorageFile(call.source_path, inputPath);
+    } else {
+      if (call.expected_final_chunk === null) {
+        throw new Error("Final recording chunk was not declared");
+      }
+      const chunks = await downloadChunkSequence(
+        call.chunk_prefix,
+        call.expected_final_chunk,
+        join(directory, "chunks"),
+      );
+      chunkStoragePaths = chunks.storagePaths;
+      await concatenateFiles(chunks.localPaths, inputPath);
+    }
+
+    if (/webm/i.test(call.mime_type)) {
+      await copyFile(inputPath, sourcePath);
+    } else {
+      await runFfmpeg([
+        "-i", inputPath,
+        "-vn",
+        "-c:a", "libopus",
+        "-b:a", "128k",
+        sourcePath,
+      ]);
+    }
+
+    const mp3Path = join(directory, "recording.mp3");
+    await runFfmpeg(["-i", sourcePath, "-vn", "-c:a", "libmp3lame", "-b:a", "128k", mp3Path]);
+
+    const artifactPrefix = `${call.workspace_id}/${call.id}/artifacts`;
+    const finalSourcePath = `${artifactPrefix}/source.webm`;
+    const finalMp3Path = `${artifactPrefix}/recording.mp3`;
+    await uploadStorageFile(sourcePath, finalSourcePath, "audio/webm");
+    await uploadStorageFile(mp3Path, finalMp3Path, "audio/mpeg");
+
+    if (job.payload.skipTranscription !== true) {
+      const segmentPattern = join(directory, "segment-%05d.mp3");
+      await runFfmpeg([
+        "-i", sourcePath,
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        "-c:a", "libmp3lame",
+        "-b:a", "32k",
+        "-f", "segment",
+        "-segment_time", "600",
+        "-reset_timestamps", "1",
+        segmentPattern,
+      ]);
+      const segmentPaths = await listMatchingFiles(directory, /^segment-\d{5}\.mp3$/);
+      if (!segmentPaths.length) throw new Error("FFmpeg produced no transcription segments");
+
+      const transcription = await transcribeAudioSegments(segmentPaths);
+      const { data: transcript, error: transcriptError } = await supabase
+        .from("transcripts")
+        .upsert({
+          call_id: call.id,
+          model: config.transcriptionModel,
+          language: transcription.language,
+          full_text: transcription.text,
+          provider_generation_id: transcription.generationIds.join(","),
+          provider_cost_usd: transcription.costUsd,
+          provider_duration_seconds: transcription.durationSeconds,
+        }, { onConflict: "call_id" })
+        .select("id")
+        .single();
+      if (transcriptError) throw transcriptError;
+
+      const { error: deleteSegmentsError } = await supabase
+        .from("transcript_segments")
+        .delete()
+        .eq("transcript_id", transcript.id);
+      if (deleteSegmentsError) throw deleteSegmentsError;
+
+      for (let index = 0; index < transcription.segments.length; index += 500) {
+        const { error } = await supabase.from("transcript_segments").insert(
+          transcription.segments.slice(index, index + 500).map((segment) => ({
+            transcript_id: transcript.id,
+            sequence: segment.sequence,
+            start_ms: segment.startMs,
+            end_ms: segment.endMs,
+            text: segment.text,
+          })),
+        );
+        if (error) throw error;
+      }
+    }
+
+    const { error: callError } = await supabase.from("calls").update({
+      status: "ready",
+      source_path: finalSourcePath,
+      mp3_path: finalMp3Path,
+      source_bytes: await fileSize(sourcePath),
+      error_message: null,
+    }).eq("id", call.id);
+    if (callError) throw callError;
+
+    if (chunkStoragePaths.length) await removeStorageFiles(chunkStoragePaths);
+    if (typeof job.payload.extensionImportId === "string") {
+      await supabase.from("extension_imports").update({
+        status: "complete",
+        error_message: null,
+      }).eq("id", job.payload.extensionImportId);
+    }
+  } finally {
+    await removeDirectory(directory);
+  }
+}
+
+async function generateWav(job: ProcessingJob) {
+  if (!job.call_id) throw new Error("WAV job has no call");
+  const call = await loadCall(job.call_id);
+  if (!call.source_path) throw new Error("Source audio is not ready");
+  const directory = await mkdtemp(join(tmpdir(), `calllog-wav-${call.id}-`));
+  try {
+    const sourcePath = join(directory, "source.webm");
+    const wavPath = join(directory, "recording.wav");
+    await downloadStorageFile(call.source_path, sourcePath);
+    await runFfmpeg(["-i", sourcePath, "-vn", "-c:a", "pcm_s16le", wavPath]);
+    const storagePath = `${call.workspace_id}/${call.id}/artifacts/recording.wav`;
+    await uploadStorageFile(wavPath, storagePath, "audio/wav");
+    await supabase.from("calls").update({ wav_path: storagePath }).eq("id", call.id);
+    const exportJobId = job.payload.exportJobId;
+    if (typeof exportJobId === "string") {
+      await supabase.from("export_jobs").update({
+        status: "complete",
+        completed_at: new Date().toISOString(),
+      }).eq("id", exportJobId);
+    }
+  } finally {
+    await removeDirectory(directory);
+  }
+}
+
+async function deleteCall(job: ProcessingJob) {
+  if (!job.call_id) throw new Error("Delete job has no call");
+  const prefix = `${job.workspace_id}/${job.call_id}`;
+  const chunkFiles = await listStorageFiles(`${prefix}/chunks`);
+  const artifactFiles = await listStorageFiles(`${prefix}/artifacts`);
+  const importFiles = await listStorageFiles(`${prefix}/imports`);
+  await removeStorageFiles([...chunkFiles, ...artifactFiles, ...importFiles].map((file) => file.path));
+  await supabase.from("calls").delete().eq("id", job.call_id);
+}
+
+async function handleJob(job: ProcessingJob) {
+  if (job.kind === "process_recording") return processRecording(job);
+  if (job.kind === "generate_wav") return generateWav(job);
+  if (job.kind === "delete_call") return deleteCall(job);
+  if (job.kind === "cleanup_abandoned") return cleanupAbandonedCalls();
+  throw new Error(`Unsupported job kind: ${job.kind}`);
+}
+
+export async function claimJob() {
+  const { data, error } = await supabase.rpc("claim_processing_job", {
+    worker_name: config.workerName,
+  });
+  if (error) throw error;
+  return (data?.[0] ?? null) as ProcessingJob | null;
+}
+
+export async function runJob(job: ProcessingJob) {
+  log.info("job_started", {
+    jobId: job.id,
+    callId: job.call_id,
+    kind: job.kind,
+    attempt: job.attempts,
+  });
+  try {
+    await handleJob(job);
+    await supabase.from("processing_jobs").update({
+      status: "complete",
+      finished_at: new Date().toISOString(),
+      locked_at: null,
+      locked_by: null,
+    }).eq("id", job.id);
+    log.info("job_completed", { jobId: job.id, callId: job.call_id, kind: job.kind });
+  } catch (error) {
+    const message = sanitizedError(error);
+    const exhausted = job.attempts >= job.max_attempts;
+    const retryDelayMs = 30_000 * (2 ** Math.max(0, job.attempts - 1));
+    await supabase.from("processing_jobs").update({
+      status: exhausted ? "failed" : "retrying",
+      next_attempt_at: new Date(Date.now() + retryDelayMs).toISOString(),
+      error_message: message,
+      locked_at: null,
+      locked_by: null,
+      finished_at: exhausted ? new Date().toISOString() : null,
+    }).eq("id", job.id);
+    if (job.call_id && exhausted && job.kind === "process_recording") {
+      await supabase.from("calls").update({
+        status: "failed",
+        error_message: message,
+      }).eq("id", job.call_id);
+    }
+    log.error("job_failed", {
+      jobId: job.id,
+      callId: job.call_id,
+      kind: job.kind,
+      exhausted,
+      error: message,
+    });
+  }
+}
+
+export async function cleanupAbandonedCalls() {
+  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1_000).toISOString();
+  const { data: calls, error } = await supabase
+    .from("calls")
+    .select("id, workspace_id, chunk_prefix")
+    .in("status", ["recording", "uploading"])
+    .lt("updated_at", cutoff)
+    .is("deleted_at", null);
+  if (error) throw error;
+
+  for (const call of calls ?? []) {
+    const files = await listStorageFiles(call.chunk_prefix);
+    if (files.length) await removeStorageFiles(files.map((file) => file.path));
+    await supabase.from("calls").update({
+      status: "abandoned",
+      error_message: "Recording upload expired after seven days without finalization.",
+    }).eq("id", call.id);
+  }
+  log.info("abandoned_cleanup_complete", { count: calls?.length ?? 0 });
+}

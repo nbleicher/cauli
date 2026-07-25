@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "cauli - Call Recorder & Transcriber",
+  "version": "2.0.0",
+  "description": "Open cauli and securely migrate recordings from the legacy recorder.",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "activeTab",
+    "scripting",
+    "tabs",
+    "offscreen",
+    "tabCapture"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src https://api.groq.com https://*.supabase.co http://localhost:* http://127.0.0.1:*"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "http://localhost:3000/*",
+        "https://calllog-production.up.railway.app/*"
+      ],
+      "js": ["companion-config.js", "migration-bridge.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["permissions.html", "permissions.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open cauli",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

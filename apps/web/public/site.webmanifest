@@ -1,0 +1,11 @@
+{
+  "name": "Cauli",
+  "short_name": "Cauli",
+  "icons": [
+    { "src": "/icon-192.png", "type": "image/png", "sizes": "192x192" },
+    { "src": "/icon-512.png", "type": "image/png", "sizes": "512x512" }
+  ],
+  "theme_color": "#FF6B5E",
+  "background_color": "#FBF9F5",
+  "display": "standalone"
+}

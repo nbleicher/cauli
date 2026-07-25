@@ -1,7 +1,27 @@
 {
-  "dependencies": {
-    "@ffmpeg/ffmpeg": "^0.12.10",
-    "@ffmpeg/util": "^0.12.1",
-    "lamejs": "^1.2.1"
+  "name": "calllog",
+  "version": "2.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @calllog/shared && npm run build -w @calllog/web && npm run build -w @calllog/worker && npm run build -w @calllog/extension",
+    "dev": "npm run dev -w @calllog/web",
+    "dev:web": "npm run dev -w @calllog/web",
+    "dev:worker": "npm run dev -w @calllog/worker",
+    "test": "npm run test -ws --if-present",
+    "typecheck": "npm run typecheck -ws --if-present",
+    "lint": "npm run lint -ws --if-present"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.23",
+      "sharp": "0.35.3"
+    }
   }
 }
