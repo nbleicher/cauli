@@ -14,6 +14,11 @@ interface ProfileRelation {
   email: string;
 }
 
+interface ScorecardTemplate {
+  id: string;
+  name: string;
+}
+
 function firstRelation<T>(relation: T | T[] | null): T | null {
   return Array.isArray(relation) ? (relation[0] ?? null) : relation;
 }
@@ -67,16 +72,34 @@ export default async function CallDetailPage({
     .eq("call_id", id)
     .maybeSingle();
 
-  const { data: template } = await supabase
-    .from("scorecard_templates")
-    .select("id, name")
-    .eq("workspace_id", rawCall.workspace_id)
-    .eq("is_active", true)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
+  let template: ScorecardTemplate | null = null;
   let scorecardVersionId = existingReview?.scorecard_version_id ?? "";
+  if (scorecardVersionId) {
+    const { data: boundVersion } = await supabase
+      .from("scorecard_versions")
+      .select("template_id")
+      .eq("id", scorecardVersionId)
+      .maybeSingle();
+    if (boundVersion) {
+      const { data: boundTemplate } = await supabase
+        .from("scorecard_templates")
+        .select("id, name")
+        .eq("id", boundVersion.template_id)
+        .maybeSingle();
+      template = boundTemplate;
+    }
+  } else {
+    const { data: activeTemplate } = await supabase
+      .from("scorecard_templates")
+      .select("id, name")
+      .eq("workspace_id", rawCall.workspace_id)
+      .eq("is_active", true)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    template = activeTemplate;
+  }
+
   if (!scorecardVersionId && template) {
     const { data: latestVersion } = await supabase
       .from("scorecard_versions")

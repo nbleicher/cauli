@@ -16,9 +16,16 @@ const admin = createClient(localUrl, serviceRoleKey, {
   auth: { persistSession: false },
 });
 const createdCallIds: string[] = [];
+const createdJobIds: string[] = [];
 const createdUserIds: string[] = [];
 
 afterEach(async () => {
+  if (createdJobIds.length) {
+    await admin
+      .from("processing_jobs")
+      .delete()
+      .in("id", createdJobIds.splice(0));
+  }
   if (createdCallIds.length) {
     await admin.from("calls").delete().in("id", createdCallIds.splice(0));
   }
@@ -148,10 +155,55 @@ describe.skipIf(
     }
   });
 
+  it("does not claim a call-bound job after its Call is deleted", async () => {
+    const { userId } = await createWorkspaceMember();
+    const { callId } = await createCall(userId);
+    const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
+    const { error: insertError } = await admin.from("processing_jobs").insert({
+      id: jobId,
+      workspace_id: workspaceId,
+      call_id: callId,
+      kind: "process_recording",
+      status: "queued",
+      idempotency_key: `deleted-call:${callId}`,
+    });
+    if (insertError) throw insertError;
+
+    const { error: deleteError } = await admin
+      .from("calls")
+      .delete()
+      .eq("id", callId);
+    if (deleteError) throw deleteError;
+
+    const { data: claimed, error: claimError } = await admin.rpc(
+      "claim_processing_job",
+      { worker_name: "orphan-check-worker" }
+    );
+
+    expect(claimError).toBeNull();
+    expect(
+      (claimed ?? []).some(
+        (job: { call_id: string | null; kind: string }) =>
+          job.call_id === null && job.kind !== "cleanup_abandoned"
+      )
+    ).toBe(false);
+    const { data: orphanedJob } = await admin
+      .from("processing_jobs")
+      .select("call_id, status")
+      .eq("id", jobId)
+      .single();
+    expect(orphanedJob).toEqual({
+      call_id: null,
+      status: "failed",
+    });
+  });
+
   it("reclaims a stale Transcription Job after its worker disappears", async () => {
     const { userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId);
     const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
     const staleLock = new Date(Date.now() - 10 * 60 * 1_000).toISOString();
     const { error: insertError } = await admin.from("processing_jobs").insert({
       id: jobId,
@@ -192,6 +244,7 @@ describe.skipIf(
     const { userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId);
     const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
     const { error: insertError } = await admin.from("processing_jobs").insert({
       id: jobId,
       workspace_id: workspaceId,
@@ -233,6 +286,7 @@ describe.skipIf(
     const { userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId);
     const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
     const { error: insertError } = await admin.from("processing_jobs").insert({
       id: jobId,
       workspace_id: workspaceId,
@@ -341,6 +395,7 @@ describe.skipIf(
     const { callId } = await createCall(userId);
     const exportJobId = crypto.randomUUID();
     const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
     const { error: exportError } = await admin.from("export_jobs").insert({
       id: exportJobId,
       call_id: callId,
@@ -413,6 +468,7 @@ describe.skipIf(
     const { userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId);
     const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
     const { error: insertError } = await admin.from("processing_jobs").insert({
       id: jobId,
       workspace_id: workspaceId,
@@ -428,6 +484,8 @@ describe.skipIf(
       { worker_name: "delete-worker" }
     );
     if (claimError) throw claimError;
+    expect(claimed).toHaveLength(1);
+    expect(claimed?.[0]?.id).toBe(jobId);
     const leaseToken = claimed?.[0]?.lease_token as string;
 
     const { data: rejected } = await admin.rpc("commit_call_deletion", {

@@ -41,6 +41,7 @@ test("review API enforces completion and optimistic concurrency", async ({
   if (ownerError) throw ownerError;
 
   let templateId = "";
+  let replacementTemplateId = "";
   let callId = "";
   try {
     const { error: membershipError } = await admin
@@ -182,12 +183,44 @@ test("review API enforces completion and optimistic concurrency", async ({
       version: 1,
     });
     expect(revisionCount).toBe(1);
+
+    const { error: deactivateError } = await admin
+      .from("scorecard_templates")
+      .update({ is_active: false })
+      .eq("id", template.id);
+    if (deactivateError) throw deactivateError;
+    const replacementName = `Current Review template ${crypto.randomUUID()}`;
+    const { data: replacement, error: replacementError } = await admin
+      .from("scorecard_templates")
+      .insert({
+        workspace_id: workspaceId,
+        name: replacementName,
+        created_by: reviewer.user.id,
+      })
+      .select("id")
+      .single();
+    if (replacementError) throw replacementError;
+    replacementTemplateId = replacement.id;
+
+    await page.goto(`/calls/${call.id}`);
+    await expect(
+      page.getByText("Review API test", { exact: true })
+    ).toBeVisible();
+    await expect(
+      page.getByText(replacementName, { exact: true })
+    ).not.toBeVisible();
   } finally {
     if (callId) {
       await admin.from("calls").delete().eq("id", callId);
     }
     if (templateId) {
       await admin.from("scorecard_templates").delete().eq("id", templateId);
+    }
+    if (replacementTemplateId) {
+      await admin
+        .from("scorecard_templates")
+        .delete()
+        .eq("id", replacementTemplateId);
     }
     await Promise.all([
       admin.auth.admin.deleteUser(reviewer.user.id),
