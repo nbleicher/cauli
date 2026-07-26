@@ -176,7 +176,7 @@ export default async function CallDetailPage({
   return (
     <main className="page">
       <Link
-        href={member.role === "member" ? "/calls" : "/team"}
+        href={member.role === "member" ? "/calls" : "/workspace"}
         className="back-link"
       >
         <ArrowLeft size={15} /> Back to calls

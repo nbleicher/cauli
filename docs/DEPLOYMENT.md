@@ -82,5 +82,7 @@ Distribute `apps/extension/dist`. The exact web and Supabase origins are compile
 - Worker `/health` reports its replica name and active job count.
 - `processing_jobs` records attempts, sanitized errors, lock owner, and completion time.
 - Failed call processing can be retried from Call Detail.
-- Calls left in recording/uploading state for seven days are marked abandoned and their chunks are removed.
+- Calls left in recording/uploading state for seven days are marked abandoned.
+  Their uploaded chunks remain available until the Workspace Member recovers,
+  discards, or deletes the Incomplete Recording.
 - Audio, transcript content, signed URLs, and provider credentials are never written to application logs.

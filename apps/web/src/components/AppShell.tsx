@@ -27,12 +27,12 @@ const memberNav = [
 const accountNav = [{ href: "/account", label: "Account", icon: ShieldCheck }];
 
 const managerNav = [
-  { href: "/team", label: "Team Calls", icon: ClipboardCheck },
+  { href: "/workspace", label: "Workspace Calls", icon: ClipboardCheck },
 ];
 
 const adminNav = [
   { href: "/admin/attention", label: "Needs Attention", icon: TriangleAlert },
-  { href: "/admin/team", label: "Team Admin", icon: Users },
+  { href: "/admin/workspace", label: "Workspace Admin", icon: Users },
   { href: "/admin/scorecards", label: "Scorecards", icon: Settings2 },
 ];
 

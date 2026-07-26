@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "test": "npm run build && node scripts/verify-build.mjs",
     "typecheck": "node --check background.js && node --check migration.js && node --check migration-bridge.js"
   }
 }

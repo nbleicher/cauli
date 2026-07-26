@@ -121,9 +121,9 @@ The `(app)` route group uses `AuthenticatedLayout`. It calls
 | ------------------- | ---------------------- | ------------------------------------------------------------------------------------------------ |
 | `/record`           | Member, manager, admin | Records Mic, Tab, or Both; shows interrupted drafts and recovery actions                         |
 | `/calls`            | Member, manager, admin | Lists the current user's calls and exposes extension import when available                       |
-| `/team`             | Manager, admin         | Lists all visible workspace calls; members redirect to `/calls`                                  |
+| `/workspace`        | Manager, admin         | Lists all visible Workspace Calls; Members redirect to `/calls`                                  |
 | `/calls/[id]`       | Authorized viewer      | Playback, metadata, transcript seeking, downloads, exports, processing errors, reviews, deletion |
-| `/admin/team`       | Admin                  | Sends invitations, changes roles, removes members, lists pending invites                         |
+| `/admin/workspace`  | Admin                  | Sends invitations, changes roles, removes Workspace Members, lists pending invites               |
 | `/admin/scorecards` | Admin                  | Edits and publishes immutable scorecard versions                                                 |
 
 ### Navigation
@@ -131,8 +131,8 @@ The `(app)` route group uses `AuthenticatedLayout`. It calls
 `AppShell` builds navigation from the signed-in role:
 
 - Every role: Record, My Calls
-- Manager and admin: Team Calls
-- Admin: Team Admin, Scorecards
+- Manager and admin: Workspace Calls
+- Admin: Workspace Admin, Scorecards
 
 The account block displays the email, role, and a sign-out action.
 
@@ -146,7 +146,7 @@ The account block displays the email, role, and a sign-out action.
 | `CallTable`        | Responsive call list with processing and review statuses                                             |
 | `CallDetailClient` | Signed playback, timestamp seeking, downloads, WAV requests, retries, and deletion                   |
 | `ReviewEditor`     | Criterion answers, comments, summary, score preview, status, optimistic submission, revision display |
-| `TeamAdmin`        | Invitations, role updates, member removal, and pending invites                                       |
+| `WorkspaceAdmin`   | Invitations, role updates, Workspace Member removal, and pending invites                             |
 | `ScorecardAdmin`   | Category and criterion editor; publishes a new immutable version                                     |
 | `ExtensionImport`  | Detects the companion extension and coordinates resumable migration                                  |
 | `StatusPill`       | Consistent call and review status presentation                                                       |
@@ -157,7 +157,7 @@ The account block displays the email, role, and a sign-out action.
 
 ### Authentication flow
 
-1. An admin creates an invitation from Team Admin.
+1. An Admin creates an invitation from Workspace Admin.
 2. The server upserts `workspace_invites`.
 3. Supabase Admin sends an invitation email through Resend.
 4. The user opens the callback link.
@@ -258,7 +258,9 @@ processing job without creating another logical job.
 
 Requests an asynchronous WAV export for a visible call. Returns `complete` if
 the WAV already exists; otherwise returns `202` and an export job ID. The
-processing idempotency key is `wav:<call-id>`.
+processing idempotency key is `wav:<call-id>`. WAV exports use 16 kHz mono
+16-bit PCM so the supported three-hour Recording limit remains below the
+private bucket's object-size limit. The worker streams the artifact to Storage.
 
 #### `GET /api/calls/:id/media`
 
@@ -434,7 +436,8 @@ Stopping:
 - Recover uploads remaining chunks and finalizes the recording.
 - Discard calls the deletion API and clears local chunks/draft.
 - Calls left in `recording` or `uploading` for seven days are marked
-  `abandoned` by the worker and their uploaded chunks are removed.
+  `abandoned` by the worker. Uploaded chunks remain available for recovery until
+  the Workspace Member finalizes, discards, or deletes the Incomplete Recording.
 
 ### Browser-local database
 
@@ -498,7 +501,16 @@ The worker starts `WORKER_CONCURRENCY` loops. Each loop:
 5. Records completion or retry state.
 
 `claim_processing_job` uses `FOR UPDATE SKIP LOCKED`, so multiple worker
-replicas can claim jobs without processing the same row concurrently.
+replicas can claim jobs without processing the same row concurrently. Each
+claim receives a unique lease token. The worker renews `locked_at` every minute
+while work is active, and completion or failure updates succeed only while that
+token still owns the job. A worker may reclaim a lease after five minutes
+without a successful heartbeat. Recording results are fenced by the same token:
+the Transcript, Transcript Segments, Call artifact state, and extension import
+state commit in one transaction only for the current lease owner. WAV export
+state and Call deletion use equivalent fenced transactions. Each transaction
+also completes its queue row, so a crash after the domain commit cannot later
+surface successful work as an exhausted lease.
 
 ### Recording processing job
 
@@ -626,7 +638,7 @@ database recalculates the authoritative score during submission.
 | `calls`               | Recording metadata, state, artifact paths, labels, duration, soft deletion |
 | `transcripts`         | One transcript and provider metadata per call                              |
 | `transcript_segments` | Ordered timestamped transcript segments                                    |
-| `processing_jobs`     | Idempotent worker queue with locking, attempts, and backoff                |
+| `processing_jobs`     | Idempotent worker queue with tokenized leases, attempts, and backoff       |
 | `export_jobs`         | User-requested WAV export state                                            |
 
 ### Scorecards and reviews
@@ -650,21 +662,27 @@ database recalculates the authoritative score during submission.
 
 ## 13. Database Functions and Triggers
 
-| Function                            | Responsibility                                                                            |
-| ----------------------------------- | ----------------------------------------------------------------------------------------- |
-| `set_updated_at()`                  | Maintains `updated_at` on mutable tables                                                  |
-| `handle_new_user()`                 | Creates/updates profile, accepts matching invite, creates membership                      |
-| `current_user_role(workspace_id)`   | Returns the signed-in user's workspace role                                               |
-| `can_view_call(call_id)`            | Applies owner/member versus manager/admin visibility                                      |
-| `can_review_call(call_id)`          | Allows managers/admins in the call workspace                                              |
-| `submit_call_review(...)`           | Locks review, checks version, replaces current answers, calculates score, writes revision |
-| `claim_processing_job(worker_name)` | Atomically claims one eligible job with `SKIP LOCKED`                                     |
-| `finalize_call(...)`                | Idempotently finalizes call metadata and creates/resets processing job                    |
-| `publish_scorecard(...)`            | Creates a template if needed and publishes ordered immutable content                      |
+| Function                                 | Responsibility                                                                            |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `set_updated_at()`                       | Maintains `updated_at` on mutable tables                                                  |
+| `handle_new_user()`                      | Creates/updates profile, accepts matching invite, creates membership                      |
+| `current_user_role(workspace_id)`        | Returns the signed-in user's workspace role                                               |
+| `can_view_call(call_id)`                 | Applies owner/member versus manager/admin visibility                                      |
+| `can_review_call(call_id)`               | Allows managers/admins in the call workspace                                              |
+| `submit_call_review(...)`                | Locks review, checks version, replaces current answers, calculates score, writes revision |
+| `claim_processing_job(worker_name)`      | Atomically claims one eligible job with `SKIP LOCKED` and a unique lease token            |
+| `renew_processing_job_lease(job, token)` | Renews an active job only while the supplied token owns its lease                         |
+| `commit_processed_recording(...)`        | Atomically commits recording results only for the current job lease                       |
+| `commit_wav_export(...)`                 | Atomically commits WAV metadata and export completion for the current lease               |
+| `commit_call_deletion(...)`              | Deletes a Call and completes its deletion job only for the current lease                  |
+| `finalize_call(...)`                     | Idempotently finalizes call metadata and creates/resets processing job                    |
+| `publish_scorecard(...)`                 | Creates a template if needed and publishes ordered immutable content                      |
 
-`claim_processing_job`, `finalize_call`, and `publish_scorecard` are restricted
-to the service role. `submit_call_review` is executable by authenticated users
-and performs its own authorization.
+`claim_processing_job`, `renew_processing_job_lease`,
+`commit_processed_recording`, `commit_wav_export`, `commit_call_deletion`,
+`finalize_call`, and `publish_scorecard` are restricted to the service role.
+`submit_call_review` is executable by authenticated users and performs its own
+authorization.
 
 ## 14. Row-Level Security
 
@@ -981,18 +999,18 @@ language, reported duration/cost, and provider generation IDs.
 
 #### Job functions
 
-| Function                  | Behavior                                                             |
-| ------------------------- | -------------------------------------------------------------------- |
-| `loadCall(callId)`        | Loads processing fields for one call                                 |
-| `processRecording(job)`   | Assembles, converts, transcribes, uploads, and completes a call      |
-| `generateWav(job)`        | Produces and records a WAV artifact                                  |
-| `deleteCall(job)`         | Deletes all storage prefixes and then the call row                   |
-| `handleJob(job)`          | Dispatches by job kind                                               |
-| `claimJob()`              | Calls the atomic Postgres claim function                             |
-| `runJob(job)`             | Handles logging, completion, exponential retry, and terminal failure |
-| `cleanupAbandonedCalls()` | Expires seven-day incomplete recordings and removes chunks           |
-| `workerLoop(index)`       | Polls and runs jobs until shutdown                                   |
-| `shutdown(signal)`        | Stops accepting work and gives active jobs up to 30 seconds          |
+| Function                  | Behavior                                                                      |
+| ------------------------- | ----------------------------------------------------------------------------- |
+| `loadCall(callId)`        | Loads processing fields for one call                                          |
+| `processRecording(job)`   | Assembles, converts, transcribes, uploads, and completes a call               |
+| `generateWav(job)`        | Produces and records a WAV artifact                                           |
+| `deleteCall(job)`         | Deletes all storage prefixes and then the call row                            |
+| `handleJob(job)`          | Dispatches by job kind                                                        |
+| `claimJob()`              | Calls the atomic Postgres claim function                                      |
+| `runJob(job)`             | Handles logging, completion, exponential retry, and terminal failure          |
+| `cleanupAbandonedCalls()` | Marks seven-day Incomplete Recordings abandoned without deleting Source Audio |
+| `workerLoop(index)`       | Polls and runs jobs until shutdown                                            |
+| `shutdown(signal)`        | Stops accepting work and gives active jobs up to 30 seconds                   |
 
 ### Extension utilities: `apps/extension`
 

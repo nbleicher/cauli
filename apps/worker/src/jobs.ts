@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "./config.js";
 import { createSupabaseCheckpointStore } from "./checkpoint-store.js";
+import { startJobLeaseHeartbeat } from "./job-lease.js";
 import { log, sanitizedError } from "./log.js";
 import {
   concatenateFiles,
@@ -23,7 +24,9 @@ import { supabase } from "./supabase.js";
 import {
   OpenRouterTranscriptionError,
   transcribeAudioSegments,
+  type TranscriptionResult,
 } from "./transcribe.js";
+import { WAV_EXPORT_FORMAT } from "./wav.js";
 
 interface ProcessingJob {
   id: string;
@@ -33,6 +36,7 @@ interface ProcessingJob {
   attempts: number;
   max_attempts: number;
   payload: Record<string, unknown>;
+  lease_token: string;
 }
 
 interface CallRow {
@@ -44,6 +48,8 @@ interface CallRow {
   mp3_path: string | null;
   mime_type: string;
 }
+
+type StopHeartbeat = () => Promise<boolean>;
 
 async function loadCall(callId: string) {
   const { data, error } = await supabase
@@ -57,16 +63,12 @@ async function loadCall(callId: string) {
   return data as CallRow;
 }
 
-async function processRecording(job: ProcessingJob) {
+async function processRecording(
+  job: ProcessingJob,
+  stopHeartbeat: StopHeartbeat
+) {
   if (!job.call_id) throw new Error("Recording job has no call");
   const call = await loadCall(job.call_id);
-  await supabase
-    .from("calls")
-    .update({
-      status: "processing",
-      error_message: null,
-    })
-    .eq("id", call.id);
 
   const directory = await mkdtemp(join(tmpdir(), `calllog-${call.id}-`));
   try {
@@ -122,6 +124,7 @@ async function processRecording(job: ProcessingJob) {
     await uploadStorageFile(sourcePath, finalSourcePath, "audio/webm");
     await uploadStorageFile(mp3Path, finalMp3Path, "audio/mpeg");
 
+    let transcription: TranscriptionResult | null = null;
     if (job.payload.skipTranscription !== true) {
       const segmentPaths = await splitAudioForTranscription(
         sourcePath,
@@ -130,75 +133,50 @@ async function processRecording(job: ProcessingJob) {
       if (!segmentPaths.length)
         throw new Error("FFmpeg produced no transcription segments");
 
-      const transcription = await transcribeAudioSegments(segmentPaths, {
+      transcription = await transcribeAudioSegments(segmentPaths, {
         checkpointStore: createSupabaseCheckpointStore(call.id),
       });
-      const { data: transcript, error: transcriptError } = await supabase
-        .from("transcripts")
-        .upsert(
-          {
-            call_id: call.id,
-            model: config.transcriptionModel,
-            language: transcription.language,
-            full_text: transcription.text,
-            provider_generation_id: transcription.generationIds.join(","),
-            provider_cost_usd: transcription.costUsd,
-            provider_duration_seconds: transcription.durationSeconds,
-          },
-          { onConflict: "call_id" }
-        )
-        .select("id")
-        .single();
-      if (transcriptError) throw transcriptError;
+    }
 
-      const { error: deleteSegmentsError } = await supabase
-        .from("transcript_segments")
-        .delete()
-        .eq("transcript_id", transcript.id);
-      if (deleteSegmentsError) throw deleteSegmentsError;
-
-      for (let index = 0; index < transcription.segments.length; index += 500) {
-        const { error } = await supabase.from("transcript_segments").insert(
-          transcription.segments.slice(index, index + 500).map((segment) => ({
-            transcript_id: transcript.id,
+    if (!(await stopHeartbeat())) {
+      throw new Error("Job lease was lost before recording commit");
+    }
+    const { data: committed, error: commitError } = await supabase.rpc(
+      "commit_processed_recording",
+      {
+        target_job_id: job.id,
+        target_lease_token: job.lease_token,
+        target_source_path: finalSourcePath,
+        target_mp3_path: finalMp3Path,
+        target_source_bytes: await fileSize(sourcePath),
+        target_model: transcription ? config.transcriptionModel : null,
+        target_language: transcription?.language ?? null,
+        target_full_text: transcription?.text ?? null,
+        target_provider_generation_id:
+          transcription?.generationIds.join(",") ?? null,
+        target_provider_cost_usd: transcription?.costUsd ?? null,
+        target_provider_duration_seconds:
+          transcription?.durationSeconds ?? null,
+        target_segments:
+          transcription?.segments.map((segment) => ({
             sequence: segment.sequence,
             start_ms: segment.startMs,
             end_ms: segment.endMs,
             text: segment.text,
-          }))
-        );
-        if (error) throw error;
+          })) ?? null,
       }
-    }
-
-    const { error: callError } = await supabase
-      .from("calls")
-      .update({
-        status: "ready",
-        source_path: finalSourcePath,
-        mp3_path: finalMp3Path,
-        source_bytes: await fileSize(sourcePath),
-        error_message: null,
-      })
-      .eq("id", call.id);
-    if (callError) throw callError;
+    );
+    if (commitError) throw commitError;
+    if (!committed)
+      throw new Error("Job lease was lost before recording commit");
 
     if (chunkStoragePaths.length) await removeStorageFiles(chunkStoragePaths);
-    if (typeof job.payload.extensionImportId === "string") {
-      await supabase
-        .from("extension_imports")
-        .update({
-          status: "complete",
-          error_message: null,
-        })
-        .eq("id", job.payload.extensionImportId);
-    }
   } finally {
     await removeDirectory(directory);
   }
 }
 
-async function generateWav(job: ProcessingJob) {
+async function generateWav(job: ProcessingJob, stopHeartbeat: StopHeartbeat) {
   if (!job.call_id) throw new Error("WAV job has no call");
   const call = await loadCall(job.call_id);
   if (!call.source_path) throw new Error("Source audio is not ready");
@@ -207,29 +185,40 @@ async function generateWav(job: ProcessingJob) {
     const sourcePath = join(directory, "source.webm");
     const wavPath = join(directory, "recording.wav");
     await downloadStorageFile(call.source_path, sourcePath);
-    await runFfmpeg(["-i", sourcePath, "-vn", "-c:a", "pcm_s16le", wavPath]);
+    await runFfmpeg([
+      "-i",
+      sourcePath,
+      "-vn",
+      "-ac",
+      String(WAV_EXPORT_FORMAT.channels),
+      "-ar",
+      String(WAV_EXPORT_FORMAT.sampleRate),
+      "-c:a",
+      WAV_EXPORT_FORMAT.codec,
+      wavPath,
+    ]);
     const storagePath = `${call.workspace_id}/${call.id}/artifacts/recording.wav`;
     await uploadStorageFile(wavPath, storagePath, "audio/wav");
-    await supabase
-      .from("calls")
-      .update({ wav_path: storagePath })
-      .eq("id", call.id);
-    const exportJobId = job.payload.exportJobId;
-    if (typeof exportJobId === "string") {
-      await supabase
-        .from("export_jobs")
-        .update({
-          status: "complete",
-          completed_at: new Date().toISOString(),
-        })
-        .eq("id", exportJobId);
+    if (!(await stopHeartbeat())) {
+      throw new Error("Job lease was lost before WAV export commit");
     }
+    const { data: committed, error: commitError } = await supabase.rpc(
+      "commit_wav_export",
+      {
+        target_job_id: job.id,
+        target_lease_token: job.lease_token,
+        target_wav_path: storagePath,
+      }
+    );
+    if (commitError) throw commitError;
+    if (!committed)
+      throw new Error("Job lease was lost before WAV export commit");
   } finally {
     await removeDirectory(directory);
   }
 }
 
-async function deleteCall(job: ProcessingJob) {
+async function deleteCall(job: ProcessingJob, stopHeartbeat: StopHeartbeat) {
   if (!job.call_id) throw new Error("Delete job has no call");
   const prefix = `${job.workspace_id}/${job.call_id}`;
   const chunkFiles = await listStorageFiles(`${prefix}/chunks`);
@@ -238,14 +227,37 @@ async function deleteCall(job: ProcessingJob) {
   await removeStorageFiles(
     [...chunkFiles, ...artifactFiles, ...importFiles].map((file) => file.path)
   );
-  await supabase.from("calls").delete().eq("id", job.call_id);
+  if (!(await stopHeartbeat())) {
+    throw new Error("Job lease was lost before Call deletion");
+  }
+  const { data: committed, error } = await supabase.rpc(
+    "commit_call_deletion",
+    {
+      target_job_id: job.id,
+      target_lease_token: job.lease_token,
+    }
+  );
+  if (error) throw error;
+  if (!committed) throw new Error("Job lease was lost before Call deletion");
 }
 
-async function handleJob(job: ProcessingJob) {
-  if (job.kind === "process_recording") return processRecording(job);
-  if (job.kind === "generate_wav") return generateWav(job);
-  if (job.kind === "delete_call") return deleteCall(job);
-  if (job.kind === "cleanup_abandoned") return cleanupAbandonedCalls();
+async function handleJob(job: ProcessingJob, stopHeartbeat: StopHeartbeat) {
+  if (job.kind === "process_recording") {
+    await processRecording(job, stopHeartbeat);
+    return true;
+  }
+  if (job.kind === "generate_wav") {
+    await generateWav(job, stopHeartbeat);
+    return true;
+  }
+  if (job.kind === "delete_call") {
+    await deleteCall(job, stopHeartbeat);
+    return true;
+  }
+  if (job.kind === "cleanup_abandoned") {
+    await cleanupAbandonedCalls();
+    return false;
+  }
   throw new Error(`Unsupported job kind: ${job.kind}`);
 }
 
@@ -257,6 +269,31 @@ export async function claimJob() {
   return (data?.[0] ?? null) as ProcessingJob | null;
 }
 
+async function renewJobLease(job: ProcessingJob) {
+  const { data, error } = await supabase.rpc("renew_processing_job_lease", {
+    target_job_id: job.id,
+    target_lease_token: job.lease_token,
+  });
+  if (error) throw error;
+  return data === true;
+}
+
+async function updateOwnedJob(
+  job: ProcessingJob,
+  values: Record<string, unknown>
+) {
+  const { data, error } = await supabase
+    .from("processing_jobs")
+    .update(values)
+    .eq("id", job.id)
+    .eq("status", "processing")
+    .eq("lease_token", job.lease_token)
+    .select("id")
+    .maybeSingle();
+  if (error) throw error;
+  return data !== null;
+}
+
 export async function runJob(job: ProcessingJob) {
   log.info("job_started", {
     jobId: job.id,
@@ -264,11 +301,28 @@ export async function runJob(job: ProcessingJob) {
     kind: job.kind,
     attempt: job.attempts,
   });
+  const heartbeat = startJobLeaseHeartbeat(() => renewJobLease(job), {
+    onError: (error) => {
+      log.error("job_lease_heartbeat_failed", {
+        jobId: job.id,
+        error: sanitizedError(error),
+      });
+    },
+  });
   try {
-    await handleJob(job);
-    await supabase
-      .from("processing_jobs")
-      .update({
+    const completedAtomically = await handleJob(job, () => heartbeat.stop());
+    if (completedAtomically) {
+      log.info("job_completed", {
+        jobId: job.id,
+        callId: job.call_id,
+        kind: job.kind,
+      });
+      return;
+    }
+    const ownsLease = await heartbeat.stop();
+    const completed =
+      ownsLease &&
+      (await updateOwnedJob(job, {
         status: "complete",
         finished_at: new Date().toISOString(),
         error_message: null,
@@ -277,14 +331,23 @@ export async function runJob(job: ProcessingJob) {
         provider_generation_id: null,
         locked_at: null,
         locked_by: null,
-      })
-      .eq("id", job.id);
+        lease_token: null,
+      }));
+    if (!completed) {
+      log.error("job_lease_lost", {
+        jobId: job.id,
+        callId: job.call_id,
+        kind: job.kind,
+      });
+      return;
+    }
     log.info("job_completed", {
       jobId: job.id,
       callId: job.call_id,
       kind: job.kind,
     });
   } catch (error) {
+    const ownsLease = await heartbeat.stop();
     const message = sanitizedError(error);
     const transcriptionError =
       error instanceof OpenRouterTranscriptionError ? error : null;
@@ -292,9 +355,9 @@ export async function runJob(job: ProcessingJob) {
       job.attempts >= job.max_attempts ||
       transcriptionError?.retryable === false;
     const retryDelayMs = 30_000 * 2 ** Math.max(0, job.attempts - 1);
-    await supabase
-      .from("processing_jobs")
-      .update({
+    const failureRecorded =
+      ownsLease &&
+      (await updateOwnedJob(job, {
         status: exhausted ? "failed" : "retrying",
         next_attempt_at: new Date(Date.now() + retryDelayMs).toISOString(),
         error_message: message,
@@ -303,9 +366,18 @@ export async function runJob(job: ProcessingJob) {
         provider_generation_id: transcriptionError?.generationId ?? null,
         locked_at: null,
         locked_by: null,
+        lease_token: null,
         finished_at: exhausted ? new Date().toISOString() : null,
-      })
-      .eq("id", job.id);
+      }));
+    if (!failureRecorded) {
+      log.error("job_lease_lost", {
+        jobId: job.id,
+        callId: job.call_id,
+        kind: job.kind,
+        error: message,
+      });
+      return;
+    }
     if (job.call_id && exhausted && job.kind === "process_recording") {
       await supabase
         .from("calls")
@@ -353,14 +425,12 @@ export async function cleanupAbandonedCalls() {
   if (error) throw error;
 
   for (const call of calls ?? []) {
-    const files = await listStorageFiles(call.chunk_prefix);
-    if (files.length) await removeStorageFiles(files.map((file) => file.path));
     await supabase
       .from("calls")
       .update({
         status: "abandoned",
         error_message:
-          "Recording upload expired after seven days without finalization.",
+          "Recording upload was not finalized within seven days. Source Audio is retained for recovery.",
       })
       .eq("id", call.id);
   }
