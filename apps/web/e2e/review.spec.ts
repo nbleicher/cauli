@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
+import { signInAsWorkspaceMember } from "./helpers/auth";
 
 const localUrl = "http://127.0.0.1:54321";
 const localServiceRoleKey =
@@ -40,6 +41,7 @@ test("review API enforces completion and optimistic concurrency", async ({
   if (ownerError) throw ownerError;
 
   let templateId = "";
+  let callId = "";
   try {
     const { error: membershipError } = await admin
       .from("workspace_members")
@@ -69,6 +71,7 @@ test("review API enforces completion and optimistic concurrency", async ({
       .select("id")
       .single();
     if (callError) throw callError;
+    callId = call.id;
 
     const { data: template, error: templateError } = await admin
       .from("scorecard_templates")
@@ -115,11 +118,7 @@ test("review API enforces completion and optimistic concurrency", async ({
       .single();
     if (criterionError) throw criterionError;
 
-    await page.goto("/login");
-    await page.getByLabel("Work email").fill(reviewerEmail);
-    await page.getByLabel("Password").fill(password);
-    await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page).toHaveURL(/\/record$/);
+    await signInAsWorkspaceMember(page, reviewerEmail, password);
 
     const endpoint = `/api/calls/${call.id}/review?scorecardVersionId=${version.id}`;
     const incomplete = await page.request.post(endpoint, {
@@ -184,6 +183,9 @@ test("review API enforces completion and optimistic concurrency", async ({
     });
     expect(revisionCount).toBe(1);
   } finally {
+    if (callId) {
+      await admin.from("calls").delete().eq("id", callId);
+    }
     if (templateId) {
       await admin.from("scorecard_templates").delete().eq("id", templateId);
     }

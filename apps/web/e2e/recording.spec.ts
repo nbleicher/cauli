@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
+import { signInAsWorkspaceMember } from "./helpers/auth";
 
 const localUrl = "http://127.0.0.1:54321";
 const localServiceRoleKey =
@@ -170,11 +171,7 @@ test("Both mode continues degraded after one source ends and saves the recording
       });
     });
 
-    await page.goto("/login");
-    await page.getByLabel("Work email").fill(email);
-    await page.getByLabel("Password").fill(password);
-    await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page).toHaveURL(/\/record$/);
+    await signInAsWorkspaceMember(page, email, password);
 
     await page.getByRole("button", { name: "Start recording" }).click();
     await expect(
@@ -212,6 +209,7 @@ test("Both mode continues degraded after one source ends and saves the recording
     });
     expect(call.degraded_intervals).toHaveLength(1);
   } finally {
+    await admin.from("calls").delete().eq("owner_id", created.user.id);
     await admin.auth.admin.deleteUser(created.user.id);
   }
 });
