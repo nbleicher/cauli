@@ -1,19 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { LoaderCircle, ShieldCheck } from "lucide-react";
+import { useSearchParams } from "next/navigation";
 import { createBrowserSupabaseClient } from "@/lib/supabase/browser";
 
 // Lives outside the (app) route group on purpose: requirePageAuth redirects
 // here when a session is aal1, so this page must not itself be gated on aal2.
-export default function MfaChallengePage() {
+function MfaChallenge() {
+  const verificationUnavailable =
+    useSearchParams().get("verification") === "unavailable";
   const [code, setCode] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(
+    verificationUnavailable
+      ? "We could not verify your session security. Try again, or sign out and sign back in."
+      : ""
+  );
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
   const factorId = useRef("");
 
   useEffect(() => {
+    if (verificationUnavailable) return;
     const supabase = createBrowserSupabaseClient();
     supabase.auth.mfa.listFactors().then(({ data, error: listError }) => {
       const totp = data?.totp?.find((f) => f.status === "verified");
@@ -25,15 +33,16 @@ export default function MfaChallengePage() {
       factorId.current = totp.id;
       setReady(true);
     });
-  }, []);
+  }, [verificationUnavailable]);
 
   const verify = useCallback(async (value: string) => {
     setBusy(true);
     setError("");
     const supabase = createBrowserSupabaseClient();
-    const { data: challenge, error: challengeError } = await supabase.auth.mfa.challenge({
-      factorId: factorId.current,
-    });
+    const { data: challenge, error: challengeError } =
+      await supabase.auth.mfa.challenge({
+        factorId: factorId.current,
+      });
     if (challengeError || !challenge) {
       setError(challengeError?.message ?? "Could not start verification.");
       setBusy(false);
@@ -59,7 +68,9 @@ export default function MfaChallengePage() {
       <section className="auth-panel">
         <ShieldCheck size={30} className="mfa-icon" />
         <h1>Two-factor verification</h1>
-        <p className="muted">Enter the 6-digit code from your authenticator app.</p>
+        <p className="muted">
+          Enter the 6-digit code from your authenticator app.
+        </p>
 
         <form
           className="auth-form"
@@ -87,16 +98,33 @@ export default function MfaChallengePage() {
             required
           />
           {error && <p className="form-error">{error}</p>}
-          <button className="button button-primary button-full" disabled={!ready || busy || code.length !== 6}>
-            {busy ? <LoaderCircle className="spin" size={17} /> : <ShieldCheck size={17} />}
+          <button
+            className="button button-primary button-full"
+            disabled={!ready || busy || code.length !== 6}
+          >
+            {busy ? (
+              <LoaderCircle className="spin" size={17} />
+            ) : (
+              <ShieldCheck size={17} />
+            )}
             Verify
           </button>
         </form>
 
         <form action="/api/auth/signout" method="post" className="mfa-escape">
-          <button className="link-button" type="submit">Sign out instead</button>
+          <button className="link-button" type="submit">
+            Sign out instead
+          </button>
         </form>
       </section>
     </main>
+  );
+}
+
+export default function MfaChallengePage() {
+  return (
+    <Suspense>
+      <MfaChallenge />
+    </Suspense>
   );
 }

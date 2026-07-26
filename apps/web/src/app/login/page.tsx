@@ -24,7 +24,7 @@ export default async function LoginPage() {
             cauli<span className="brand-dot">.</span>
           </span>
         </div>
-        <p className="eyebrow">Private team workspace</p>
+        <p className="eyebrow">Private Workspace</p>
         <h1>Sign in to your calls</h1>
         <p className="muted">
           Use the email address your workspace admin invited.

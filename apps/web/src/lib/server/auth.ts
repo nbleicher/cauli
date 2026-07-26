@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { redirect } from "next/navigation";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/env";
+import { secondFactorRequirement } from "@/lib/server/mfa-policy";
 
 export const DEFAULT_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -17,7 +18,9 @@ export interface AuthContext {
 export async function getAuthContext(): Promise<AuthContext | null> {
   if (!isSupabaseConfigured()) return null;
   const supabase = await createServerSupabaseClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
   if (!user) return null;
 
   const { data: membership } = await supabase
@@ -44,29 +47,43 @@ export async function getAuthContext(): Promise<AuthContext | null> {
 // True when the user has a verified second factor but has not presented it on
 // this session. Enforced on the server: a client-side check would be trivially
 // bypassed by calling the API directly.
-async function needsSecondFactor() {
+async function getSecondFactorRequirement() {
   const supabase = await createServerSupabaseClient();
-  const { data, error } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
-  if (error || !data) return false;
-  return data.nextLevel === "aal2" && data.currentLevel !== "aal2";
+  return secondFactorRequirement(
+    await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
+  );
 }
 
 export async function requirePageAuth() {
   const context = await getAuthContext();
   if (!context) redirect(isSupabaseConfigured() ? "/login" : "/setup");
-  if (await needsSecondFactor()) redirect("/auth/mfa");
+  const secondFactor = await getSecondFactorRequirement();
+  if (secondFactor === "required") redirect("/auth/mfa");
+  if (secondFactor === "unavailable") {
+    redirect("/auth/mfa?verification=unavailable");
+  }
   return context;
 }
 
 export async function requireApiAuth(
-  allowedRoles?: Role[],
+  allowedRoles?: Role[]
 ): Promise<AuthContext | NextResponse> {
   const context = await getAuthContext();
   if (!context) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  if (await needsSecondFactor()) {
-    return NextResponse.json({ error: "Second factor required" }, { status: 401 });
+  const secondFactor = await getSecondFactorRequirement();
+  if (secondFactor === "required") {
+    return NextResponse.json(
+      { error: "Second factor required" },
+      { status: 401 }
+    );
+  }
+  if (secondFactor === "unavailable") {
+    return NextResponse.json(
+      { error: "Unable to verify second-factor assurance" },
+      { status: 503 }
+    );
   }
   if (allowedRoles && !allowedRoles.includes(context.member.role)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -75,7 +92,7 @@ export async function requireApiAuth(
 }
 
 export function isAuthError(
-  value: AuthContext | NextResponse,
+  value: AuthContext | NextResponse
 ): value is NextResponse {
   return value instanceof NextResponse;
 }

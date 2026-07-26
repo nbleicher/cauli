@@ -28,7 +28,7 @@ interface Invite {
   expiresAt: string;
 }
 
-export function TeamAdmin({
+export function WorkspaceAdmin({
   members,
   invites,
   currentUserId,
@@ -150,7 +150,7 @@ export function TeamAdmin({
       <section className="admin-section">
         <div className="section-heading">
           <div>
-            <h2>Invite a teammate</h2>
+            <h2>Invite a Workspace Member</h2>
             <p>Invitations expire after seven days and can be resent.</p>
           </div>
         </div>
@@ -162,7 +162,7 @@ export function TeamAdmin({
               type="email"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              placeholder="teammate@company.com"
+              placeholder="member@company.com"
               required
             />
           </div>

@@ -1,48 +1,23 @@
 {
   "manifest_version": 3,
-  "name": "cauli - Call Recorder & Transcriber",
+  "name": "cauli Companion",
   "version": "2.0.0",
   "description": "Open cauli and securely migrate recordings from the legacy recorder.",
-  "permissions": [
-    "storage",
-    "sidePanel",
-    "activeTab",
-    "scripting",
-    "tabs",
-    "offscreen",
-    "tabCapture"
-  ],
-  "host_permissions": ["<all_urls>"],
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["http://localhost:3000/*", "http://127.0.0.1:54321/*"],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src https://api.groq.com https://*.supabase.co http://localhost:* http://127.0.0.1:*"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src http://127.0.0.1:54321"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    },
-    {
-      "matches": [
-        "http://localhost:3000/*",
-        "https://calllog-production.up.railway.app/*"
-      ],
+      "matches": ["http://localhost:3000/*"],
       "js": ["companion-config.js", "migration-bridge.js"],
       "run_at": "document_start"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["permissions.html", "permissions.js"],
-      "matches": ["<all_urls>"]
     }
   ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
-  },
-  "side_panel": {
-    "default_path": "sidepanel.html"
   },
   "action": {
     "default_title": "Open cauli",
