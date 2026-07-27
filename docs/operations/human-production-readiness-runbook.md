@@ -15,7 +15,15 @@ Counsel review is explicitly **out of the current pilot scope**. The operator st
 
 ## Using the checklist
 
-Every actionable step is a task-list checkbox. Leave it as `[ ]` until the step and its completion evidence are complete, then mark it `[x]`; the rendered checklist shows the completed task struck through. Do not check a parent task until every indented requirement beneath it is satisfied.
+Every actionable step is a task-list checkbox. The repository file is the durable instruction source, but its rendered checkboxes are not interactive. Record live progress by clicking the checkboxes directly in the matching GitHub issue:
+
+- [Phase A account and recovery bootstrap — #40](https://github.com/nbleicher/cauli/issues/40)
+- [Pilot legal package — #41](https://github.com/nbleicher/cauli/issues/41)
+- [Offline custody and disaster recovery — #42](https://github.com/nbleicher/cauli/issues/42)
+- [Production infrastructure, regions, and public repository — #43](https://github.com/nbleicher/cauli/issues/43)
+- [Manual product, operations, and release acceptance — #44](https://github.com/nbleicher/cauli/issues/44)
+
+Leave a task unchecked until the step and its completion evidence are complete. In the live issue, clicking a checkbox records it as complete and visually strikes through the task. Do not check a parent task until every indented requirement beneath it is satisfied.
 
 ## Secret-handling rules
 
