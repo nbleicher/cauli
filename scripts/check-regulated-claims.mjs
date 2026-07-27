@@ -26,6 +26,8 @@ const EXCLUDED_PATHS = new Set([
   // This superseded ADR is retained as architectural history. ADR 0017 is the
   // accepted launch decision and the product must follow it.
   "docs/adr/0016-prohibit-unapproved-regulated-workloads.md",
+  // Positive examples below are scanner self-tests, not product claims.
+  "scripts/check-regulated-claims.mjs",
 ]);
 
 const REGIME =
@@ -59,8 +61,10 @@ function trackedFiles() {
 
 function violationsFor(path, contents) {
   const violations = [];
-  for (const [index, line] of contents.split(/\r?\n/).entries()) {
-    if (NEGATED_OR_POLICY_CONTEXT.test(line)) continue;
+  const lines = contents.split(/\r?\n/);
+  for (const [index, line] of lines.entries()) {
+    const context = `${lines[index - 1] ?? ""} ${line}`;
+    if (NEGATED_OR_POLICY_CONTEXT.test(context)) continue;
     if (UNSUPPORTED_CLAIMS.some((pattern) => pattern.test(line))) {
       violations.push(`${path}:${index + 1}: ${line.trim()}`);
     }

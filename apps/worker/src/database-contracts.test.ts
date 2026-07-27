@@ -18,6 +18,7 @@ const admin = createClient(localUrl, serviceRoleKey, {
 const createdCallIds: string[] = [];
 const createdJobIds: string[] = [];
 const createdUserIds: string[] = [];
+const createdWorkspaceIds: string[] = [];
 
 afterEach(async () => {
   if (createdJobIds.length) {
@@ -32,9 +33,18 @@ afterEach(async () => {
   await Promise.all(
     createdUserIds.splice(0).map((id) => admin.auth.admin.deleteUser(id))
   );
+  if (createdWorkspaceIds.length) {
+    await admin
+      .from("workspaces")
+      .delete()
+      .in("id", createdWorkspaceIds.splice(0));
+  }
 });
 
-async function createWorkspaceMember() {
+async function createWorkspaceMember(
+  role: "member" | "manager" | "admin" = "member",
+  targetWorkspaceId = workspaceId
+) {
   const password = `Test-${crypto.randomUUID()}!`;
   const { data: created, error: createError } =
     await admin.auth.admin.createUser({
@@ -48,9 +58,9 @@ async function createWorkspaceMember() {
   const { error: membershipError } = await admin
     .from("workspace_members")
     .insert({
-      workspace_id: workspaceId,
+      workspace_id: targetWorkspaceId,
       user_id: created.user.id,
-      role: "member",
+      role,
     });
   if (membershipError) throw membershipError;
 
@@ -89,6 +99,116 @@ describe.skipIf(
     !process.env.SUPABASE_SERVICE_ROLE_KEY ||
     !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 )("database authorization and durability contracts", () => {
+  it("keeps Audit Events safe, immutable, retained, and Workspace-isolated", async () => {
+    const { client: workspaceAdmin, userId: workspaceAdminId } =
+      await createWorkspaceMember("admin");
+    const { client: workspaceMember } = await createWorkspaceMember("member");
+
+    const otherWorkspaceId = crypto.randomUUID();
+    createdWorkspaceIds.push(otherWorkspaceId);
+    const { error: workspaceError } = await admin.from("workspaces").insert({
+      id: otherWorkspaceId,
+      name: "Other audit Workspace",
+      slug: `other-audit-${otherWorkspaceId.slice(0, 8)}`,
+    });
+    if (workspaceError) throw workspaceError;
+    const { userId: otherAdminId } = await createWorkspaceMember(
+      "admin",
+      otherWorkspaceId
+    );
+
+    const entityId = crypto.randomUUID();
+    const { data: eventId, error: recordError } = await admin.rpc(
+      "record_audit_event",
+      {
+        target_workspace_id: workspaceId,
+        target_actor_id: workspaceAdminId,
+        target_action: "workspace.test.created",
+        target_entity_type: "workspace",
+        target_entity_id: entityId,
+        target_metadata: { role: "admin", test_run: true },
+      }
+    );
+    expect(recordError).toBeNull();
+    expect(eventId).toBeTypeOf("number");
+
+    const { error: otherRecordError } = await admin.rpc("record_audit_event", {
+      target_workspace_id: otherWorkspaceId,
+      target_actor_id: otherAdminId,
+      target_action: "workspace.test.created",
+      target_entity_type: "workspace",
+      target_entity_id: otherWorkspaceId,
+      target_metadata: {},
+    });
+    expect(otherRecordError).toBeNull();
+
+    const { error: unsafeError } = await admin.rpc("record_audit_event", {
+      target_workspace_id: workspaceId,
+      target_actor_id: workspaceAdminId,
+      target_action: "workspace.test.created",
+      target_entity_type: "workspace",
+      target_entity_id: entityId,
+      target_metadata: { email: "customer@example.com" },
+    });
+    expect(unsafeError?.message).toMatch(/prohibited content/i);
+
+    const { error: insertError } = await workspaceMember
+      .from("audit_events")
+      .insert({
+        workspace_id: workspaceId,
+        actor_id: workspaceAdminId,
+        action: "workspace.test.forged",
+        entity_type: "workspace",
+        entity_id: entityId,
+      });
+    expect(insertError).not.toBeNull();
+
+    const { data: adminEvents, error: selectError } = await workspaceAdmin
+      .from("audit_events")
+      .select(
+        "id, workspace_id, actor_id, action, entity_type, entity_id, metadata, created_at, retained_until"
+      )
+      .eq("id", eventId)
+      .single();
+    expect(selectError).toBeNull();
+    expect(adminEvents).toMatchObject({
+      id: eventId,
+      workspace_id: workspaceId,
+      actor_id: workspaceAdminId,
+      action: "workspace.test.created",
+      entity_type: "workspace",
+      entity_id: entityId,
+      metadata: { role: "admin", test_run: true },
+    });
+    expect(
+      new Date(adminEvents!.retained_until).getTime() -
+        new Date(adminEvents!.created_at).getTime()
+    ).toBeGreaterThanOrEqual(365 * 24 * 60 * 60 * 1_000);
+
+    const { data: memberEvents } = await workspaceMember
+      .from("audit_events")
+      .select("id");
+    expect(memberEvents).toEqual([]);
+
+    const { data: crossWorkspaceEvents } = await workspaceAdmin
+      .from("audit_events")
+      .select("workspace_id")
+      .eq("workspace_id", otherWorkspaceId);
+    expect(crossWorkspaceEvents).toEqual([]);
+
+    const { error: updateError } = await admin
+      .from("audit_events")
+      .update({ entity_id: "mutated" })
+      .eq("id", eventId);
+    expect(updateError).not.toBeNull();
+
+    const { error: deleteError } = await admin
+      .from("audit_events")
+      .delete()
+      .eq("id", eventId);
+    expect(deleteError).not.toBeNull();
+  });
+
   it("prevents a Workspace Member from rewriting protected Call fields directly", async () => {
     const { client, userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId);

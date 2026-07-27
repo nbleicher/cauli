@@ -2,6 +2,7 @@ import { roleSchema } from "@calllog/shared";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { publicEnv } from "@/lib/env";
+import { recordAuditEvent } from "@/lib/server/audit";
 import { createAdminSupabaseClient } from "@/lib/supabase/admin";
 import { isAuthError, requireApiAuth } from "@/lib/server/auth";
 import { parseJson, sanitizeError } from "@/lib/server/http";
@@ -96,12 +97,12 @@ export async function POST(request: Request) {
       .eq("id", invite.id);
   }
 
-  await admin.from("audit_events").insert({
-    workspace_id: auth.member.workspaceId,
-    actor_id: auth.user.id,
+  await recordAuditEvent({
+    workspaceId: auth.member.workspaceId,
+    actorId: auth.user.id,
     action: "workspace.invite.created",
-    entity_type: "workspace_invite",
-    entity_id: invite.id,
+    entityType: "workspace_invite",
+    entityId: invite.id,
     metadata: { role: parsed.data.role },
   });
 
@@ -138,12 +139,12 @@ export async function DELETE(request: Request) {
     );
   }
 
-  await admin.from("audit_events").insert({
-    workspace_id: auth.member.workspaceId,
-    actor_id: auth.user.id,
+  await recordAuditEvent({
+    workspaceId: auth.member.workspaceId,
+    actorId: auth.user.id,
     action: "workspace.invite.revoked",
-    entity_type: "workspace_invite",
-    entity_id: invite.id,
+    entityType: "workspace_invite",
+    entityId: invite.id,
   });
   return new NextResponse(null, { status: 204 });
 }
