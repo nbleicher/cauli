@@ -64,19 +64,7 @@ PORT=8080
 
 The worker image installs FFmpeg. Increase `WORKER_CONCURRENCY` only after observing memory use for long calls; each active job downloads and transcodes one recording locally.
 
-## 4. Extension
-
-Build with the exact web origin:
-
-```bash
-CALLLOG_WEB_ORIGIN=https://YOUR_WEB_DOMAIN \
-CALLLOG_SUPABASE_ORIGIN=https://YOUR_PROJECT.supabase.co \
-  npm run build -w @calllog/extension
-```
-
-Distribute `apps/extension/dist`. The exact web and Supabase origins are compiled into the package. The source manifest is configured for localhost development; do not distribute the source directory as the production package.
-
-## 5. Operations
+## 4. Operations
 
 - `/api/health` reports web process health and whether required Supabase variables exist.
 - Worker `/health` reports its replica name and active job count.

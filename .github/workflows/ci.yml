@@ -9,6 +9,18 @@ permissions:
   contents: read
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan complete Git history for secrets
+        uses: gitleaks/gitleaks-action@v2
+
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -42,6 +54,9 @@ jobs:
 
       - name: Audit production dependencies
         run: npm audit --omit=dev
+
+      - name: Public-source and regulated-claim checks
+        run: npm run check:release
 
       - name: Lint
         run: npm run lint

@@ -148,7 +148,7 @@ The account block displays the email, role, and a sign-out action.
 | `ReviewEditor`     | Criterion answers, comments, summary, score preview, status, optimistic submission, revision display |
 | `WorkspaceAdmin`   | Invitations, role updates, Workspace Member removal, and pending invites                             |
 | `ScorecardAdmin`   | Category and criterion editor; publishes a new immutable version                                     |
-| `ExtensionImport`  | Detects the companion extension and coordinates resumable migration                                  |
+| `ExtensionImport`  | Archived unsupported migration component; absent from production navigation                          |
 | `StatusPill`       | Consistent call and review status presentation                                                       |
 | `PageHeader`       | Page title and descriptive copy                                                                      |
 | `NavItem`          | Active route navigation item                                                                         |
@@ -738,7 +738,11 @@ long assembled source, MP3, or WAV artifacts may exceed this current setting.
 This is an infrastructure constraint even though the recorder has no
 product-level duration timer.
 
-## 16. Companion Extension and Migration
+## 16. Archived Companion Extension and Migration
+
+This section documents unsupported historical migration code. The extension
+and import endpoints are absent from production navigation, deployment, and
+pilot support. They must not be included in production release artifacts.
 
 ### Build-time origin restriction
 
