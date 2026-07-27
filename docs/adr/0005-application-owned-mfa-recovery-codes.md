@@ -1,0 +1,3 @@
+# Application-owned MFA recovery codes
+
+Supabase Auth does not provide recovery codes, and requiring a second Admin or backup authenticator would make account recovery depend on another person or device. Cauli will therefore issue ten application-owned, single-use Recovery Codes after MFA enrollment, store only keyed hashes, show the plaintext codes once, and invalidate all unused codes when a new set is generated. A Recovery Code may only authorize replacement of an inaccessible TOTP factor after password verification; it never grants normal application access, and generation, use, and regeneration are audited without recording code values.

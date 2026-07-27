@@ -1,0 +1,3 @@
+# Use the shared Netcup VPS for Source Audio Backup
+
+Cauli will use the existing ARM64 Netcup VPS in Manassas, Virginia as the always-on Source Audio Backup target even though it hosts other workloads. Backup payloads remain encrypted before arrival, a sandboxed mTLS receiver can only create opaque objects that a separate privileged helper immediately makes immutable to the receiver, retention uses a distinct principal, other workloads receive no Cauli access, Peely never mirrors unauthenticated VPS deletions, and the accepted residual risk is that host-root compromise could destroy the VPS copy but cannot decrypt it; Cauli data is capped at 800 GB so the complete additional copy fits on Peely.

@@ -1,0 +1,3 @@
+# Main is the production source
+
+Production must be reproducible from the repository’s canonical history rather than from an agent workspace or feature branch. Cauli production deployments will use only reviewed commits merged into `main` after required CI passes; the release is built once, deployed to an isolated staging stack, and the exact tested container image digest is promoted to production without rebuilding. Database changes use expand–migrate–contract releases, record a pre-migration PITR timestamp, and preserve compatibility until a later release removes the old shape. Direct production deployment from feature branches is prohibited even when the branch has been tested locally.

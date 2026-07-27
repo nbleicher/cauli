@@ -1,0 +1,3 @@
+# Separate Platform Admin control plane
+
+System-wide operations create a larger trust boundary than Workspace administration. Platform Admin functions will therefore live at `admin.cauli.pro` with separate authorization, mandatory MFA, short sessions, and complete Audit Events rather than appearing inside the Workspace application. Platform Admins may manage budgets, health, releases, backup operations, and Workspace-level controls but have no routine access to Call content; exceptional content access is limited to one Workspace or Call, requires fresh MFA and a stated reason, expires automatically, is fully audited, and notifies the affected Workspace Admin.
