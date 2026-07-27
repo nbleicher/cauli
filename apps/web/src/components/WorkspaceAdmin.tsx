@@ -17,6 +17,7 @@ interface Member {
   email: string;
   displayName: string;
   role: Role;
+  status: "active" | "suspended" | "former";
   joinedAt: string;
   mfaEnabled: boolean;
 }
@@ -67,15 +68,18 @@ export function WorkspaceAdmin({
     }
   }
 
-  async function updateMember(userId: string, nextRole?: Role) {
-    const action = nextRole ? `role:${userId}` : `remove:${userId}`;
+  async function updateMember(
+    userId: string,
+    change: { role: Role } | { status: Member["status"] }
+  ) {
+    const action = "role" in change ? `role:${userId}` : `status:${userId}`;
     setWorking(action);
     setError("");
     try {
       const response = await fetch(`/api/admin/members/${userId}`, {
-        method: nextRole ? "PATCH" : "DELETE",
-        headers: nextRole ? { "Content-Type": "application/json" } : undefined,
-        body: nextRole ? JSON.stringify({ role: nextRole }) : undefined,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(change),
       });
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
@@ -87,6 +91,29 @@ export function WorkspaceAdmin({
         memberError instanceof Error
           ? memberError.message
           : "Member update failed"
+      );
+    } finally {
+      setWorking("");
+    }
+  }
+
+  async function removeMember(userId: string) {
+    setWorking(`remove:${userId}`);
+    setError("");
+    try {
+      const response = await fetch(`/api/admin/members/${userId}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Member removal failed");
+      }
+      router.refresh();
+    } catch (memberError) {
+      setError(
+        memberError instanceof Error
+          ? memberError.message
+          : "Member removal failed"
       );
     } finally {
       setWorking("");
@@ -197,7 +224,13 @@ export function WorkspaceAdmin({
           <div>
             <h2>Workspace members</h2>
             <p>
-              {members.length} active member{members.length === 1 ? "" : "s"}
+              {members.filter((member) => member.status === "active").length}{" "}
+              active member
+              {members.filter((member) => member.status === "active").length ===
+              1
+                ? ""
+                : "s"}{" "}
+              · {members.length} total
             </p>
           </div>
         </div>
@@ -243,15 +276,31 @@ export function WorkspaceAdmin({
               )}
               <select
                 value={member.role}
-                disabled={Boolean(working)}
+                disabled={Boolean(working) || member.status !== "active"}
                 onChange={(event) =>
-                  void updateMember(member.userId, event.target.value as Role)
+                  void updateMember(member.userId, {
+                    role: event.target.value as Role,
+                  })
                 }
                 aria-label={`Role for ${member.email}`}
               >
                 <option value="member">Member</option>
                 <option value="manager">Manager</option>
                 <option value="admin">Admin</option>
+              </select>
+              <select
+                value={member.status}
+                disabled={Boolean(working)}
+                onChange={(event) =>
+                  void updateMember(member.userId, {
+                    status: event.target.value as Member["status"],
+                  })
+                }
+                aria-label={`Status for ${member.email}`}
+              >
+                <option value="active">Active</option>
+                <option value="suspended">Suspended</option>
+                <option value="former">Former</option>
               </select>
               <button
                 className="icon-button"
@@ -268,7 +317,7 @@ export function WorkspaceAdmin({
                       `Remove ${member.email} from this workspace?`
                     )
                   ) {
-                    void updateMember(member.userId);
+                    void removeMember(member.userId);
                   }
                 }}
               >

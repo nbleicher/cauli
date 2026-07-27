@@ -2,10 +2,9 @@ import { roleSchema } from "@calllog/shared";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { publicEnv } from "@/lib/env";
-import { recordAuditEvent } from "@/lib/server/audit";
-import { createAdminSupabaseClient } from "@/lib/supabase/admin";
 import { isAuthError, requireApiAuth } from "@/lib/server/auth";
 import { parseJson, sanitizeError } from "@/lib/server/http";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 const inviteSchema = z.object({
   email: z.email().transform((value) => value.trim().toLowerCase()),
@@ -18,24 +17,14 @@ export async function POST(request: Request) {
   const parsed = await parseJson(request, inviteSchema);
   if (parsed.error) return parsed.error;
 
-  const admin = createAdminSupabaseClient();
-  const { data: invite, error: inviteError } = await admin
-    .from("workspace_invites")
-    .upsert(
-      {
-        workspace_id: auth.member.workspaceId,
-        email: parsed.data.email,
-        role: parsed.data.role,
-        invited_by: auth.user.id,
-        accepted_at: null,
-        expires_at: new Date(
-          Date.now() + 7 * 24 * 60 * 60 * 1000
-        ).toISOString(),
-      },
-      { onConflict: "workspace_id,email" }
-    )
-    .select("id")
-    .single();
+  const supabase = await createServerSupabaseClient();
+  const { data: inviteId, error: inviteError } = await supabase.rpc(
+    "create_workspace_invite",
+    {
+      target_email: parsed.data.email,
+      target_role: parsed.data.role,
+    }
+  );
 
   if (inviteError) {
     return NextResponse.json(
@@ -44,69 +33,24 @@ export async function POST(request: Request) {
     );
   }
 
-  const { data: invited, error: authError } =
-    await admin.auth.admin.inviteUserByEmail(parsed.data.email, {
-      redirectTo: `${publicEnv.appUrl}/auth/callback`,
-    });
-
-  if (
-    authError &&
-    !/already been registered|already exists/i.test(authError.message)
-  ) {
+  const { error: identityError } = await supabase.functions.invoke(
+    "identity-admin",
+    {
+      body: {
+        action: "invite",
+        inviteId,
+        redirectTo: `${publicEnv.appUrl}/auth/callback`,
+      },
+    }
+  );
+  if (identityError) {
     return NextResponse.json(
-      { error: sanitizeError(authError) },
+      { error: sanitizeError(identityError) },
       { status: 500 }
     );
   }
 
-  let invitedUserId = invited.user?.id ?? null;
-  if (!invitedUserId && authError) {
-    const { data: existingProfile } = await admin
-      .from("profiles")
-      .select("id")
-      .ilike("email", parsed.data.email)
-      .maybeSingle();
-    invitedUserId = existingProfile?.id ?? null;
-  }
-
-  if (invitedUserId) {
-    const { error: membershipError } = await admin
-      .from("workspace_members")
-      .upsert(
-        {
-          workspace_id: auth.member.workspaceId,
-          user_id: invitedUserId,
-          role: parsed.data.role,
-          invited_by: auth.user.id,
-        },
-        { onConflict: "workspace_id,user_id" }
-      );
-    if (membershipError) {
-      return NextResponse.json(
-        { error: sanitizeError(membershipError) },
-        {
-          status: membershipError.code === "23505" ? 409 : 500,
-        }
-      );
-    }
-    await admin
-      .from("workspace_invites")
-      .update({
-        accepted_at: new Date().toISOString(),
-      })
-      .eq("id", invite.id);
-  }
-
-  await recordAuditEvent({
-    workspaceId: auth.member.workspaceId,
-    actorId: auth.user.id,
-    action: "workspace.invite.created",
-    entityType: "workspace_invite",
-    entityId: invite.id,
-    metadata: { role: parsed.data.role },
-  });
-
-  return NextResponse.json({ inviteId: invite.id }, { status: 201 });
+  return NextResponse.json({ inviteId }, { status: 201 });
 }
 
 export async function DELETE(request: Request) {
@@ -120,31 +64,13 @@ export async function DELETE(request: Request) {
     );
   }
 
-  const admin = createAdminSupabaseClient();
-  const { data: invite, error } = await admin
-    .from("workspace_invites")
-    .delete()
-    .eq("id", inviteId)
-    .eq("workspace_id", auth.member.workspaceId)
-    .is("accepted_at", null)
-    .select("id")
-    .maybeSingle();
-  if (error) {
-    return NextResponse.json({ error: sanitizeError(error) }, { status: 500 });
-  }
-  if (!invite) {
-    return NextResponse.json(
-      { error: "Pending invite not found" },
-      { status: 404 }
-    );
-  }
-
-  await recordAuditEvent({
-    workspaceId: auth.member.workspaceId,
-    actorId: auth.user.id,
-    action: "workspace.invite.revoked",
-    entityType: "workspace_invite",
-    entityId: invite.id,
+  const supabase = await createServerSupabaseClient();
+  const { error } = await supabase.rpc("revoke_workspace_invite", {
+    target_invite_id: inviteId,
   });
+  if (error) {
+    const status = /not found/i.test(error.message) ? 404 : 500;
+    return NextResponse.json({ error: sanitizeError(error) }, { status });
+  }
   return new NextResponse(null, { status: 204 });
 }

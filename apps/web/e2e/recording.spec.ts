@@ -12,6 +12,29 @@ const admin = createClient(localUrl, localServiceRoleKey, {
   auth: { persistSession: false },
 });
 
+async function cleanupRecordingUser(userId: string) {
+  const { data: calls, error: callLookupError } = await admin
+    .from("calls")
+    .select("id")
+    .eq("owner_id", userId);
+  if (callLookupError) throw callLookupError;
+  const callIds = (calls ?? []).map((call) => call.id);
+  if (callIds.length) {
+    const { error: jobError } = await admin
+      .from("processing_jobs")
+      .delete()
+      .in("call_id", callIds);
+    if (jobError) throw jobError;
+    const { error: callError } = await admin
+      .from("calls")
+      .delete()
+      .in("id", callIds);
+    if (callError) throw callError;
+  }
+  const { error: userError } = await admin.auth.admin.deleteUser(userId);
+  if (userError) throw userError;
+}
+
 test.skip(
   process.env.RUN_DATABASE_INTEGRATION !== "1" ||
     !process.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -81,8 +104,7 @@ test("Both mode continues degraded after one source ends and saves the recording
     });
     expect(call.degraded_intervals).toHaveLength(1);
   } finally {
-    await admin.from("calls").delete().eq("owner_id", created.user.id);
-    await admin.auth.admin.deleteUser(created.user.id);
+    await cleanupRecordingUser(created.user.id);
   }
 });
 
@@ -141,7 +163,6 @@ test("leaving the Record page stops capture and retains an Incomplete Recording"
     ).toBeVisible();
     await expect(page.getByText(/chunk 1$/)).toBeVisible();
   } finally {
-    await admin.from("calls").delete().eq("owner_id", created.user.id);
-    await admin.auth.admin.deleteUser(created.user.id);
+    await cleanupRecordingUser(created.user.id);
   }
 });

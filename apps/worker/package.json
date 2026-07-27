@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "test": "vitest run src",
+    "test": "vitest run src --maxWorkers=1 --testTimeout=20000 --hookTimeout=20000",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

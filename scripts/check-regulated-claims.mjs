@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { extname } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -91,7 +91,12 @@ for (const [line, expected] of selfTests) {
 
 const violations = [];
 for (const path of trackedFiles()) {
-  if (EXCLUDED_PATHS.has(path) || !TEXT_EXTENSIONS.has(extname(path))) continue;
+  if (
+    EXCLUDED_PATHS.has(path) ||
+    !TEXT_EXTENSIONS.has(extname(path)) ||
+    !existsSync(path)
+  )
+    continue;
   const contents = readFileSync(path, "utf8");
   violations.push(...violationsFor(path, contents));
 }

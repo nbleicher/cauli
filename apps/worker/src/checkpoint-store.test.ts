@@ -13,11 +13,20 @@ const supabase = createClient(localUrl, localServiceRoleKey, {
   auth: { persistSession: false },
 });
 const createdUsers: string[] = [];
+const createdCalls: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(
-    createdUsers.splice(0).map((id) => supabase.auth.admin.deleteUser(id))
-  );
+  if (createdCalls.length) {
+    const { error } = await supabase
+      .from("calls")
+      .delete()
+      .in("id", createdCalls.splice(0));
+    if (error) throw error;
+  }
+  for (const id of createdUsers.splice(0)) {
+    const { error } = await supabase.auth.admin.deleteUser(id);
+    if (error) throw error;
+  }
 });
 
 describe.skipIf(
@@ -54,6 +63,7 @@ describe.skipIf(
       .select("id")
       .single();
     if (callError) throw callError;
+    createdCalls.push(call.id);
 
     const { createSupabaseCheckpointStore } =
       await import("./checkpoint-store.js");

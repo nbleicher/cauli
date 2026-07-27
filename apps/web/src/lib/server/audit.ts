@@ -1,4 +1,4 @@
-import { createAdminSupabaseClient } from "@/lib/supabase/admin";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export interface AuditEventInput {
   workspaceId: string;
@@ -10,22 +10,20 @@ export interface AuditEventInput {
 }
 
 export async function recordAuditEvent({
-  workspaceId,
-  actorId,
   action,
-  entityType,
-  entityId,
   metadata = {},
 }: AuditEventInput) {
-  const admin = createAdminSupabaseClient();
-  const { data, error } = await admin.rpc("record_audit_event", {
-    target_workspace_id: workspaceId,
-    target_actor_id: actorId,
-    target_action: action,
-    target_entity_type: entityType,
-    target_entity_id: entityId,
-    target_metadata: metadata,
-  });
+  if (action !== "audit.export.created") {
+    throw new Error("The web principal cannot write arbitrary Audit Events");
+  }
+  const supabase = await createServerSupabaseClient();
+  const { data, error } = await supabase.rpc(
+    "record_audit_export_for_current_admin",
+    {
+      exported_rows: Number(metadata.exported_rows ?? 0),
+      filters_applied: Number(metadata.filters_applied ?? 0),
+    }
+  );
   if (error) throw error;
   return data as number;
 }

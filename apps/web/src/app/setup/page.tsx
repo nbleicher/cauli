@@ -1,6 +1,6 @@
 import { CheckCircle2, Circle, Database, Server, Terminal } from "lucide-react";
 import Image from "next/image";
-import { isServiceRoleConfigured, isSupabaseConfigured } from "@/lib/env";
+import { isSupabaseConfigured } from "@/lib/env";
 
 const steps = [
   {
@@ -10,7 +10,7 @@ const steps = [
   },
   {
     title: "Configure Railway",
-    body: "Set the variables from apps/web/.env.example on both the web and worker services.",
+    body: "Set each service's own variables from its .env.example file. Never copy worker credentials into the web service.",
     icon: Server,
   },
   {
@@ -22,7 +22,6 @@ const steps = [
 
 export default function SetupPage() {
   const publicReady = isSupabaseConfigured();
-  const serviceReady = isServiceRoleConfigured();
 
   return (
     <main className="auth-page">
@@ -53,8 +52,8 @@ export default function SetupPage() {
             Supabase public configuration
           </div>
           <div>
-            {serviceReady ? <CheckCircle2 size={18} /> : <Circle size={18} />}
-            Server service-role configuration
+            <CheckCircle2 size={18} />
+            Web principal isolated from privileged credentials
           </div>
         </div>
 

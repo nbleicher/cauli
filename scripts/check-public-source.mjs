@@ -62,5 +62,27 @@ for (const path of ["docs/DEPLOYMENT.md"]) {
   }
 }
 
+const webCredentialScan = spawnSync(
+  "git",
+  [
+    "grep",
+    "-nE",
+    "SUPABASE_SERVICE_ROLE_KEY|OPENROUTER_API_KEY|createAdminSupabaseClient|requireServiceRoleEnv",
+    "--",
+    "apps/web/src",
+    "apps/web/.env.example",
+  ],
+  { encoding: "utf8" }
+);
+if (webCredentialScan.status === 0) {
+  fail(
+    `The normal web runtime references a privileged credential or client:\n${webCredentialScan.stdout.trim()}`
+  );
+} else if (webCredentialScan.status !== 1) {
+  throw new Error(
+    webCredentialScan.stderr || "Unable to scan the web principal boundary"
+  );
+}
+
 if (process.exitCode) process.exit(process.exitCode);
 console.log("Public-source release checks passed.");

@@ -5,13 +5,15 @@ import {
   type CallAccessSubject,
 } from "@calllog/shared";
 import type { AuthContext } from "@/lib/server/auth";
-import { createAdminSupabaseClient } from "@/lib/supabase/admin";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export async function getCallAccessSubject(callId: string) {
-  const admin = createAdminSupabaseClient();
-  const { data, error } = await admin
+  const supabase = await createServerSupabaseClient();
+  const { data, error } = await supabase
     .from("calls")
-    .select("id, workspace_id, owner_id, status, source_path, mp3_path, wav_path, deleted_at")
+    .select(
+      "id, workspace_id, owner_id, status, source_path, mp3_path, wav_path, deleted_at"
+    )
     .eq("id", callId)
     .maybeSingle();
 
@@ -30,19 +32,20 @@ export async function getCallAccessSubject(callId: string) {
 export async function authorizeCall(
   context: AuthContext,
   callId: string,
-  action: "view" | "delete" | "review" | "own",
+  action: "view" | "delete" | "review" | "own"
 ) {
   const result = await getCallAccessSubject(callId);
   if (!result) return null;
 
-  const allowed = action === "view"
-    ? canViewCall(context.member, result.access)
-    : action === "delete"
-      ? canDeleteCall(context.member, result.access)
-      : action === "review"
-        ? canReviewCall(context.member, result.access)
-        : context.member.workspaceId === result.access.workspaceId
-          && context.user.id === result.access.ownerId;
+  const allowed =
+    action === "view"
+      ? canViewCall(context.member, result.access)
+      : action === "delete"
+        ? canDeleteCall(context.member, result.access)
+        : action === "review"
+          ? canReviewCall(context.member, result.access)
+          : context.member.workspaceId === result.access.workspaceId &&
+            context.user.id === result.access.ownerId;
 
   return allowed ? result : null;
 }

@@ -27,6 +27,7 @@ export async function getAuthContext(): Promise<AuthContext | null> {
     .from("workspace_members")
     .select("workspace_id, user_id, role")
     .eq("user_id", user.id)
+    .eq("status", "active")
     .limit(1)
     .maybeSingle();
 

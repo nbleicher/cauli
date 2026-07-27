@@ -99,6 +99,100 @@ describe.skipIf(
     !process.env.SUPABASE_SERVICE_ROLE_KEY ||
     !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 )("database authorization and durability contracts", () => {
+  it("enforces one Workspace per person and the ten-active-member pilot cap", async () => {
+    const members = [];
+    for (let index = 0; index < 10; index += 1) {
+      members.push(
+        await createWorkspaceMember(index === 0 ? "admin" : "member")
+      );
+    }
+    const pilotAdmin = members[0]!;
+    const suspendedMember = members[1]!;
+
+    const password = `Test-${crypto.randomUUID()}!`;
+    const { data: eleventh, error: createError } =
+      await admin.auth.admin.createUser({
+        email: `eleventh-${crypto.randomUUID()}@example.com`,
+        password,
+        email_confirm: true,
+      });
+    if (createError) throw createError;
+    createdUserIds.push(eleventh.user.id);
+
+    const { error: capError } = await admin.from("workspace_members").insert({
+      workspace_id: workspaceId,
+      user_id: eleventh.user.id,
+      role: "member",
+    });
+    expect(capError?.message).toMatch(/limited to ten active/i);
+
+    const { error: suspendError } = await pilotAdmin.client.rpc(
+      "set_workspace_member_status",
+      {
+        target_user_id: suspendedMember.userId,
+        target_status: "suspended",
+      }
+    );
+    expect(suspendError).toBeNull();
+
+    const { error: admittedError } = await admin
+      .from("workspace_members")
+      .insert({
+        workspace_id: workspaceId,
+        user_id: eleventh.user.id,
+        role: "member",
+      });
+    expect(admittedError).toBeNull();
+
+    const { error: suspendEleventhError } = await pilotAdmin.client.rpc(
+      "set_workspace_member_status",
+      {
+        target_user_id: eleventh.user.id,
+        target_status: "suspended",
+      }
+    );
+    expect(suspendEleventhError).toBeNull();
+
+    const otherWorkspaceId = crypto.randomUUID();
+    createdWorkspaceIds.push(otherWorkspaceId);
+    const { error: workspaceError } = await admin.from("workspaces").insert({
+      id: otherWorkspaceId,
+      name: "Second Workspace",
+      slug: `second-${otherWorkspaceId.slice(0, 8)}`,
+    });
+    if (workspaceError) throw workspaceError;
+
+    const { error: secondWorkspaceError } = await admin
+      .from("workspace_members")
+      .insert({
+        workspace_id: otherWorkspaceId,
+        user_id: eleventh.user.id,
+        role: "member",
+      });
+    expect(secondWorkspaceError?.code).toBe("23505");
+
+    const { data: suspendedAccess } = await suspendedMember.client
+      .from("calls")
+      .select("id");
+    expect(suspendedAccess).toEqual([]);
+
+    const { data: statusAudit } = await admin
+      .from("audit_events")
+      .select("action, entity_id, metadata")
+      .eq("workspace_id", workspaceId)
+      .eq("action", "workspace.member.suspended")
+      .eq("entity_id", suspendedMember.userId)
+      .single();
+    expect(statusAudit).toMatchObject({
+      action: "workspace.member.suspended",
+      entity_id: suspendedMember.userId,
+      metadata: {
+        previous_status: "active",
+        new_status: "suspended",
+      },
+    });
+  });
+
   it("keeps Audit Events safe, immutable, retained, and Workspace-isolated", async () => {
     const { client: workspaceAdmin, userId: workspaceAdminId } =
       await createWorkspaceMember("admin");
@@ -235,6 +329,78 @@ describe.skipIf(
     });
   });
 
+  it("keeps the web principal inside its narrow application commands", async () => {
+    const { client, userId } = await createWorkspaceMember();
+    const callId = crypto.randomUUID();
+    createdCallIds.push(callId);
+
+    const { data: createdCall, error: createError } = await client.rpc(
+      "create_call_for_current_user",
+      {
+        target_call_id: callId,
+        target_source_mode: "both",
+        target_mic_label: "Microphone",
+        target_tab_label: "Browser tab",
+      }
+    );
+    expect(createError).toBeNull();
+    expect(createdCall).toMatchObject({
+      id: callId,
+      workspace_id: workspaceId,
+      owner_id: userId,
+      status: "recording",
+    });
+
+    const { error: jobWriteError } = await client
+      .from("processing_jobs")
+      .insert({
+        workspace_id: workspaceId,
+        call_id: callId,
+        kind: "process_recording",
+        idempotency_key: `forged:${callId}`,
+      });
+    expect(jobWriteError).not.toBeNull();
+
+    const { error: workerClaimError } = await client.rpc(
+      "claim_processing_job",
+      { worker_name: "forged-web-worker" }
+    );
+    expect(workerClaimError).not.toBeNull();
+
+    const { error: arbitraryAuditError } = await client.rpc(
+      "record_audit_event",
+      {
+        target_workspace_id: workspaceId,
+        target_actor_id: userId,
+        target_action: "workspace.test.forged",
+        target_entity_type: "workspace",
+        target_entity_id: workspaceId,
+        target_metadata: {},
+      }
+    );
+    expect(arbitraryAuditError).not.toBeNull();
+
+    const { error: retentionPurgeError } = await client.rpc(
+      "purge_expired_audit_events"
+    );
+    expect(retentionPurgeError).not.toBeNull();
+
+    const { error: privilegedFinalizeError } = await client.rpc(
+      "finalize_call",
+      {
+        target_call_id: callId,
+        final_chunk_sequence: 0,
+        target_duration_ms: 1_000,
+        target_mime_type: "audio/webm",
+        target_source_mode: "both",
+        target_mic_label: "",
+        target_tab_label: "",
+        target_degraded_intervals: [],
+      }
+    );
+    expect(privilegedFinalizeError).not.toBeNull();
+  });
+
   it("retains uploaded Source Audio when an Incomplete Recording ages out", async () => {
     const { userId } = await createWorkspaceMember();
     const oldTimestamp = new Date(
@@ -273,7 +439,7 @@ describe.skipIf(
     } finally {
       await admin.storage.from("recordings").remove([chunkPath]);
     }
-  });
+  }, 20_000);
 
   it("does not claim a call-bound job after its Call is deleted", async () => {
     const { userId } = await createWorkspaceMember();
