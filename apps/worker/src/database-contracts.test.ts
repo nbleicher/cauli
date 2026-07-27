@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 const localUrl = "http://127.0.0.1:54321";
@@ -39,6 +40,10 @@ afterEach(async () => {
       .delete()
       .in("id", createdWorkspaceIds.splice(0));
   }
+  await admin
+    .from("workspaces")
+    .update({ legal_gate_required: false })
+    .eq("id", workspaceId);
 });
 
 async function createWorkspaceMember(
@@ -399,6 +404,165 @@ describe.skipIf(
       }
     );
     expect(privilegedFinalizeError).not.toBeNull();
+  });
+
+  it("requires immutable current Legal Document acceptance before gated access", async () => {
+    const { client: initialAdmin, userId: initialAdminId } =
+      await createWorkspaceMember("admin");
+    const { client: member } = await createWorkspaceMember("member");
+
+    const { error: initialAdminError } = await admin
+      .from("workspace_members")
+      .update({ is_initial_admin: true })
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", initialAdminId);
+    if (initialAdminError) throw initialAdminError;
+
+    const { data: notReadyBeforeGate } = await admin.rpc(
+      "legal_package_ready",
+      { target_workspace_id: workspaceId }
+    );
+    expect(notReadyBeforeGate).toBe(false);
+    const { error: prematureGateError } = await admin
+      .from("workspaces")
+      .update({ legal_gate_required: true })
+      .eq("id", workspaceId);
+    expect(prematureGateError?.message).toMatch(
+      /four operator-approved core Legal Documents/i
+    );
+
+    const approvalTimestamp = new Date(Date.now() - 1_000).toISOString();
+    const { data: requiredDocuments, error: documentsError } = await admin
+      .from("legal_documents")
+      .select("id, document_type")
+      .in("document_type", [
+        "terms",
+        "privacy",
+        "dpa",
+        "recording_responsibilities",
+      ]);
+    if (documentsError) throw documentsError;
+    const testVersion = `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 32)}`;
+    const { error: publishError } = await admin
+      .from("legal_document_versions")
+      .insert(
+        requiredDocuments.map((document) => {
+          const content = `Approved test ${document.document_type} content.`;
+          return {
+            document_id: document.id,
+            version: testVersion,
+            content_markdown: content,
+            content_sha256: createHash("sha256").update(content).digest("hex"),
+            is_material: true,
+            published_at: approvalTimestamp,
+            effective_at: approvalTimestamp,
+            operator_approved_at: approvalTimestamp,
+            operator_approval_reference: "test-operator-approval",
+          };
+        })
+      );
+    if (publishError) throw publishError;
+
+    const { error: gateError } = await admin
+      .from("workspaces")
+      .update({ legal_gate_required: true })
+      .eq("id", workspaceId);
+    if (gateError) throw gateError;
+
+    const { data: packageReady } = await admin.rpc("legal_package_ready", {
+      target_workspace_id: workspaceId,
+    });
+    expect(packageReady).toBe(true);
+
+    const { data: initialRequired, error: initialRequiredError } =
+      await initialAdmin.rpc("required_legal_documents_for_current_user");
+    if (initialRequiredError) throw initialRequiredError;
+    expect(initialRequired).toHaveLength(4);
+    expect(
+      initialRequired.map(
+        (document: { document_type: string }) => document.document_type
+      )
+    ).toEqual(["dpa", "privacy", "recording_responsibilities", "terms"]);
+
+    const { data: memberRequired, error: memberRequiredError } =
+      await member.rpc("required_legal_documents_for_current_user");
+    if (memberRequiredError) throw memberRequiredError;
+    expect(memberRequired).toHaveLength(2);
+
+    const { data: beforeAcceptance } = await initialAdmin.rpc(
+      "legal_gate_satisfied_for_current_user"
+    );
+    expect(beforeAcceptance).toBe(false);
+
+    const initialVersionIds = initialRequired.map(
+      (document: { version_id: string }) => document.version_id
+    );
+    const { error: partialError } = await initialAdmin.rpc(
+      "accept_current_legal_documents",
+      { target_version_ids: initialVersionIds.slice(0, 2) }
+    );
+    expect(partialError?.message).toMatch(/Every current required/i);
+    const { error: extraVersionError } = await member.rpc(
+      "accept_current_legal_documents",
+      {
+        target_version_ids: [
+          ...memberRequired.map(
+            (document: { version_id: string }) => document.version_id
+          ),
+          initialVersionIds[0],
+        ],
+      }
+    );
+    expect(extraVersionError?.message).toMatch(/Every current required/i);
+
+    const { data: acceptedCount, error: acceptanceError } =
+      await initialAdmin.rpc("accept_current_legal_documents", {
+        target_version_ids: initialVersionIds,
+      });
+    expect(acceptanceError).toBeNull();
+    expect(acceptedCount).toBe(4);
+
+    const { data: afterAcceptance } = await initialAdmin.rpc(
+      "legal_gate_satisfied_for_current_user"
+    );
+    expect(afterAcceptance).toBe(true);
+
+    const { data: acceptance } = await admin
+      .from("legal_acceptances")
+      .select("id")
+      .eq("user_id", initialAdminId)
+      .limit(1)
+      .single();
+    const { error: acceptanceMutationError } = await admin
+      .from("legal_acceptances")
+      .update({ accepted_at: new Date(0).toISOString() })
+      .eq("id", acceptance!.id);
+    expect(acceptanceMutationError).not.toBeNull();
+
+    const termsDocument = requiredDocuments.find(
+      (document) => document.document_type === "terms"
+    )!;
+    const nextTerms = "Materially updated pilot terms.";
+    const materialTimestamp = new Date().toISOString();
+    const { error: nextTermsError } = await admin
+      .from("legal_document_versions")
+      .insert({
+        document_id: termsDocument.id,
+        version: `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 32)}`,
+        content_markdown: nextTerms,
+        content_sha256: createHash("sha256").update(nextTerms).digest("hex"),
+        is_material: true,
+        published_at: materialTimestamp,
+        effective_at: materialTimestamp,
+        operator_approved_at: materialTimestamp,
+        operator_approval_reference: "test-material-update",
+      });
+    if (nextTermsError) throw nextTermsError;
+
+    const { data: afterMaterialChange } = await initialAdmin.rpc(
+      "legal_gate_satisfied_for_current_user"
+    );
+    expect(afterMaterialChange).toBe(false);
   });
 
   it("retains uploaded Source Audio when an Incomplete Recording ages out", async () => {

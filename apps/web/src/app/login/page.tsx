@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { getAuthContext } from "@/lib/server/auth";
 import { isSupabaseConfigured } from "@/lib/env";
 import { LoginForm } from "@/components/LoginForm";
+import { PublicFooter } from "@/components/PublicFooter";
 
 export default async function LoginPage() {
   if (!isSupabaseConfigured()) redirect("/setup");
@@ -31,6 +32,7 @@ export default async function LoginPage() {
         </p>
         <LoginForm />
       </section>
+      <PublicFooter />
     </main>
   );
 }
