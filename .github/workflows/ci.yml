@@ -20,6 +20,8 @@ jobs:
 
       - name: Scan complete Git history for secrets
         uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   verify:
     runs-on: ubuntu-latest
@@ -45,9 +47,12 @@ jobs:
         run: |
           supabase start
           supabase db reset
-          supabase status -o env \
-            | sed -E 's/^([A-Z_]+)="(.*)"$/\1=\2/' \
-            >> "$GITHUB_ENV"
+          while IFS='=' read -r name value; do
+            value="${value#\"}"
+            value="${value%\"}"
+            echo "::add-mask::$value"
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done < <(supabase status -o env)
 
       - name: Install Chrome
         run: npx playwright install --with-deps chromium
