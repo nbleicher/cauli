@@ -39,27 +39,56 @@ Counsel review is explicitly **out of the current pilot scope**. The operator st
 
 1. In the password manager, create the `Cauli Production Operations` collection.
 2. Add one secure note named `Provider inventory`.
-3. Add the following fields without storing secrets in field names:
-   - operator name;
-   - operator alert email;
-   - GitHub repository;
-   - Cloudflare account ID and `cauli.pro` zone ID;
-   - Railway production and staging project IDs;
-   - Supabase production and staging project references;
-   - Sentry organization and project slugs;
-   - AWS account ID;
-   - OpenRouter production and staging key names or fingerprints;
-   - Netcup server identifier and region;
-   - Peely host and mount path.
-4. Create the private `Cauli Launch Evidence` folder with subfolders:
+3. Add every field in the lookup table below. If H02–H10 must create an object first, enter `PENDING — H0x` rather than inventing an identifier. Return to the inventory immediately after that task and replace the pending value.
+4. Store only identifiers, names, locations, fingerprints, and links to separate password-manager items in `Provider inventory`. Never put a password, MFA seed, Recovery Code, API-token value, private key, database password, or complete OpenRouter key in this note.
+5. Create the private `Cauli Launch Evidence` folder with subfolders:
    - `accounts`;
    - `regions`;
    - `legal`;
    - `recovery`;
    - `release`.
-5. Confirm neither location is inside the Cauli repository or a public sharing scope.
+6. Record the evidence folder’s provider and exact private folder path in `Provider inventory`; do not record a public sharing URL.
+7. Confirm neither the password-manager collection nor the evidence folder is inside the Cauli repository or a public sharing scope.
+8. H01 is initialized when the note and folder structure exist. H11 completes the inventory by verifying that every `PENDING` entry has been replaced.
 
-**Completion evidence:** content-free note recording the evidence location and the date it was created.
+#### H01 object lookup table
+
+| Inventory field                       | Where to find the object                                                                                                                                                                                 | What to record                                                                                                | Secret handling                                                                                                        |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Operator name                         | The name the operator will use for provider ownership, approvals, and release records.                                                                                                                   | Full operator name.                                                                                           | Not a secret; keep personal details out of GitHub unless required.                                                     |
+| Operator alert email                  | The inbox the operator will actively monitor for Critical and High alerts. Confirm it by sending and receiving a test message.                                                                           | Complete email address and test date.                                                                         | Personal data; keep in the private inventory.                                                                          |
+| GitHub repository                     | In the repository page, copy the owner/repository name from the heading or URL. From this checkout, run `git remote get-url origin`.                                                                     | `nbleicher/cauli` and `https://github.com/nbleicher/cauli`.                                                   | Not a secret. Do not copy a credential-bearing remote URL.                                                             |
+| Cloudflare account ID                 | Cloudflare Dashboard → **Account home** → menu beside the account → **Copy account ID**. It is also shown in the account Overview API section.                                                           | 32-character account ID.                                                                                      | Identifier, not a credential.                                                                                          |
+| Cloudflare `cauli.pro` zone ID        | Cloudflare Dashboard → select the account → **Websites** → `cauli.pro` → **Overview** → API section → **Zone ID**.                                                                                       | 32-character zone ID.                                                                                         | Identifier, not a credential.                                                                                          |
+| Railway production project ID         | Railway Dashboard → `Cauli Production` → **Settings** → **General** → **Project ID**. Before H05 renames it, this is the existing `CallLog` project.                                                     | Project name, project ID, and dashboard URL.                                                                  | Identifier, not a runtime secret.                                                                                      |
+| Railway staging project ID            | After H05 creates it: Railway Dashboard → `Cauli Staging` → **Settings** → **General** → **Project ID**.                                                                                                 | Project name, project ID, and dashboard URL. Initially `PENDING — H05`.                                       | Identifier, not a runtime secret.                                                                                      |
+| Supabase production project reference | Supabase Dashboard → production project → **Settings** → **General** → **Project Settings** → **Reference ID**. It is also the value after `/project/` in the dashboard URL.                             | 20-character project reference, project name, and exact region.                                               | Identifier, not a credential. Do not record API keys here.                                                             |
+| Supabase staging project reference    | After H06 creates it: Supabase Dashboard → `Cauli Staging` → **Settings** → **General** → **Project Settings** → **Reference ID**.                                                                       | 20-character project reference, project name, and `us-east-1`. Initially `PENDING — H06`.                     | Identifier, not a credential. Store the database password in its own password-manager item.                            |
+| Sentry organization slug              | After H02 creates it: Sentry → **Settings** → **General Settings**. The slug also appears after `/organizations/` in Sentry URLs.                                                                        | Organization name, organization slug, and U.S. data region. Initially `PENDING — H02`.                        | Identifier, not a credential.                                                                                          |
+| Sentry web project slug               | Sentry → **Settings** → **Projects** → `cauli-web` → **General Settings**. The project slug is also used in Sentry project API paths.                                                                    | `cauli-web`, its project slug, and a link to the separate DSN inventory item. Initially `PENDING — H02`.      | Slug is not secret. Keep DSN configuration in its own password-manager item.                                           |
+| Sentry worker project slug            | Sentry → **Settings** → **Projects** → `cauli-worker` → **General Settings**.                                                                                                                            | `cauli-worker`, its project slug, and a link to the separate DSN inventory item. Initially `PENDING — H02`.   | Slug is not secret. Keep DSN configuration in its own password-manager item.                                           |
+| AWS account ID                        | After H03 creates it: AWS Console → account menu at upper right, or **IAM Dashboard** → AWS account section. With an authenticated CLI, run `aws sts get-caller-identity --query Account --output text`. | 12-digit AWS account ID and IAM Identity Center sign-in URL. Initially `PENDING — H03`.                       | Account ID is not a credential. Root email, password, MFA, and Recovery Codes stay in separate password-manager items. |
+| OpenRouter production key identity    | OpenRouter → **API Keys** → existing production key. Use the displayed key name and stable key hash or identifier if shown. Do not derive or copy the plaintext key into this note.                      | `cauli-production-worker`, key hash/identifier, and current spending-limit setting.                           | The name/hash is safe inventory metadata; the plaintext key stays in its own secret item.                              |
+| OpenRouter staging key identity       | After H07 creates it: OpenRouter → **API Keys** → `cauli-staging-worker`.                                                                                                                                | Key name, key hash/identifier, expiration if any, and monthly spending limit. Initially `PENDING — H07`.      | The plaintext key is shown only at creation and goes directly into its own secret item.                                |
+| Netcup server identifier              | Netcup **Server Control Panel** → select the Manassas ARM64 VPS → server Overview or General information.                                                                                                | Server number/identifier, hostname, primary IP, and account or product reference.                             | Treat the IP as operational metadata; never record the root password or SSH private key here.                          |
+| Netcup region                         | In the Netcup order/product details and server-location evidence for the selected VPS. Confirm it matches Manassas, Virginia.                                                                            | `Manassas, Virginia, US`, evidence date, and private evidence filename.                                       | Not a secret; keep the full screenshot in `Cauli Launch Evidence/regions`.                                             |
+| Peely host                            | On the synchronization Mac: Apple menu → **System Settings** → **General** → **About** → **Name**. The local hostname is under **General** → **Sharing**.                                                | Mac computer name, local hostname, responsible operator, and macOS version.                                   | Private operational metadata; do not put serial number or personal network address in GitHub.                          |
+| Peely mount path and volume identity  | Connect Peely, then open **Disk Utility** → **View** → **Show All Devices** → select `Peely SSD` → **Info**. Confirm the Mount Point, capacity, available space, format, and volume UUID.                | Exact mount path `/Volumes/Peely SSD`, volume name, volume UUID, capacity, free space, and verification date. | Volume metadata is not a decryption secret. Never store the offline recovery identity on Peely.                        |
+| Password-manager collection location  | In the password manager, copy the vault or collection name containing `Cauli Production Operations`.                                                                                                     | Password-manager provider, account or vault name, and collection path; do not use a public URL.               | Sensitive location metadata; keep private.                                                                             |
+| Launch-evidence folder location       | In the chosen encrypted private storage, open `Cauli Launch Evidence` and note its provider, owning account, and folder path.                                                                            | Provider, private account or vault, exact folder path, access list, and creation date.                        | Never create or record a public sharing link.                                                                          |
+
+#### H01 lookup references
+
+- [Cloudflare: find account and zone IDs](https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/)
+- [Railway: find a project ID in project settings](https://docs.railway.com/projects)
+- [Supabase: find the project Reference ID](https://supabase.com/docs/guides/graphql#project-reference-project_ref)
+- [Sentry: organization and project slug API identifiers](https://docs.sentry.io/api/projects/create-a-project-for-an-organization/)
+- [AWS: view the 12-digit account ID](https://docs.aws.amazon.com/IAM/latest/UserGuide/console-account-id.html)
+- [OpenRouter: API-key names and hashes](https://openrouter.ai/docs/guides/overview/auth/management-api-keys)
+- [Apple: find the Mac name and local hostname](https://support.apple.com/guide/mac-help/find-your-computers-name-and-network-address-mchlp1177/mac)
+- [Apple: inspect the Peely mount point and volume information](https://support.apple.com/guide/disk-utility/get-detailed-information-about-a-disk-dskutl1005/mac)
+
+**Completion evidence:** content-free note recording the inventory and evidence locations and their creation date. H11 records that no `PENDING` values remain.
 
 ### H02 — Create and secure the Cauli Sentry organization
 
@@ -374,7 +403,9 @@ Official reference: [age key generation and passphrase-protected identity files]
 **Unlocks:** start of agent implementation
 
 1. Confirm H01–H10 are complete.
-2. Create a content-free handoff record containing:
+2. Search the `Provider inventory` note for `PENDING`, `TODO`, blank values, placeholder identifiers, and copied secret values. Resolve every result before continuing.
+3. Open each recorded dashboard URL and confirm the recorded account, project, organization, zone, key identity, server, host, region, and mount object still exists and matches the intended environment.
+4. Create a content-free handoff record containing:
    - provider names;
    - account, project, organization, and zone identifiers;
    - approved regions;
@@ -385,7 +416,7 @@ Official reference: [age key generation and passphrase-protected identity files]
    - which credentials will be entered interactively;
    - which reviewed scripts the operator must run;
    - evidence references, not evidence containing secrets.
-3. Confirm the following final topology:
+5. Confirm the following final topology:
    - `cauli.pro`: public site and policies with a Log in option;
    - `app.cauli.pro/login`: Workspace login;
    - `admin.cauli.pro`: production Platform Admin, protected by Cloudflare Access;
@@ -394,10 +425,10 @@ Official reference: [age key generation and passphrase-protected identity files]
    - `status.cauli.pro`: public content-free service status;
    - `www.cauli.pro`: redirect to the apex;
    - no public worker domain.
-4. Confirm authorization after login is derived server-side from active Workspace membership and roles; client state or a directly entered URL cannot expand access.
-5. Confirm staging and production use separate Railway projects, Supabase projects, OpenRouter keys, credentials, and storage.
-6. Confirm the operator is ready to perform interactive logins or run reviewed privileged commands without sharing root credentials.
-7. Mark the external-account bootstrap human ticket complete.
+6. Confirm authorization after login is derived server-side from active Workspace membership and roles; client state or a directly entered URL cannot expand access.
+7. Confirm staging and production use separate Railway projects, Supabase projects, OpenRouter keys, credentials, and storage.
+8. Confirm the operator is ready to perform interactive logins or run reviewed privileged commands without sharing root credentials.
+9. Mark the external-account bootstrap human ticket complete.
 
 **Phase A completion gate:** implementation may begin only when H11 is complete.
 
