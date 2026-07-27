@@ -39,7 +39,9 @@ export async function POST(request: Request) {
       body: {
         action: "invite",
         inviteId,
-        redirectTo: `${publicEnv.appUrl}/auth/callback`,
+        redirectTo: `${publicEnv.appUrl}/auth/callback?next=${encodeURIComponent(
+          `/activate/password?invite=${inviteId}`
+        )}`,
       },
     }
   );

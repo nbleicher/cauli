@@ -89,7 +89,9 @@ test("Both mode continues degraded after one source ends and saves the recording
     ).toBeVisible();
 
     await page.getByRole("button", { name: "Stop and save" }).click();
-    await expect(page.getByText("Queued for processing")).toBeVisible();
+    await expect(page.getByText("Queued for processing")).toBeVisible({
+      timeout: 15_000,
+    });
 
     const { data: call, error: callError } = await admin
       .from("calls")

@@ -11,7 +11,14 @@ interface ResetMfaRequest {
   userId: string;
 }
 
-type IdentityAdminRequest = InviteRequest | ResetMfaRequest;
+interface PasswordResetRequest {
+  action: "request_password_reset";
+  email: string;
+  redirectTo: string;
+}
+
+type IdentityAdminRequest =
+  InviteRequest | ResetMfaRequest | PasswordResetRequest;
 
 const jsonHeaders = {
   "Content-Type": "application/json; charset=utf-8",
@@ -52,6 +59,51 @@ Deno.serve(async (request) => {
 
   try {
     const body = (await request.json()) as IdentityAdminRequest;
+    if (body.action === "request_password_reset") {
+      const configuredOrigin = new URL(
+        Deno.env.get("APP_URL") ?? "http://127.0.0.1:3102"
+      ).origin;
+      const redirect = new URL(body.redirectTo);
+      if (redirect.origin !== configuredOrigin) {
+        return jsonResponse({ accepted: true }, 202);
+      }
+      const email = body.email.trim().toLowerCase();
+      const anonymous = createClient(supabaseUrl, anonKey, {
+        auth: { persistSession: false },
+      });
+      await anonymous.auth.resetPasswordForEmail(email, {
+        redirectTo: redirect.toString(),
+      });
+
+      const admin = createClient(supabaseUrl, serviceRoleKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+      const { data: profile } = await admin
+        .from("profiles")
+        .select("id")
+        .ilike("email", email)
+        .maybeSingle();
+      if (profile) {
+        const { data: membership } = await admin
+          .from("workspace_members")
+          .select("workspace_id")
+          .eq("user_id", profile.id)
+          .eq("status", "active")
+          .maybeSingle();
+        if (membership) {
+          await admin.rpc("record_audit_event", {
+            target_workspace_id: membership.workspace_id,
+            target_actor_id: profile.id,
+            target_action: "auth.password_reset.requested",
+            target_entity_type: "workspace_member",
+            target_entity_id: profile.id,
+            target_metadata: {},
+          });
+        }
+      }
+      return jsonResponse({ accepted: true }, 202);
+    }
+
     const caller = createClient(supabaseUrl, anonKey, {
       auth: { persistSession: false },
       global: { headers: { Authorization: authorization } },
@@ -104,74 +156,10 @@ Deno.serve(async (request) => {
         throw authError;
       }
 
-      let invitedUserId = invited.user?.id ?? null;
-      if (!invitedUserId) {
-        const { data: existingProfile, error: profileError } = await admin
-          .from("profiles")
-          .select("id")
-          .ilike("email", invite.email)
-          .maybeSingle();
-        if (profileError) throw profileError;
-        invitedUserId = existingProfile?.id ?? null;
-      }
-
-      if (invitedUserId) {
-        const { data: previousMembership } = await admin
-          .from("workspace_members")
-          .select("role, status")
-          .eq("workspace_id", invite.workspace_id)
-          .eq("user_id", invitedUserId)
-          .maybeSingle();
-
-        const { error: upsertError } = await admin
-          .from("workspace_members")
-          .upsert(
-            {
-              workspace_id: invite.workspace_id,
-              user_id: invitedUserId,
-              role: invite.role,
-              status: "active",
-              status_changed_at: new Date().toISOString(),
-              status_changed_by: user.id,
-              invited_by: invite.invited_by,
-            },
-            { onConflict: "workspace_id,user_id" }
-          );
-        if (upsertError) throw upsertError;
-
-        if (
-          previousMembership &&
-          (previousMembership.status !== "active" ||
-            previousMembership.role !== invite.role)
-        ) {
-          const action =
-            previousMembership.status !== "active"
-              ? "workspace.member.activated"
-              : "workspace.member.role_changed";
-          const { error: auditError } = await admin.rpc("record_audit_event", {
-            target_workspace_id: invite.workspace_id,
-            target_actor_id: user.id,
-            target_action: action,
-            target_entity_type: "workspace_member",
-            target_entity_id: invitedUserId,
-            target_metadata: {
-              previous_role: previousMembership.role,
-              new_role: invite.role,
-              previous_status: previousMembership.status,
-              new_status: "active",
-            },
-          });
-          if (auditError) throw auditError;
-        }
-
-        const { error: acceptError } = await admin
-          .from("workspace_invites")
-          .update({ accepted_at: new Date().toISOString() })
-          .eq("id", invite.id);
-        if (acceptError) throw acceptError;
-      }
-
-      return jsonResponse({ invited: true, userId: invitedUserId }, 201);
+      return jsonResponse(
+        { invited: true, userId: invited.user?.id ?? null },
+        201
+      );
     }
 
     if (body.action === "reset_mfa") {

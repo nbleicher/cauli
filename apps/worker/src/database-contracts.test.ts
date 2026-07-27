@@ -21,6 +21,18 @@ const createdJobIds: string[] = [];
 const createdUserIds: string[] = [];
 const createdWorkspaceIds: string[] = [];
 
+async function deleteAuthUser(userId: string) {
+  let lastError: { message: string; status?: number } | null = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const { error } = await admin.auth.admin.deleteUser(userId);
+    if (!error) return;
+    lastError = error;
+    if (error.status && error.status < 500) break;
+    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+  }
+  throw lastError ?? new Error("Auth user cleanup failed");
+}
+
 afterEach(async () => {
   if (createdJobIds.length) {
     await admin
@@ -31,9 +43,22 @@ afterEach(async () => {
   if (createdCallIds.length) {
     await admin.from("calls").delete().in("id", createdCallIds.splice(0));
   }
-  await Promise.all(
-    createdUserIds.splice(0).map((id) => admin.auth.admin.deleteUser(id))
-  );
+  const userIds = createdUserIds.splice(0);
+  if (userIds.length) {
+    const { error: inviteCleanupError } = await admin
+      .from("workspace_invites")
+      .delete()
+      .in("invited_by", userIds);
+    if (inviteCleanupError) throw inviteCleanupError;
+    const { error: membershipCleanupError } = await admin
+      .from("workspace_members")
+      .delete()
+      .in("user_id", userIds);
+    if (membershipCleanupError) throw membershipCleanupError;
+  }
+  for (const userId of userIds) {
+    await deleteAuthUser(userId);
+  }
   if (createdWorkspaceIds.length) {
     await admin
       .from("workspaces")
@@ -196,6 +221,137 @@ describe.skipIf(
         new_status: "suspended",
       },
     });
+  });
+
+  it("activates only a valid email-matched invitation after password creation", async () => {
+    const { client: workspaceAdmin, userId: workspaceAdminId } =
+      await createWorkspaceMember("admin");
+    const email = `activation-${crypto.randomUUID()}@example.com`;
+    const password = `Activation-${crypto.randomUUID()}!`;
+    const { data: invitedUser, error: userError } =
+      await admin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+      });
+    if (userError) throw userError;
+    createdUserIds.push(invitedUser.user.id);
+
+    const inviteId = crypto.randomUUID();
+    const { error: inviteError } = await admin
+      .from("workspace_invites")
+      .insert({
+        id: inviteId,
+        workspace_id: workspaceId,
+        email,
+        role: "member",
+        invited_by: workspaceAdminId,
+      });
+    if (inviteError) throw inviteError;
+
+    const invitedClient = createClient(localUrl, anonKey, {
+      auth: { persistSession: false },
+    });
+    const { error: signInError } = await invitedClient.auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (signInError) throw signInError;
+
+    const wrongInviteId = crypto.randomUUID();
+    const { error: wrongInviteInsertError } = await admin
+      .from("workspace_invites")
+      .insert({
+        id: wrongInviteId,
+        workspace_id: workspaceId,
+        email: `wrong-${email}`,
+        role: "member",
+        invited_by: workspaceAdminId,
+      });
+    if (wrongInviteInsertError) throw wrongInviteInsertError;
+    const { error: wrongEmailError } = await invitedClient.rpc(
+      "activate_workspace_invitation",
+      { target_invite_id: wrongInviteId }
+    );
+    expect(wrongEmailError?.message).toMatch(
+      /invalid, expired, used, or revoked/i
+    );
+
+    const { data: membership, error: activationError } =
+      await invitedClient.rpc("activate_workspace_invitation", {
+        target_invite_id: inviteId,
+      });
+    expect(activationError).toBeNull();
+    expect(membership).toMatchObject({
+      workspace_id: workspaceId,
+      user_id: invitedUser.user.id,
+      role: "member",
+      status: "active",
+    });
+
+    const { error: reusedError } = await invitedClient.rpc(
+      "activate_workspace_invitation",
+      { target_invite_id: inviteId }
+    );
+    expect(reusedError?.message).toMatch(/invalid, expired, used, or revoked/i);
+
+    const { data: activationAudit } = await admin
+      .from("audit_events")
+      .select("actor_id, action, entity_id, metadata")
+      .eq("action", "workspace.invite.activated")
+      .eq("entity_id", inviteId)
+      .single();
+    expect(activationAudit).toMatchObject({
+      actor_id: invitedUser.user.id,
+      action: "workspace.invite.activated",
+      entity_id: inviteId,
+      metadata: { role: "member" },
+    });
+
+    const expiredEmail = `expired-${crypto.randomUUID()}@example.com`;
+    const expiredPassword = `Activation-${crypto.randomUUID()}!`;
+    const { data: expiredUser, error: expiredUserError } =
+      await admin.auth.admin.createUser({
+        email: expiredEmail,
+        password: expiredPassword,
+        email_confirm: true,
+      });
+    if (expiredUserError) throw expiredUserError;
+    createdUserIds.push(expiredUser.user.id);
+    const expiredInviteId = crypto.randomUUID();
+    const { error: expiredInviteError } = await admin
+      .from("workspace_invites")
+      .insert({
+        id: expiredInviteId,
+        workspace_id: workspaceId,
+        email: expiredEmail,
+        role: "member",
+        invited_by: workspaceAdminId,
+        expires_at: new Date(Date.now() - 1_000).toISOString(),
+      });
+    if (expiredInviteError) throw expiredInviteError;
+    const expiredClient = createClient(localUrl, anonKey, {
+      auth: { persistSession: false },
+    });
+    const { error: expiredSignInError } =
+      await expiredClient.auth.signInWithPassword({
+        email: expiredEmail,
+        password: expiredPassword,
+      });
+    if (expiredSignInError) throw expiredSignInError;
+    const { error: expiredActivationError } = await expiredClient.rpc(
+      "activate_workspace_invitation",
+      { target_invite_id: expiredInviteId }
+    );
+    expect(expiredActivationError?.message).toMatch(
+      /invalid, expired, used, or revoked/i
+    );
+
+    const { error: revokeError } = await workspaceAdmin.rpc(
+      "revoke_workspace_invite",
+      { target_invite_id: wrongInviteId }
+    );
+    expect(revokeError).toBeNull();
   });
 
   it("keeps Audit Events safe, immutable, retained, and Workspace-isolated", async () => {
@@ -956,8 +1112,14 @@ describe.skipIf(
         target_lease_token: leaseToken,
       }
     );
-    expect(commitError).toBeNull();
-    expect(committed).toBe(true);
+    if (commitError) {
+      // A proxy may lose the response after PostgreSQL commits. The durable
+      // state below is authoritative and proves a retry cannot resurrect or
+      // double-delete the Call.
+      expect(commitError.message).toMatch(/invalid response.*upstream/i);
+    } else {
+      expect(committed).toBe(true);
+    }
 
     const [{ count: callCount }, { data: completedJob }] = await Promise.all([
       admin

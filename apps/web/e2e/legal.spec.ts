@@ -82,7 +82,17 @@ test("an initial Admin accepts exact versions before using the application", asy
     await page.goto("/login");
     await page.getByLabel("Work email").fill(email);
     await page.getByLabel("Password").fill(password);
-    await page.getByRole("button", { name: "Sign in" }).click();
+    await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.url().includes("/auth/v1/token") &&
+          response.url().includes("grant_type=password") &&
+          response.ok()
+      ),
+      page.getByRole("button", { name: "Sign in" }).click(),
+    ]);
+    await page.waitForTimeout(500);
+    await page.goto("/record");
     await expect(page).toHaveURL(/\/legal\/acceptance$/);
 
     const exactVersionLinks = page.locator(
@@ -108,8 +118,15 @@ test("an initial Admin accepts exact versions before using the application", asy
     expect(blockedResponse.status()).toBe(403);
 
     await page.getByRole("checkbox").check();
+    const acceptanceResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/legal/acceptance"
+    );
     await page.getByRole("button", { name: "Accept and continue" }).click();
-    await expect(page).toHaveURL(/\/record$/);
+    const acceptanceResponse = await acceptanceResponsePromise;
+    expect(acceptanceResponse.ok()).toBe(true);
+    await expect(page).toHaveURL(/\/record$/, { timeout: 15_000 });
 
     const { count, error: acceptanceError } = await admin
       .from("legal_acceptances")

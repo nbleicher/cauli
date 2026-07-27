@@ -22,22 +22,18 @@ test("review API enforces completion and optimistic concurrency", async ({
   const password = `Test-${crypto.randomUUID()}!`;
   const reviewerEmail = `reviewer-${crypto.randomUUID()}@example.com`;
   const ownerEmail = `owner-${crypto.randomUUID()}@example.com`;
-  const [
-    { data: reviewer, error: reviewerError },
-    { data: owner, error: ownerError },
-  ] = await Promise.all([
-    admin.auth.admin.createUser({
+  const { data: reviewer, error: reviewerError } =
+    await admin.auth.admin.createUser({
       email: reviewerEmail,
       password,
       email_confirm: true,
-    }),
-    admin.auth.admin.createUser({
-      email: ownerEmail,
-      password,
-      email_confirm: true,
-    }),
-  ]);
+    });
   if (reviewerError) throw reviewerError;
+  const { data: owner, error: ownerError } = await admin.auth.admin.createUser({
+    email: ownerEmail,
+    password,
+    email_confirm: true,
+  });
   if (ownerError) throw ownerError;
 
   let templateId = "";
@@ -222,9 +218,13 @@ test("review API enforces completion and optimistic concurrency", async ({
         .delete()
         .eq("id", replacementTemplateId);
     }
-    await Promise.all([
-      admin.auth.admin.deleteUser(reviewer.user.id),
-      admin.auth.admin.deleteUser(owner.user.id),
-    ]);
+    const { error: reviewerCleanupError } = await admin.auth.admin.deleteUser(
+      reviewer.user.id
+    );
+    if (reviewerCleanupError) throw reviewerCleanupError;
+    const { error: ownerCleanupError } = await admin.auth.admin.deleteUser(
+      owner.user.id
+    );
+    if (ownerCleanupError) throw ownerCleanupError;
   }
 });
