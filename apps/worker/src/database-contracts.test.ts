@@ -24,7 +24,6 @@ const createdScorecardTemplateIds: string[] = [];
 const createdStoragePaths: string[] = [];
 const createdUserIds: string[] = [];
 const createdWorkspaceIds: string[] = [];
-const createdScorecardTemplateIds: string[] = [];
 
 async function deleteAuthUser(userId: string) {
   let lastError: { message: string; status?: number } | null = null;
