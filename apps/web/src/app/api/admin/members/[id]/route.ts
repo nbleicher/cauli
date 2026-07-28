@@ -1,7 +1,11 @@
 import { roleSchema } from "@calllog/shared";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { isAuthError, requireApiAuth } from "@/lib/server/auth";
+import {
+  isAuthError,
+  requireApiAuth,
+  requireFreshMfa,
+} from "@/lib/server/auth";
 import { parseJson, sanitizeError } from "@/lib/server/http";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
@@ -20,6 +24,8 @@ export async function PATCH(
 ) {
   const auth = await requireApiAuth(["admin"]);
   if (isAuthError(auth)) return auth;
+  const stale = await requireFreshMfa();
+  if (stale) return stale;
   const { id } = await params;
   const parsed = await parseJson(request, updateMemberSchema);
   if (parsed.error) return parsed.error;
@@ -53,6 +59,8 @@ export async function DELETE(
 ) {
   const auth = await requireApiAuth(["admin"]);
   if (isAuthError(auth)) return auth;
+  const stale = await requireFreshMfa();
+  if (stale) return stale;
   const { id } = await params;
 
   const supabase = await createServerSupabaseClient();

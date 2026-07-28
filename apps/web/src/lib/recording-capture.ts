@@ -1,5 +1,43 @@
 import type { CaptureSource, SourceMode } from "@calllog/shared";
 
+interface NavigatorWithUserAgentData extends Navigator {
+  userAgentData?: {
+    brands: Array<{ brand: string; version: string }>;
+    platform: string;
+  };
+}
+
+export type RecordingSupport =
+  { supported: true; platform: "macOS" | "Windows" } | { supported: false };
+
+export function detectRecordingSupport(): RecordingSupport {
+  const browserNavigator = navigator as NavigatorWithUserAgentData;
+  const userAgent = browserNavigator.userAgent;
+  const brands = browserNavigator.userAgentData?.brands ?? [];
+  const hasUserAgentData = brands.length > 0;
+  const isGoogleChrome = hasUserAgentData
+    ? brands.some(({ brand }) => brand === "Google Chrome")
+    : /\bChrome\//.test(userAgent) &&
+      !/\b(?:Edg|OPR|Vivaldi|Brave)\//.test(userAgent);
+
+  const platformValue = [
+    browserNavigator.userAgentData?.platform,
+    browserNavigator.platform,
+    userAgent,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const platform = /Mac|macOS/i.test(platformValue)
+    ? "macOS"
+    : /Win|Windows/i.test(platformValue)
+      ? "Windows"
+      : null;
+
+  return isGoogleChrome && platform
+    ? { supported: true, platform }
+    : { supported: false };
+}
+
 export interface ActiveCapture {
   outputStream: MediaStream;
   sourceStreams: Array<{

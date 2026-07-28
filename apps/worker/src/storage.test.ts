@@ -1,15 +1,12 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-
-process.env.NEXT_PUBLIC_SUPABASE_URL = "https://storage.example.test";
-process.env.SUPABASE_SERVICE_ROLE_KEY = "streaming-service-role";
-process.env.OPENROUTER_API_KEY = "config-key";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -19,6 +16,10 @@ afterEach(async () => {
 
 describe("uploadStorageFile", () => {
   it("streams an artifact to private Storage with its exact content length", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://storage.example.test");
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "streaming-service-role");
+    vi.stubEnv("OPENROUTER_API_KEY", "config-key");
+    vi.resetModules();
     const { uploadStorageFile } = await import("./storage.js");
     const directory = await mkdtemp(join(tmpdir(), "cauli-storage-upload-"));
     temporaryDirectories.push(directory);

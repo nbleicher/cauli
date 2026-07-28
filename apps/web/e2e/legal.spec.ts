@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
+import { submitBrowserTotp } from "./helpers/auth";
+import { enrollVerifiedTotp } from "./helpers/totp";
 
 const localUrl = "http://127.0.0.1:54321";
+const anonKey =
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "integration-test-anon-key";
 const localServiceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const workspaceId = "00000000-0000-0000-0000-000000000001";
@@ -43,6 +47,15 @@ test("an initial Admin accepts exact versions before using the application", asy
         is_initial_admin: true,
       });
     if (membershipError) throw membershipError;
+    const userClient = createClient(localUrl, anonKey, {
+      auth: { persistSession: false },
+    });
+    const { error: signInError } = await userClient.auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (signInError) throw signInError;
+    const { secret } = await enrollVerifiedTotp(userClient);
 
     const { data: documents, error: documentsError } = await admin
       .from("legal_documents")
@@ -91,8 +104,14 @@ test("an initial Admin accepts exact versions before using the application", asy
       ),
       page.getByRole("button", { name: "Sign in" }).click(),
     ]);
-    await page.waitForTimeout(500);
-    await page.goto("/record");
+    // A password alone cannot produce an acceptance record for a Role that
+    // requires a second factor, so assurance is settled before the gate opens.
+    const beforeAssurance = await page.request.post("/api/legal/acceptance", {
+      data: { versionIds: [crypto.randomUUID(), crypto.randomUUID()] },
+    });
+    expect(beforeAssurance.status()).toBe(401);
+
+    await submitBrowserTotp(page, secret);
     await expect(page).toHaveURL(/\/legal\/acceptance$/);
 
     const exactVersionLinks = page.locator(

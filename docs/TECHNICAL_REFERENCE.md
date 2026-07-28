@@ -214,9 +214,15 @@ Request:
 {
   "sourceMode": "both",
   "micLabel": "MacBook Microphone",
-  "tabLabel": "Sales dialer"
+  "tabLabel": "Sales dialer",
+  "title": "Customer discovery",
+  "recordingAttested": true
 }
 ```
+
+`recordingAttested` must be exactly `true`. The database stores the signed-in
+Workspace Member and a server timestamp with the new Call. `title` is optional;
+blank and omitted titles use the Call date and time in the UI.
 
 Response `201`:
 
@@ -248,6 +254,13 @@ Owner-only. Records the expected final sequence and queues an idempotent
 
 Repeating the same completed finalization is safe. The job key is
 `process:<call-id>`.
+
+#### `PATCH /api/calls/:id`
+
+Owner-only and available after capture. Renames a Call with
+`{ "title": "Customer discovery" }`. A blank title restores the date-and-time
+fallback. Managers and Admins can still view another owner’s title but receive
+`404` if they attempt to rename it.
 
 #### `POST /api/calls/:id/retry`
 
@@ -382,6 +395,13 @@ audio-less records as failed.
 
 `RecorderPanel` supports:
 
+- Capture only in Google Chrome desktop on macOS and Windows. Other current
+  browsers retain the rest of the application and receive an explicit
+  recording-unsupported explanation.
+- A required Recording Attestation immediately before every capture, persisted
+  with the actor and a server timestamp.
+- An optional pre-capture Call title and an explicit English-only Transcript
+  notice.
 - `mic`: `getUserMedia` audio with echo cancellation, noise suppression, and
   automatic gain control.
 - `tab`: `getDisplayMedia` with shared tab/system audio. The temporary display
@@ -633,13 +653,13 @@ database recalculates the authoritative score during submission.
 
 ### Calls and processing
 
-| Table                 | Purpose                                                                    |
-| --------------------- | -------------------------------------------------------------------------- |
-| `calls`               | Recording metadata, state, artifact paths, labels, duration, soft deletion |
-| `transcripts`         | One transcript and provider metadata per call                              |
-| `transcript_segments` | Ordered timestamped transcript segments                                    |
-| `processing_jobs`     | Idempotent worker queue with tokenized leases, attempts, and backoff       |
-| `export_jobs`         | User-requested WAV export state                                            |
+| Table                 | Purpose                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `calls`               | Recording metadata, Recording Attestation actor/time, title, state, artifact paths, labels, duration, soft deletion |
+| `transcripts`         | One transcript and provider metadata per call                                                                       |
+| `transcript_segments` | Ordered timestamped transcript segments                                                                             |
+| `processing_jobs`     | Idempotent worker queue with tokenized leases, attempts, and backoff                                                |
+| `export_jobs`         | User-requested WAV export state                                                                                     |
 
 ### Scorecards and reviews
 
@@ -662,21 +682,23 @@ database recalculates the authoritative score during submission.
 
 ## 13. Database Functions and Triggers
 
-| Function                                 | Responsibility                                                                            |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `set_updated_at()`                       | Maintains `updated_at` on mutable tables                                                  |
-| `handle_new_user()`                      | Creates/updates profile, accepts matching invite, creates membership                      |
-| `current_user_role(workspace_id)`        | Returns the signed-in user's workspace role                                               |
-| `can_view_call(call_id)`                 | Applies owner/member versus manager/admin visibility                                      |
-| `can_review_call(call_id)`               | Allows managers/admins in the call workspace                                              |
-| `submit_call_review(...)`                | Locks review, checks version, replaces current answers, calculates score, writes revision |
-| `claim_processing_job(worker_name)`      | Atomically claims one eligible job with `SKIP LOCKED` and a unique lease token            |
-| `renew_processing_job_lease(job, token)` | Renews an active job only while the supplied token owns its lease                         |
-| `commit_processed_recording(...)`        | Atomically commits recording results only for the current job lease                       |
-| `commit_wav_export(...)`                 | Atomically commits WAV metadata and export completion for the current lease               |
-| `commit_call_deletion(...)`              | Deletes a Call and completes its deletion job only for the current lease                  |
-| `finalize_call(...)`                     | Idempotently finalizes call metadata and creates/resets processing job                    |
-| `publish_scorecard(...)`                 | Creates a template if needed and publishes ordered immutable content                      |
+| Function                                 | Responsibility                                                                               |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `set_updated_at()`                       | Maintains `updated_at` on mutable tables                                                     |
+| `handle_new_user()`                      | Creates/updates profile, accepts matching invite, creates membership                         |
+| `current_user_role(workspace_id)`        | Returns the signed-in user's workspace role                                                  |
+| `can_view_call(call_id)`                 | Applies owner/member versus manager/admin visibility                                         |
+| `can_review_call(call_id)`               | Allows managers/admins in the call workspace                                                 |
+| `create_attested_call_for_current_user`  | Creates an owned Call only after Recording Attestation and stores its title, actor, and time |
+| `rename_owned_call(call_id, title)`      | Renames a completed Call only for its owner                                                  |
+| `submit_call_review(...)`                | Locks review, checks version, replaces current answers, calculates score, writes revision    |
+| `claim_processing_job(worker_name)`      | Atomically claims one eligible job with `SKIP LOCKED` and a unique lease token               |
+| `renew_processing_job_lease(job, token)` | Renews an active job only while the supplied token owns its lease                            |
+| `commit_processed_recording(...)`        | Atomically commits recording results only for the current job lease                          |
+| `commit_wav_export(...)`                 | Atomically commits WAV metadata and export completion for the current lease                  |
+| `commit_call_deletion(...)`              | Deletes a Call and completes its deletion job only for the current lease                     |
+| `finalize_call(...)`                     | Idempotently finalizes call metadata and creates/resets processing job                       |
+| `publish_scorecard(...)`                 | Creates a template if needed and publishes ordered immutable content                         |
 
 `claim_processing_job`, `renew_processing_job_lease`,
 `commit_processed_recording`, `commit_wav_export`, `commit_call_deletion`,
@@ -694,8 +716,8 @@ Important policy behavior:
 - Profiles are visible to the profile owner and members of a shared workspace.
 - Members see their own membership; managers/admins see workspace memberships.
 - Calls are visible to owners and to workspace managers/admins.
-- Call inserts require the signed-in user to be the owner and a workspace member.
-- Call updates require ownership or admin role.
+- Authenticated Call inserts and updates are revoked; capture and rename use
+  authorization-checking RPCs.
 - Transcript and review reads inherit call visibility.
 - Review writes require manager/admin review permission.
 - Scorecards are readable by workspace members and writable by admins.
@@ -824,20 +846,21 @@ completed legacy transcript is not available.
 
 #### Validation
 
-| Export                          | Purpose                                                  |
-| ------------------------------- | -------------------------------------------------------- |
-| `roleSchema`                    | Valid role                                               |
-| `sourceModeSchema`              | Valid capture source                                     |
-| `callStatusSchema`              | Valid call state                                         |
-| `reviewStatusSchema`            | Valid review state                                       |
-| `createCallSchema`              | Capture mode and device label validation                 |
-| `finalizeCallSchema`            | Final sequence, positive duration, MIME, mode, labels    |
-| `reviewAnswerSchema`            | Criterion UUID, 1-5 or N/A, 4,000-char comment           |
-| `submitReviewSchema`            | Expected version, non-unreviewed state, summary, answers |
-| `extensionRecordingSchema`      | Normalized legacy metadata                               |
-| `prepareExtensionImportSchema`  | Nonce plus up to 2,000 recordings                        |
-| `completeExtensionImportSchema` | Nonce plus up to 2,000 upload results                    |
-| `createScorecardTemplateSchema` | Name, categories, criteria, weights, limits              |
+| Export                          | Purpose                                                                     |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| `roleSchema`                    | Valid role                                                                  |
+| `sourceModeSchema`              | Valid capture source                                                        |
+| `callStatusSchema`              | Valid call state                                                            |
+| `reviewStatusSchema`            | Valid review state                                                          |
+| `createCallSchema`              | Capture mode, device labels, optional title, required Recording Attestation |
+| `renameCallSchema`              | Owner-provided title up to 240 characters                                   |
+| `finalizeCallSchema`            | Final sequence, positive duration, MIME, mode, labels                       |
+| `reviewAnswerSchema`            | Criterion UUID, 1-5 or N/A, 4,000-char comment                              |
+| `submitReviewSchema`            | Expected version, non-unreviewed state, summary, answers                    |
+| `extensionRecordingSchema`      | Normalized legacy metadata                                                  |
+| `prepareExtensionImportSchema`  | Nonce plus up to 2,000 recordings                                           |
+| `completeExtensionImportSchema` | Nonce plus up to 2,000 upload results                                       |
+| `createScorecardTemplateSchema` | Name, categories, criteria, weights, limits                                 |
 
 #### Authorization and state
 
@@ -1154,7 +1177,6 @@ extension profile.
   full source audio in worker memory.
 - The call list intentionally limits results to the newest 250 calls and does
   not yet expose pagination.
-- Calls have a nullable title but no title-editing endpoint in the current UI.
 - Export job terminal errors are not currently propagated to `export_jobs` by
   the general retry handler.
 - Repeated WAV requests before completion can create extra `export_jobs` rows

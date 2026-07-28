@@ -76,6 +76,50 @@ export function useRecordingController() {
     };
   }, [cleanCapture]);
 
+  useEffect(() => {
+    if (state !== "recording") return;
+
+    const warnBeforeWindowLeave = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    const confirmNavigation = (event: MouseEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      ) {
+        return;
+      }
+      const target = event.target;
+      const link = target instanceof Element ? target.closest("a[href]") : null;
+      if (
+        !(link instanceof HTMLAnchorElement) ||
+        link.target === "_blank" ||
+        link.hasAttribute("download")
+      ) {
+        return;
+      }
+      if (
+        !window.confirm(
+          "Leave this recording? The captured portion will be saved as an Incomplete Recording."
+        )
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+
+    window.addEventListener("beforeunload", warnBeforeWindowLeave);
+    document.addEventListener("click", confirmNavigation, true);
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeWindowLeave);
+      document.removeEventListener("click", confirmNavigation, true);
+    };
+  }, [state]);
+
   const stopRecording = useCallback(
     async (reason?: string) => {
       if (stoppingRef.current || !recorderRef.current || !draftRef.current) {
@@ -131,7 +175,13 @@ export function useRecordingController() {
     [cleanCapture, refreshDrafts]
   );
 
-  async function startRecording() {
+  async function startRecording({
+    recordingAttested,
+    title,
+  }: {
+    recordingAttested: true;
+    title: string;
+  }) {
     setError("");
     setNotice("");
     setElapsedMs(0);
@@ -155,6 +205,8 @@ export function useRecordingController() {
           sourceMode: mode,
           micLabel: capture.micLabel,
           tabLabel: capture.tabLabel,
+          title,
+          recordingAttested,
         }),
       });
       const created = await response.json().catch(() => ({}));
@@ -271,6 +323,7 @@ export function useRecordingController() {
           }
         }
       }, 250);
+      return true;
     } catch (startError) {
       await closeActiveCapture(capture);
       captureRef.current = null;
@@ -280,6 +333,7 @@ export function useRecordingController() {
           ? startError.message
           : "Recording could not start"
       );
+      return false;
     }
   }
 

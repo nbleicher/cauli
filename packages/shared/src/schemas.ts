@@ -15,6 +15,12 @@ export const createCallSchema = z.object({
   sourceMode: sourceModeSchema,
   micLabel: z.string().trim().max(256).optional(),
   tabLabel: z.string().trim().max(256).optional(),
+  title: z.string().trim().max(240).nullable().optional(),
+  recordingAttested: z.literal(true),
+});
+
+export const renameCallSchema = z.object({
+  title: z.string().trim().max(240).nullable(),
 });
 
 export const finalizeCallSchema = z.object({

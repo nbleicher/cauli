@@ -6,9 +6,11 @@ import { createBrowserSupabaseClient } from "@/lib/supabase/browser";
 
 export function PasswordSetupForm({
   inviteId,
+  mfaRequired = false,
   reset = false,
 }: {
   inviteId?: string;
+  mfaRequired?: boolean;
   reset?: boolean;
 }) {
   const [password, setPassword] = useState("");
@@ -41,6 +43,12 @@ export function PasswordSetupForm({
     if (reset) {
       await supabase.rpc("record_password_reset_for_current_user");
       window.location.replace("/record");
+      return;
+    }
+    if (mfaRequired) {
+      window.location.replace(
+        `/auth/mfa?enroll=required&invite=${encodeURIComponent(inviteId ?? "")}`
+      );
       return;
     }
     const response = await fetch("/api/auth/activate", {

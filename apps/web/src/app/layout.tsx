@@ -1,6 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { DM_Sans, Poppins } from "next/font/google";
+import { publicEnv } from "@/lib/env";
 import "./globals.css";
+
+export const dynamic = "force-dynamic";
 
 const poppins = Poppins({
   subsets: ["latin"],
@@ -38,7 +41,12 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${poppins.variable} ${dmSans.variable}`}>
+    <html
+      lang="en"
+      className={`${poppins.variable} ${dmSans.variable}`}
+      data-supabase-url={publicEnv.supabaseUrl || undefined}
+      data-supabase-anon-key={publicEnv.supabaseAnonKey || undefined}
+    >
       <body>{children}</body>
     </html>
   );

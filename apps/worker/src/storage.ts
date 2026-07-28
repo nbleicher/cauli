@@ -62,8 +62,8 @@ export async function uploadStorageFile(
     {
       method: "POST",
       headers: {
-        apikey: config.serviceRoleKey,
-        authorization: `Bearer ${config.serviceRoleKey}`,
+        apikey: config.workerKey,
+        authorization: `Bearer ${config.workerKey}`,
         "content-length": String(size),
         "content-type": contentType,
         "x-upsert": "true",

@@ -1,8 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
 import { signInAsWorkspaceMember } from "./helpers/auth";
+import { enrollVerifiedTotp } from "./helpers/totp";
 
 const localUrl = "http://127.0.0.1:54321";
+const anonKey =
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "integration-test-anon-key";
 const localServiceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const workspaceId = "00000000-0000-0000-0000-000000000001";
@@ -55,6 +58,18 @@ test("review API enforces completion and optimistic concurrency", async ({
         },
       ]);
     if (membershipError) throw membershipError;
+    const reviewerClient = createClient(localUrl, anonKey, {
+      auth: { persistSession: false },
+    });
+    const { error: signInError } = await reviewerClient.auth.signInWithPassword(
+      {
+        email: reviewerEmail,
+        password,
+      }
+    );
+    if (signInError) throw signInError;
+    const { secret: reviewerTotpSecret } =
+      await enrollVerifiedTotp(reviewerClient);
 
     const { data: call, error: callError } = await admin
       .from("calls")
@@ -64,6 +79,8 @@ test("review API enforces completion and optimistic concurrency", async ({
         source_mode: "both",
         status: "ready",
         chunk_prefix: `${workspaceId}/review-test/chunks`,
+        recording_attested_by: owner.user.id,
+        recording_attested_at: new Date().toISOString(),
       })
       .select("id")
       .single();
@@ -115,7 +132,13 @@ test("review API enforces completion and optimistic concurrency", async ({
       .single();
     if (criterionError) throw criterionError;
 
-    await signInAsWorkspaceMember(page, reviewerEmail, password);
+    await signInAsWorkspaceMember(
+      page,
+      reviewerEmail,
+      password,
+      2,
+      reviewerTotpSecret
+    );
 
     const endpoint = `/api/calls/${call.id}/review?scorecardVersionId=${version.id}`;
     const incomplete = await page.request.post(endpoint, {

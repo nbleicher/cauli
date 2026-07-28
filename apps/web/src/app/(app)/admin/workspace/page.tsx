@@ -21,7 +21,12 @@ export default async function WorkspaceAdminPage() {
   if (member.role !== "admin") redirect("/record");
   const supabase = await createServerSupabaseClient();
 
-  const [{ data: memberships }, { data: invites }] = await Promise.all([
+  const [
+    { data: memberships },
+    { data: invites },
+    { data: mfaStatusResult },
+    { data: recoveryLockouts },
+  ] = await Promise.all([
     supabase
       .from("workspace_members")
       .select(
@@ -39,7 +44,20 @@ export default async function WorkspaceAdminPage() {
       .is("accepted_at", null)
       .gt("expires_at", new Date().toISOString())
       .order("created_at", { ascending: false }),
+    supabase.functions.invoke("identity-admin", {
+      body: { action: "list_mfa_status" },
+    }),
+    supabase.rpc("workspace_recovery_lockouts"),
   ]);
+  const mfaStatuses = new Map(
+    (
+      (
+        mfaStatusResult as {
+          statuses?: { userId: string; enabled: boolean }[];
+        } | null
+      )?.statuses ?? []
+    ).map((status) => [status.userId, status.enabled])
+  );
 
   return (
     <main className="page page-narrow">
@@ -58,11 +76,12 @@ export default async function WorkspaceAdminPage() {
             role: membership.role as Role,
             status: membership.status as "active" | "suspended" | "former",
             joinedAt: membership.joined_at,
-            // Role-aware MFA state becomes application-owned in ticket #14;
-            // the normal web runtime deliberately has no Auth-admin secret.
-            mfaEnabled: false,
+            mfaEnabled: mfaStatuses.get(membership.user_id) ?? false,
           };
         })}
+        recoveryLockouts={(
+          (recoveryLockouts ?? []) as { user_id: string }[]
+        ).map((lockout) => lockout.user_id)}
         invites={(invites ?? []).map((invite) => ({
           id: invite.id,
           email: invite.email,

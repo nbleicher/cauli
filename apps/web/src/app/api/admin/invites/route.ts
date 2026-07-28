@@ -2,8 +2,12 @@ import { roleSchema } from "@calllog/shared";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { publicEnv } from "@/lib/env";
-import { isAuthError, requireApiAuth } from "@/lib/server/auth";
-import { parseJson, sanitizeError } from "@/lib/server/http";
+import {
+  isAuthError,
+  requireApiAuth,
+  requireFreshMfa,
+} from "@/lib/server/auth";
+import { parseJson, rateLimitResponse, sanitizeError } from "@/lib/server/http";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 const inviteSchema = z.object({
@@ -14,6 +18,8 @@ const inviteSchema = z.object({
 export async function POST(request: Request) {
   const auth = await requireApiAuth(["admin"]);
   if (isAuthError(auth)) return auth;
+  const stale = await requireFreshMfa();
+  if (stale) return stale;
   const parsed = await parseJson(request, inviteSchema);
   if (parsed.error) return parsed.error;
 
@@ -27,6 +33,12 @@ export async function POST(request: Request) {
   );
 
   if (inviteError) {
+    const limited = await rateLimitResponse(
+      inviteError,
+      supabase,
+      "workspace.invite"
+    );
+    if (limited) return limited;
     return NextResponse.json(
       { error: sanitizeError(inviteError) },
       { status: 500 }
@@ -58,6 +70,8 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   const auth = await requireApiAuth(["admin"]);
   if (isAuthError(auth)) return auth;
+  const stale = await requireFreshMfa();
+  if (stale) return stale;
   const inviteId = new URL(request.url).searchParams.get("id");
   if (!inviteId) {
     return NextResponse.json(

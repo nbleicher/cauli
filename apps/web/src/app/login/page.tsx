@@ -5,9 +5,21 @@ import { isSupabaseConfigured } from "@/lib/env";
 import { LoginForm } from "@/components/LoginForm";
 import { PublicFooter } from "@/components/PublicFooter";
 
-export default async function LoginPage() {
+const lockNotices: Record<string, string> = {
+  inactivity:
+    "Your session locked after 30 minutes without activity. Sign in again to continue.",
+  absolute: "Sessions end after 12 hours. Sign in again to continue.",
+};
+
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ locked?: string }>;
+}) {
   if (!isSupabaseConfigured()) redirect("/setup");
   if (await getAuthContext()) redirect("/record");
+  const { locked } = await searchParams;
+  const lockNotice = locked ? lockNotices[locked] : undefined;
 
   return (
     <main className="auth-page">
@@ -30,6 +42,11 @@ export default async function LoginPage() {
         <p className="muted">
           Use the email address your workspace admin invited.
         </p>
+        {lockNotice && (
+          <p className="form-error" role="status">
+            {lockNotice}
+          </p>
+        )}
         <LoginForm />
       </section>
       <PublicFooter />

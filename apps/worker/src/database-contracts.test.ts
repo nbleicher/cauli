@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 const localUrl = "http://127.0.0.1:54321";
@@ -69,11 +69,15 @@ afterEach(async () => {
     .from("workspaces")
     .update({ legal_gate_required: false })
     .eq("id", workspaceId);
+  // Rate-limit counters are Workspace- and Call-scoped, so one test's spending
+  // would otherwise be charged to the next.
+  await admin.from("rate_limit_state").delete().neq("bucket", "");
 });
 
 async function createWorkspaceMember(
   role: "member" | "manager" | "admin" = "member",
-  targetWorkspaceId = workspaceId
+  targetWorkspaceId = workspaceId,
+  verifyPrivilegedMfa = true
 ) {
   const password = `Test-${crypto.randomUUID()}!`;
   const { data: created, error: createError } =
@@ -102,7 +106,59 @@ async function createWorkspaceMember(
     password,
   });
   if (signInError) throw signInError;
+  if (role !== "member" && verifyPrivilegedMfa) {
+    const { data: enrollment, error: enrollmentError } =
+      await client.auth.mfa.enroll({
+        factorType: "totp",
+        friendlyName: `database-contract-${crypto.randomUUID()}`,
+      });
+    if (enrollmentError) throw enrollmentError;
+    const { data: challenge, error: challengeError } =
+      await client.auth.mfa.challenge({ factorId: enrollment.id });
+    if (challengeError) throw challengeError;
+    const { error: verificationError } = await client.auth.mfa.verify({
+      factorId: enrollment.id,
+      challengeId: challenge.id,
+      code: totpCode(enrollment.totp.secret),
+    });
+    if (verificationError) throw verificationError;
+  }
   return { client, userId: created.user.id };
+}
+
+function totpCode(secret: string) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = "";
+  for (const character of secret.toUpperCase().replaceAll("=", "")) {
+    const index = alphabet.indexOf(character);
+    if (index < 0) throw new Error("Invalid base32 TOTP secret");
+    bits += index.toString(2).padStart(5, "0");
+  }
+  const bytes: number[] = [];
+  for (let index = 0; index + 8 <= bits.length; index += 8) {
+    bytes.push(Number.parseInt(bits.slice(index, index + 8), 2));
+  }
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30_000)));
+  const digest = createHmac("sha1", Buffer.from(bytes))
+    .update(counter)
+    .digest();
+  const offset = digest[digest.length - 1]! & 0x0f;
+  const binary =
+    ((digest[offset]! & 0x7f) << 24) |
+    ((digest[offset + 1]! & 0xff) << 16) |
+    ((digest[offset + 2]! & 0xff) << 8) |
+    (digest[offset + 3]! & 0xff);
+  return (binary % 1_000_000).toString().padStart(6, "0");
+}
+
+function ms(span: string) {
+  const units: Record<string, number> = {
+    m: 60_000,
+    h: 3_600_000,
+  };
+  const amount = Number.parseInt(span, 10);
+  return amount * units[span.slice(-1)]!;
 }
 
 async function createCall(
@@ -117,6 +173,8 @@ async function createCall(
     owner_id: userId,
     source_mode: "both",
     chunk_prefix: chunkPrefix,
+    recording_attested_by: userId,
+    recording_attested_at: new Date().toISOString(),
     ...overrides,
   });
   if (error) throw error;
@@ -228,15 +286,6 @@ describe.skipIf(
       await createWorkspaceMember("admin");
     const email = `activation-${crypto.randomUUID()}@example.com`;
     const password = `Activation-${crypto.randomUUID()}!`;
-    const { data: invitedUser, error: userError } =
-      await admin.auth.admin.createUser({
-        email,
-        password,
-        email_confirm: true,
-      });
-    if (userError) throw userError;
-    createdUserIds.push(invitedUser.user.id);
-
     const inviteId = crypto.randomUUID();
     const { error: inviteError } = await admin
       .from("workspace_invites")
@@ -248,6 +297,30 @@ describe.skipIf(
         invited_by: workspaceAdminId,
       });
     if (inviteError) throw inviteError;
+
+    const { data: invitedUser, error: userError } =
+      await admin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+      });
+    if (userError) throw userError;
+    createdUserIds.push(invitedUser.user.id);
+
+    const [{ data: pendingInvite }, { count: prematureMemberships }] =
+      await Promise.all([
+        admin
+          .from("workspace_invites")
+          .select("accepted_at")
+          .eq("id", inviteId)
+          .single(),
+        admin
+          .from("workspace_members")
+          .select("user_id", { count: "exact", head: true })
+          .eq("user_id", invitedUser.user.id),
+      ]);
+    expect(pendingInvite?.accepted_at).toBeNull();
+    expect(prematureMemberships).toBe(0);
 
     const invitedClient = createClient(localUrl, anonKey, {
       auth: { persistSession: false },
@@ -496,12 +569,14 @@ describe.skipIf(
     createdCallIds.push(callId);
 
     const { data: createdCall, error: createError } = await client.rpc(
-      "create_call_for_current_user",
+      "create_attested_call_for_current_user",
       {
         target_call_id: callId,
         target_source_mode: "both",
         target_mic_label: "Microphone",
         target_tab_label: "Browser tab",
+        target_title: "Principal boundary",
+        target_recording_attested: true,
       }
     );
     expect(createError).toBeNull();
@@ -509,7 +584,9 @@ describe.skipIf(
       id: callId,
       workspace_id: workspaceId,
       owner_id: userId,
+      recording_attested_by: userId,
       status: "recording",
+      title: "Principal boundary",
     });
 
     const { error: jobWriteError } = await client
@@ -560,6 +637,538 @@ describe.skipIf(
       }
     );
     expect(privilegedFinalizeError).not.toBeNull();
+  });
+
+  it("denies privileged database authority until the session reaches AAL2", async () => {
+    const manager = await createWorkspaceMember("manager", workspaceId, false);
+    const workspaceAdmin = await createWorkspaceMember(
+      "admin",
+      workspaceId,
+      false
+    );
+    const owner = await createWorkspaceMember("member");
+    const { callId } = await createCall(owner.userId, { status: "ready" });
+
+    const { data: visibleCalls, error: visibilityError } = await manager.client
+      .from("calls")
+      .select("id")
+      .eq("id", callId);
+    expect(visibilityError).toBeNull();
+    expect(visibleCalls).toEqual([]);
+
+    const { data: canView } = await manager.client.rpc("can_view_call", {
+      target_call_id: callId,
+    });
+    expect(canView).toBe(false);
+
+    const { error: inviteError } = await workspaceAdmin.client.rpc(
+      "create_workspace_invite",
+      {
+        target_email: `blocked-invite-${crypto.randomUUID()}@example.com`,
+        target_role: "member",
+      }
+    );
+    expect(inviteError?.message).toMatch(/Verified TOTP MFA is required/i);
+
+    // Reaching past the RPCs at the table changes nothing either.
+    const { error: directInviteError } = await workspaceAdmin.client
+      .from("workspace_invites")
+      .insert({
+        workspace_id: workspaceId,
+        email: `direct-invite-${crypto.randomUUID()}@example.com`,
+        role: "admin",
+        invited_by: workspaceAdmin.userId,
+      });
+    expect(directInviteError).not.toBeNull();
+
+    await workspaceAdmin.client
+      .from("workspace_members")
+      .update({ role: "admin" })
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", owner.userId);
+    const { data: unchanged, error: unchangedError } = await admin
+      .from("workspace_members")
+      .select("role")
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", owner.userId)
+      .single();
+    if (unchangedError) throw unchangedError;
+    expect(unchanged.role).toBe("member");
+  });
+
+  it("requires a Recording Attestation and stores its actor, time, and optional Call title", async () => {
+    const owner = await createWorkspaceMember("member");
+    const unattestedCallId = crypto.randomUUID();
+    const beforeAttestation = Date.now();
+
+    const { error: privilegedBypassError } = await admin.from("calls").insert({
+      id: crypto.randomUUID(),
+      workspace_id: workspaceId,
+      owner_id: owner.userId,
+      source_mode: "both",
+      chunk_prefix: `${workspaceId}/${crypto.randomUUID()}/chunks`,
+      recording_attestation_required: false,
+    });
+    expect(privilegedBypassError?.message).toMatch(
+      /Recording Attestation is required/i
+    );
+
+    const { error: unattestedError } = await owner.client.rpc(
+      "create_call_for_current_user",
+      {
+        target_call_id: unattestedCallId,
+        target_source_mode: "both",
+        target_mic_label: "Test microphone",
+        target_tab_label: "Test call tab",
+      }
+    );
+    if (!unattestedError) createdCallIds.push(unattestedCallId);
+    expect(unattestedError?.message).toMatch(
+      /Recording Attestation is required/i
+    );
+
+    const callId = crypto.randomUUID();
+    const { data: created, error: createError } = await owner.client.rpc(
+      "create_attested_call_for_current_user",
+      {
+        target_call_id: callId,
+        target_source_mode: "both",
+        target_mic_label: "Test microphone",
+        target_tab_label: "Test call tab",
+        target_title: "  Pilot kickoff  ",
+        target_recording_attested: true,
+      }
+    );
+    if (createError) throw createError;
+    createdCallIds.push(callId);
+
+    const call = Array.isArray(created) ? created[0] : created;
+    expect(call).toMatchObject({
+      id: callId,
+      owner_id: owner.userId,
+      recording_attested_by: owner.userId,
+      title: "Pilot kickoff",
+    });
+    expect(Date.parse(call.recording_attested_at)).toBeGreaterThanOrEqual(
+      beforeAttestation - 5_000
+    );
+    expect(Date.parse(call.recording_attested_at)).toBeLessThanOrEqual(
+      Date.now() + 5_000
+    );
+
+    const missingConfirmationId = crypto.randomUUID();
+    const { error: missingConfirmationError } = await owner.client.rpc(
+      "create_attested_call_for_current_user",
+      {
+        target_call_id: missingConfirmationId,
+        target_source_mode: "both",
+        target_mic_label: "Test microphone",
+        target_tab_label: "Test call tab",
+        target_title: null,
+        target_recording_attested: false,
+      }
+    );
+    expect(missingConfirmationError?.message).toMatch(
+      /Recording Attestation is required/i
+    );
+  });
+
+  it("allows only the Call owner to rename after capture", async () => {
+    const owner = await createWorkspaceMember("member");
+    const manager = await createWorkspaceMember("manager");
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const { callId } = await createCall(owner.userId, {
+      status: "recording",
+      title: "Original title",
+    });
+
+    const { error: activeRenameError } = await owner.client.rpc(
+      "rename_owned_call",
+      {
+        target_call_id: callId,
+        target_title: "Too early",
+      }
+    );
+    expect(activeRenameError?.message).toMatch(/after capture/i);
+
+    const { error: readyError } = await admin
+      .from("calls")
+      .update({ status: "ready", stopped_at: new Date().toISOString() })
+      .eq("id", callId);
+    if (readyError) throw readyError;
+
+    for (const privileged of [manager, workspaceAdmin]) {
+      const { error } = await privileged.client.rpc("rename_owned_call", {
+        target_call_id: callId,
+        target_title: "Privileged rewrite",
+      });
+      expect(error?.message).toMatch(/Only the Call owner can rename/i);
+    }
+
+    const { data: renamed, error: renameError } = await owner.client.rpc(
+      "rename_owned_call",
+      {
+        target_call_id: callId,
+        target_title: "  Customer discovery  ",
+      }
+    );
+    if (renameError) throw renameError;
+    const call = Array.isArray(renamed) ? renamed[0] : renamed;
+    expect(call.title).toBe("Customer discovery");
+
+    const { data: persisted, error: persistedError } = await admin
+      .from("calls")
+      .select("title")
+      .eq("id", callId)
+      .single();
+    if (persistedError) throw persistedError;
+    expect(persisted.title).toBe("Customer discovery");
+  });
+
+  it("issues Recovery Codes that are single-use, replaceable, and unreadable", async () => {
+    const member = await createWorkspaceMember("member");
+    const hashSet = () =>
+      Array.from({ length: 10 }, () =>
+        createHash("sha256").update(crypto.randomUUID()).digest("hex")
+      );
+    const firstHashes = hashSet();
+
+    const { error: issueError } = await admin.rpc(
+      "replace_mfa_recovery_codes",
+      { target_user_id: member.userId, target_code_hashes: firstHashes }
+    );
+    if (issueError) throw issueError;
+
+    const { data: firstActive, error: firstActiveError } = await admin.rpc(
+      "active_mfa_recovery_codes",
+      { target_user_id: member.userId }
+    );
+    if (firstActiveError) throw firstActiveError;
+    expect(firstActive).toHaveLength(10);
+    expect(
+      firstActive.map((code: { code_hash: string }) => code.code_hash).sort()
+    ).toEqual([...firstHashes].sort());
+
+    const { error: sizeError } = await admin.rpc("replace_mfa_recovery_codes", {
+      target_user_id: member.userId,
+      target_code_hashes: firstHashes.slice(0, 9),
+    });
+    expect(sizeError?.message).toMatch(/exactly ten codes/i);
+
+    // One code, one use: a replay of the same row finds nothing to consume.
+    const { data: remaining, error: consumeError } = await admin.rpc(
+      "consume_mfa_recovery_code",
+      { target_code_id: firstActive[0].id }
+    );
+    if (consumeError) throw consumeError;
+    expect(remaining).toBe(9);
+    const { data: replayed } = await admin.rpc("consume_mfa_recovery_code", {
+      target_code_id: firstActive[0].id,
+    });
+    expect(replayed).toBeNull();
+
+    // Two requests presenting the same code race for one row.
+    const contested = await Promise.all([
+      admin.rpc("consume_mfa_recovery_code", {
+        target_code_id: firstActive[1].id,
+      }),
+      admin.rpc("consume_mfa_recovery_code", {
+        target_code_id: firstActive[1].id,
+      }),
+    ]);
+    expect(contested.filter((outcome) => outcome.data !== null)).toHaveLength(
+      1
+    );
+
+    // Redemption withdraws authority until a replacement factor is verified.
+    const { data: pending, error: pendingError } = await admin
+      .from("workspace_members")
+      .select("mfa_recovery_pending_at")
+      .eq("user_id", member.userId)
+      .single();
+    if (pendingError) throw pendingError;
+    expect(pending.mfa_recovery_pending_at).not.toBeNull();
+    const { data: roleWhilePending } = await member.client.rpc(
+      "current_user_role",
+      { target_workspace_id: workspaceId }
+    );
+    expect(roleWhilePending).toBeNull();
+
+    // Hashes are never readable by the Workspace Member they belong to.
+    const { error: directReadError } = await member.client
+      .from("mfa_recovery_codes")
+      .select("code_hash");
+    expect(directReadError).not.toBeNull();
+
+    const secondHashes = hashSet();
+    const { error: regenerateError } = await admin.rpc(
+      "replace_mfa_recovery_codes",
+      { target_user_id: member.userId, target_code_hashes: secondHashes }
+    );
+    if (regenerateError) throw regenerateError;
+
+    const { data: secondActive } = await admin.rpc(
+      "active_mfa_recovery_codes",
+      { target_user_id: member.userId }
+    );
+    expect(
+      secondActive.map((code: { code_hash: string }) => code.code_hash).sort()
+    ).toEqual([...secondHashes].sort());
+    const { data: obsolete } = await admin.rpc("consume_mfa_recovery_code", {
+      target_code_id: firstActive[2].id,
+    });
+    expect(obsolete).toBeNull();
+
+    const { data: restored } = await admin
+      .from("workspace_members")
+      .select("mfa_recovery_pending_at")
+      .eq("user_id", member.userId)
+      .single();
+    expect(restored?.mfa_recovery_pending_at).toBeNull();
+    const { data: roleAfterReplacement } = await member.client.rpc(
+      "current_user_role",
+      { target_workspace_id: workspaceId }
+    );
+    expect(roleAfterReplacement).toBe("member");
+
+    const { data: audit, error: auditError } = await admin
+      .from("audit_events")
+      .select("action, metadata")
+      .eq("entity_id", member.userId);
+    if (auditError) throw auditError;
+    expect(audit.map((event) => event.action)).toEqual(
+      expect.arrayContaining([
+        "auth.mfa.recovery_codes_generated",
+        "auth.mfa.recovery_codes_regenerated",
+        "auth.mfa.recovery_used",
+      ])
+    );
+    const serializedAudit = JSON.stringify(audit);
+    for (const hash of [...firstHashes, ...secondHashes]) {
+      expect(serializedAudit).not.toContain(hash);
+    }
+  });
+
+  it("locks an idle session, spares an active Recording, and expires at twelve hours", async () => {
+    const member = await createWorkspaceMember("member");
+    const sessionOf = async () => {
+      const { data } = await member.client.rpc("touch_session_activity");
+      return data;
+    };
+    const reasonOf = async () => {
+      const { data } = await member.client.rpc("session_lock_reason");
+      return data;
+    };
+    const backdate = async (column: string, ago: string) => {
+      const { error } = await admin
+        .from("session_activity")
+        .update({ [column]: new Date(Date.now() - ms(ago)).toISOString() })
+        .eq("user_id", member.userId);
+      if (error) throw error;
+    };
+
+    expect(await sessionOf()).toBeNull();
+    expect(await reasonOf()).toBeNull();
+
+    // An active Recording suspends the threshold instead of resetting it.
+    const { callId } = await createCall(member.userId, { status: "recording" });
+    await backdate("last_seen_at", "31m");
+    expect(await reasonOf()).toBeNull();
+    expect(await sessionOf()).toBeNull();
+    const { data: roleWhileRecording } = await member.client.rpc(
+      "current_user_role",
+      { target_workspace_id: workspaceId }
+    );
+    expect(roleWhileRecording).toBe("member");
+
+    // Stop & Save ends the exception, and the elapsed threshold applies at once.
+    const { error: finalizeError } = await admin
+      .from("calls")
+      .update({ status: "ready" })
+      .eq("id", callId);
+    if (finalizeError) throw finalizeError;
+    expect(await reasonOf()).toBe("inactivity");
+    expect(await sessionOf()).toBe("inactivity");
+
+    // The lock is written down, so a later request cannot revive the session.
+    const { error: reviveError } = await admin
+      .from("session_activity")
+      .update({ last_seen_at: new Date().toISOString() })
+      .eq("user_id", member.userId);
+    if (reviveError) throw reviveError;
+    expect(await reasonOf()).toBe("inactivity");
+    const { data: roleWhileLocked } = await member.client.rpc(
+      "current_user_role",
+      { target_workspace_id: workspaceId }
+    );
+    expect(roleWhileLocked).toBeNull();
+
+    const { error: clearError } = await admin
+      .from("session_activity")
+      .update({ locked_at: null, lock_reason: null })
+      .eq("user_id", member.userId);
+    if (clearError) throw clearError;
+    await backdate("started_at", "13h");
+    expect(await reasonOf()).toBe("absolute");
+  });
+
+  it("applies each documented abuse limit at the database boundary", async () => {
+    const member = await createWorkspaceMember("member");
+    const workspaceAdmin = await createWorkspaceMember("admin");
+
+    // Bucket semantics: the allowance is spent, then the window resets it.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const { data } = await admin.rpc("consume_rate_limit", {
+        target_bucket: "test.bucket",
+        target_subject: member.userId,
+        max_attempts: 3,
+        target_window: "1 hour",
+      });
+      expect(data).toBe("allowed");
+    }
+    const { data: spent } = await admin.rpc("consume_rate_limit", {
+      target_bucket: "test.bucket",
+      target_subject: member.userId,
+      max_attempts: 3,
+      target_window: "1 hour",
+    });
+    expect(spent).toBe("limited");
+    const { error: rewindError } = await admin
+      .from("rate_limit_state")
+      .update({
+        window_started_at: new Date(Date.now() - ms("2h")).toISOString(),
+      })
+      .eq("bucket", "test.bucket");
+    if (rewindError) throw rewindError;
+    const { data: renewed } = await admin.rpc("consume_rate_limit", {
+      target_bucket: "test.bucket",
+      target_subject: member.userId,
+      max_attempts: 3,
+      target_window: "1 hour",
+    });
+    expect(renewed).toBe("allowed");
+
+    // Invitations: twenty an hour per Workspace, enforced on the table itself.
+    for (let issued = 1; issued <= 20; issued += 1) {
+      const { error } = await workspaceAdmin.client.rpc(
+        "create_workspace_invite",
+        {
+          target_email: `limit-${crypto.randomUUID()}@example.com`,
+          target_role: "member",
+        }
+      );
+      expect(error).toBeNull();
+    }
+    const { error: throttledInvite } = await workspaceAdmin.client.rpc(
+      "create_workspace_invite",
+      {
+        target_email: `limit-${crypto.randomUUID()}@example.com`,
+        target_role: "member",
+      }
+    );
+    expect(throttledInvite?.message).toMatch(/too many workspace invitations/i);
+
+    // Signed delivery: sixty an hour per Workspace Member.
+    for (let issued = 1; issued <= 60; issued += 1) {
+      const { data } = await member.client.rpc(
+        "consume_signed_download_allowance"
+      );
+      expect(data).toBe("allowed");
+    }
+    const { data: throttledDownload } = await member.client.rpc(
+      "consume_signed_download_allowance"
+    );
+    expect(throttledDownload).toBe("limited");
+
+    // Recording chunk upload is deliberately outside every counter.
+    const { data: buckets } = await admin
+      .from("rate_limit_state")
+      .select("bucket");
+    expect(
+      (buckets ?? []).map((row: { bucket: string }) => row.bucket)
+    ).not.toContain("recording.chunk");
+
+    const { data: exceeded } = await admin
+      .from("audit_events")
+      .select("action, metadata")
+      .eq("action", "security.rate_limit.exceeded");
+    expect((exceeded ?? []).length).toBeGreaterThan(0);
+    expect(JSON.stringify(exceeded)).not.toContain(member.userId);
+  });
+
+  it("measures how recently the second factor was actually presented", async () => {
+    const workspaceAdmin = await createWorkspaceMember("admin");
+
+    // The window is the control: the same session is fresh against an hour and
+    // stale against an instant, which is only true if the assertion's own
+    // timestamp is being read rather than the session's assurance level.
+    const { data: fresh, error: freshError } = await workspaceAdmin.client.rpc(
+      "recent_mfa_assertion",
+      { max_age: "1 hour" }
+    );
+    if (freshError) throw freshError;
+    expect(fresh).toBe(true);
+
+    const { data: stale } = await workspaceAdmin.client.rpc(
+      "recent_mfa_assertion",
+      { max_age: "0 seconds" }
+    );
+    expect(stale).toBe(false);
+
+    // A session that never presented a factor is never fresh.
+    const member = await createWorkspaceMember("member");
+    const { data: never } = await member.client.rpc("recent_mfa_assertion", {
+      max_age: "1 hour",
+    });
+    expect(never).toBe(false);
+  });
+
+  it("locks Recovery Code attempts after five failures and alerts an Admin", async () => {
+    const member = await createWorkspaceMember("member");
+
+    for (let failure = 1; failure <= 5; failure += 1) {
+      const { data } = await admin.rpc("register_mfa_recovery_failure", {
+        target_user_id: member.userId,
+      });
+      expect(data).toBe("allowed");
+    }
+    const { data: locked } = await admin.rpc("register_mfa_recovery_failure", {
+      target_user_id: member.userId,
+    });
+    expect(locked).toBe("locked");
+
+    const { data: isLocked } = await admin.rpc("mfa_recovery_locked", {
+      target_user_id: member.userId,
+    });
+    expect(isLocked).toBe(true);
+
+    const { data: audit, error: auditError } = await admin
+      .from("audit_events")
+      .select("action, metadata")
+      .eq("entity_id", member.userId);
+    if (auditError) throw auditError;
+    const actions = audit.map((event) => event.action);
+    expect(actions).toEqual(
+      expect.arrayContaining([
+        "auth.mfa.recovery_failed",
+        "auth.mfa.recovery_locked",
+      ])
+    );
+    expect(
+      actions.filter((action) => action === "auth.mfa.recovery_locked")
+    ).toHaveLength(1);
+
+    const { error: expireError } = await admin
+      .from("rate_limit_state")
+      .update({
+        locked_until: new Date(Date.now() - ms("1m")).toISOString(),
+      })
+      .eq("bucket", "auth.recovery");
+    if (expireError) throw expireError;
+    const { data: reopened } = await admin.rpc("mfa_recovery_locked", {
+      target_user_id: member.userId,
+    });
+    expect(reopened).toBe(false);
   });
 
   it("requires immutable current Legal Document acceptance before gated access", async () => {
@@ -699,7 +1308,9 @@ describe.skipIf(
       (document) => document.document_type === "terms"
     )!;
     const nextTerms = "Materially updated pilot terms.";
-    const materialTimestamp = new Date().toISOString();
+    // Backdated like the first publication so the version is already effective
+    // when the gate evaluates it, whatever the database clock reads.
+    const materialTimestamp = new Date(Date.now() - 1_000).toISOString();
     const { error: nextTermsError } = await admin
       .from("legal_document_versions")
       .insert({
@@ -1112,14 +1723,8 @@ describe.skipIf(
         target_lease_token: leaseToken,
       }
     );
-    if (commitError) {
-      // A proxy may lose the response after PostgreSQL commits. The durable
-      // state below is authoritative and proves a retry cannot resurrect or
-      // double-delete the Call.
-      expect(commitError.message).toMatch(/invalid response.*upstream/i);
-    } else {
-      expect(committed).toBe(true);
-    }
+    if (commitError) throw commitError;
+    expect(committed).toBe(true);
 
     const [{ count: callCount }, { data: completedJob }] = await Promise.all([
       admin

@@ -1,8 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
 import { signInAsWorkspaceMember } from "./helpers/auth";
+import { enrollVerifiedTotp } from "./helpers/totp";
 
 const localUrl = "http://127.0.0.1:54321";
+const anonKey =
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "integration-test-anon-key";
 const localServiceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const admin = createClient(localUrl, localServiceRoleKey, {
@@ -78,7 +81,17 @@ test("Workspace navigation uses canonical language and preserves legacy URLs", a
       });
     if (membershipError) throw membershipError;
 
-    await signInAsWorkspaceMember(page, email, password);
+    const userClient = createClient(localUrl, anonKey, {
+      auth: { persistSession: false },
+    });
+    const { error: signInError } = await userClient.auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (signInError) throw signInError;
+    const { secret } = await enrollVerifiedTotp(userClient);
+
+    await signInAsWorkspaceMember(page, email, password, 2, secret);
     await expect(
       page.getByRole("link", { name: "Workspace Calls" })
     ).toHaveAttribute("href", "/workspace");

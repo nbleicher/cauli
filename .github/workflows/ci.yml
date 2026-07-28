@@ -41,9 +41,9 @@ jobs:
         run: npm ci
 
       - name: Install Supabase CLI
-        uses: supabase/setup-cli@v1
+        uses: supabase/setup-cli@v3
         with:
-          version: 2.109.0
+          version: 2.110.0
 
       - name: Start local Supabase and apply migrations
         run: |
@@ -54,7 +54,23 @@ jobs:
             value="${value%\"}"
             echo "::add-mask::$value"
             echo "$name=$value" >> "$GITHUB_ENV"
+            export "$name=$value"
           done < <(supabase status -o env)
+          for attempt in $(seq 1 30); do
+            status="$(
+              curl --silent --output /dev/null --write-out '%{http_code}' \
+                "$API_URL/auth/v1/health" ||
+                true
+            )"
+            if [ "$status" = "200" ]; then
+              break
+            fi
+            if [ "$attempt" = "30" ]; then
+              echo "Supabase Auth did not become ready after database reset"
+              exit 1
+            fi
+            sleep 1
+          done
 
       - name: Install Chrome
         run: npx playwright install --with-deps chromium
@@ -75,6 +91,7 @@ jobs:
         env:
           RUN_DATABASE_INTEGRATION: "1"
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.API_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SECRET_KEY }}
           OPENROUTER_API_KEY: integration-test-key
         run: npm test
@@ -82,11 +99,39 @@ jobs:
       - name: Chrome browser tests
         env:
           RUN_DATABASE_INTEGRATION: "1"
+          RUN_IDENTITY_INTEGRATION: "1"
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.API_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SECRET_KEY }}
           APP_URL: http://127.0.0.1:3102
-        run: npm run test:e2e -w @calllog/web
+          MAILPIT_URL: http://127.0.0.1:54324
+        run: |
+          supabase functions serve identity-admin \
+            --env-file supabase/functions/identity-admin/test.env \
+            > "$RUNNER_TEMP/identity-admin.log" 2>&1 &
+          identity_pid="$!"
+          trap 'kill "$identity_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            status="$(
+              curl --silent --output /dev/null --write-out '%{http_code}' \
+                --request POST \
+                --header "Authorization: Bearer $ANON_KEY" \
+                --header "apikey: $ANON_KEY" \
+                --header "Content-Type: application/json" \
+                --data '{"action":"unsupported"}' \
+                "$API_URL/functions/v1/identity-admin" ||
+                true
+            )"
+            if [ "$status" = "400" ]; then
+              break
+            fi
+            if [ "$attempt" = "30" ]; then
+              cat "$RUNNER_TEMP/identity-admin.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          npm run test:e2e -w @calllog/web
 
       - name: Production build
         env:

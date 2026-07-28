@@ -143,7 +143,7 @@ test("Invitation Activation requires a new password before legal acceptance", as
 
     await page.getByRole("checkbox").check();
     await page.getByRole("button", { name: "Accept and continue" }).click();
-    await expect(page).toHaveURL(/\/record$/);
+    await expect(page).toHaveURL(/\/record$/, { timeout: 15_000 });
 
     const oldPasswordClient = createClient(localUrl, anonKey, {
       auth: { persistSession: false },

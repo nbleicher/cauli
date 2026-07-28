@@ -1,10 +1,25 @@
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ?? "";
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim() ?? "";
+function configuredValue(primary: string | undefined, legacy?: string) {
+  return primary?.trim() || legacy?.trim() || "";
+}
+
+const supabaseUrl = configuredValue(
+  process.env.SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_URL
+);
+const supabaseAnonKey = configuredValue(
+  process.env.SUPABASE_ANON_KEY,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+);
+const cspMode: "report-only" | "enforce" =
+  process.env.CSP_MODE === "report-only" ? "report-only" : "enforce";
 
 export const publicEnv = {
   supabaseUrl,
   supabaseAnonKey,
   appUrl: (process.env.APP_URL ?? "http://localhost:3000").replace(/\/$/, ""),
+  cspMode,
+  hstsIncludeSubdomains:
+    process.env.HSTS_INCLUDE_SUBDOMAINS?.toLowerCase() === "true",
 };
 
 export function isSupabaseConfigured() {
