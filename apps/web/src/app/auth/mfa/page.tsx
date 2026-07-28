@@ -15,6 +15,7 @@ interface Enrollment {
 function MfaGate() {
   const searchParams = useSearchParams();
   const inviteId = searchParams.get("invite");
+  const platformAdmin = searchParams.get("platform") === "1";
   const enrollmentRequired = searchParams.get("enroll") === "required";
   const verificationUnavailable =
     searchParams.get("verification") === "unavailable";
@@ -34,18 +35,28 @@ function MfaGate() {
   // bounce a verified session somewhere else.
   const requestedNext = searchParams.get("next") ?? "";
   const destination = useRef(
-    /^\/[^/\\]/.test(requestedNext) ? requestedNext : "/record"
+    /^\/[^/\\]/.test(requestedNext)
+      ? requestedNext
+      : platformAdmin
+        ? "/platform-admin"
+        : "/record"
   );
 
   const audit = useCallback(
     async (action: string) => {
       const supabase = createBrowserSupabaseClient();
-      await supabase.rpc("record_current_user_mfa_event", {
-        target_action: action,
-        target_invite_id: inviteId,
-      });
+      if (platformAdmin) {
+        await supabase.rpc("record_platform_admin_mfa_event", {
+          target_action: action.replace("auth.mfa", "platform_admin.mfa"),
+        });
+      } else {
+        await supabase.rpc("record_current_user_mfa_event", {
+          target_action: action,
+          target_invite_id: inviteId,
+        });
+      }
     },
-    [inviteId]
+    [inviteId, platformAdmin]
   );
 
   const beginEnrollment = useCallback(async () => {
@@ -156,7 +167,7 @@ function MfaGate() {
         destination.current = "/legal/acceptance";
       }
 
-      if (wasEnrollment) {
+      if (wasEnrollment && !platformAdmin) {
         const response = await fetch("/api/auth/recovery-codes", {
           method: "POST",
         });
@@ -173,7 +184,7 @@ function MfaGate() {
       }
       window.location.replace(destination.current);
     },
-    [audit, enrollment, inviteId]
+    [audit, enrollment, inviteId, platformAdmin]
   );
 
   if (recoveryCodes) {
@@ -264,13 +275,21 @@ function MfaGate() {
           </button>
         </form>
 
-        {!enrollment && (
+        {!enrollment && !platformAdmin && (
           <a className="link-button" href="/auth/recovery">
             Can&rsquo;t use your authenticator?
           </a>
         )}
 
-        <form action="/api/auth/signout" method="post" className="mfa-escape">
+        <form
+          action={
+            platformAdmin
+              ? "/api/auth/signout?boundary=platform"
+              : "/api/auth/signout"
+          }
+          method="post"
+          className="mfa-escape"
+        >
           <button className="link-button" type="submit">
             Sign out instead
           </button>
