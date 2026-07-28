@@ -21,6 +21,7 @@ const createdJobIds: string[] = [];
 const createdUserIds: string[] = [];
 const createdWorkspaceIds: string[] = [];
 const createdKeyVersions: number[] = [];
+const createdObjectNames: string[] = [];
 
 async function deleteAuthUser(userId: string) {
   let lastError: { message: string; status?: number } | null = null;
@@ -43,6 +44,12 @@ afterEach(async () => {
   }
   if (createdCallIds.length) {
     await admin.from("calls").delete().in("id", createdCallIds.splice(0));
+  }
+  if (createdObjectNames.length) {
+    await admin
+      .from("backup_deletion_requests")
+      .delete()
+      .in("object_name", createdObjectNames.splice(0));
   }
   if (createdKeyVersions.length) {
     await admin
@@ -187,6 +194,60 @@ async function createCall(
   if (error) throw error;
   createdCallIds.push(callId);
   return { callId, chunkPrefix };
+}
+
+/**
+ * A Call whose Source Audio has already been copied to the VPS — the state a
+ * deletion actually has to reach through, rather than a bare Call row.
+ */
+async function createStoredBackupCall(
+  ownerId: string,
+  overrides: Record<string, unknown> = {}
+) {
+  const version = Math.floor(Math.random() * 1_000_000) + 7_000_000;
+  const { error: keyError } = await admin.from("backup_key_versions").insert({
+    version,
+    kms_key_id: "arn:aws:kms:us-east-2:000000000000:key/cauli-backup",
+    kms_public_key_sha256: "a".repeat(64),
+    age_recipient:
+      "age18m4055pa59f7cz07xf8uzhu9e6ykyl26taccljde405xeulmpv9sym64p7",
+    age_recipient_sha256: "b".repeat(64),
+  });
+  if (keyError) throw keyError;
+  createdKeyVersions.push(version);
+
+  const { callId } = await createCall(ownerId, overrides);
+  const { error: sourceError } = await admin
+    .from("calls")
+    .update({
+      source_path: `${workspaceId}/${callId}/artifacts/source.webm`,
+      status: "ready",
+    })
+    .eq("id", callId);
+  if (sourceError) throw sourceError;
+
+  const { data: claimed, error: claimError } = await admin.rpc(
+    "claim_source_audio_backup",
+    { worker_name: "deletion-fixture" }
+  );
+  if (claimError) throw claimError;
+  const objectName = crypto
+    .randomUUID()
+    .replaceAll("-", "")
+    .concat(crypto.randomUUID().replaceAll("-", ""));
+  const { error: commitError } = await admin.rpc("commit_source_audio_backup", {
+    target_call_id: claimed.call_id,
+    target_lease_token: claimed.lease_token,
+    target_object_name: objectName,
+    target_key_version: version,
+    target_kms_wrapped_key: "kms-wrapped",
+    target_age_wrapped_key: "age-wrapped",
+    target_ciphertext_sha256: "d".repeat(64),
+    target_ciphertext_bytes: 1_024,
+  });
+  if (commitError) throw commitError;
+  createdObjectNames.push(objectName);
+  return { callId: claimed.call_id as string, objectName };
 }
 
 describe.skipIf(
@@ -2369,5 +2430,321 @@ describe.skipIf(
         /Could not find the function|permission denied/i
       );
     }
+  });
+
+  it("sends manual deletion and retention expiry down one workflow", async () => {
+    const { userId: ownerId } = await createWorkspaceMember("member");
+    const manual = await createStoredBackupCall(ownerId);
+    // Recorded long enough ago that the 90-day default has passed.
+    const expired = await createStoredBackupCall(ownerId, {
+      started_at: "2020-01-01T00:00:00Z",
+    });
+
+    const { data: manualDeleted, error: manualError } = await admin.rpc(
+      "begin_call_deletion",
+      {
+        target_call_id: manual.callId,
+        target_actor_id: ownerId,
+        target_reason: "manual",
+        target_actor_role: "member",
+      }
+    );
+    if (manualError) throw manualError;
+    expect(manualDeleted).toBe(true);
+
+    const { data: expiredCount, error: expiryError } = await admin.rpc(
+      "expire_calls_for_retention",
+      { batch_size: 100 }
+    );
+    if (expiryError) throw expiryError;
+    expect(Number(expiredCount)).toBeGreaterThanOrEqual(1);
+
+    // Both arrived at the same place: soft-deleted, one delete_call job each,
+    // and one authorization for the retention principal each.
+    for (const { callId, objectName, reason } of [
+      { ...manual, reason: "manual" },
+      { ...expired, reason: "retention" },
+    ]) {
+      const [{ data: call }, { data: jobs }, { data: authorization }] =
+        await Promise.all([
+          admin.from("calls").select("deleted_at").eq("id", callId).single(),
+          admin
+            .from("processing_jobs")
+            .select("id")
+            .eq("call_id", callId)
+            .eq("kind", "delete_call"),
+          admin
+            .from("backup_deletion_requests")
+            .select("reason, deleted_at")
+            .eq("object_name", objectName)
+            .single(),
+        ]);
+      expect(call?.deleted_at, callId).not.toBeNull();
+      expect(jobs, callId).toHaveLength(1);
+      expect(authorization, callId).toEqual({ reason, deleted_at: null });
+    }
+
+    // A Call that never had a backup produces no authorization to invent one.
+    const { callId: unbackedCallId } = await createCall(ownerId);
+    await admin.rpc("begin_call_deletion", {
+      target_call_id: unbackedCallId,
+      target_actor_id: ownerId,
+      target_reason: "manual",
+      target_actor_role: "member",
+    });
+    const { data: unbackedAudit } = await admin
+      .from("audit_events")
+      .select("metadata")
+      .eq("action", "call.deletion.requested")
+      .eq("entity_id", unbackedCallId)
+      .single();
+    expect(unbackedAudit?.metadata).toMatchObject({
+      backup_deletion_requested: false,
+    });
+
+    const { data: expiryAudit } = await admin
+      .from("audit_events")
+      .select("metadata")
+      .eq("action", "call.retention.expired")
+      .eq("entity_id", expired.callId)
+      .single();
+    expect(expiryAudit?.metadata).toMatchObject({
+      reason: "retention",
+      backup_deletion_requested: true,
+    });
+  });
+
+  it("converges on a retry instead of duplicating work or evidence", async () => {
+    const { userId: ownerId } = await createWorkspaceMember("member");
+    const { callId, objectName } = await createStoredBackupCall(ownerId);
+
+    const first = await admin.rpc("begin_call_deletion", {
+      target_call_id: callId,
+      target_actor_id: ownerId,
+      target_reason: "manual",
+      target_actor_role: "member",
+    });
+    expect(first.data).toBe(true);
+
+    // The same request arriving again — a retried browser action, a redelivered
+    // sweep — must change nothing the first one already did.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const repeat = await admin.rpc("begin_call_deletion", {
+        target_call_id: callId,
+        target_actor_id: ownerId,
+        target_reason: "manual",
+        target_actor_role: "member",
+      });
+      expect(repeat.data).toBe(false);
+    }
+    await admin.rpc("expire_calls_for_retention", { batch_size: 100 });
+
+    const [
+      { count: jobCount },
+      { count: auditCount },
+      { count: requestCount },
+    ] = await Promise.all([
+      admin
+        .from("processing_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("call_id", callId)
+        .eq("kind", "delete_call"),
+      admin
+        .from("audit_events")
+        .select("id", { count: "exact", head: true })
+        .eq("entity_id", callId)
+        .in("action", ["call.deletion.requested", "call.retention.expired"]),
+      admin
+        .from("backup_deletion_requests")
+        .select("object_name", { count: "exact", head: true })
+        .eq("object_name", objectName),
+    ]);
+    expect(jobCount).toBe(1);
+    expect(auditCount).toBe(1);
+    expect(requestCount).toBe(1);
+
+    // Carrying out the removal twice is also safe: the second is a no-op and
+    // never revives the copy the first removed.
+    const { data: committed } = await admin.rpc("commit_backup_deletion", {
+      target_object_name: objectName,
+    });
+    expect(committed).toBe(true);
+    const { data: repeatCommit } = await admin.rpc("commit_backup_deletion", {
+      target_object_name: objectName,
+    });
+    expect(repeatCommit).toBe(false);
+  });
+
+  it("removes every owned artifact while its Audit Events outlive it", async () => {
+    const { userId: ownerId } = await createWorkspaceMember("member");
+    const { callId, objectName } = await createStoredBackupCall(ownerId);
+
+    const { data: transcript, error: transcriptError } = await admin
+      .from("transcripts")
+      .insert({ call_id: callId, model: "test", full_text: "spoken words" })
+      .select("id")
+      .single();
+    if (transcriptError) throw transcriptError;
+    await admin.from("transcript_segments").insert({
+      transcript_id: transcript.id,
+      sequence: 0,
+      start_ms: 0,
+      end_ms: 1_000,
+      text: "spoken words",
+    });
+    await admin.from("transcription_chunks").insert({
+      call_id: callId,
+      chunk_index: 0,
+      text: "spoken words",
+      model: "test",
+    });
+    await admin.from("export_jobs").insert({
+      call_id: callId,
+      requested_by: ownerId,
+      format: "wav",
+    });
+
+    await admin.rpc("begin_call_deletion", {
+      target_call_id: callId,
+      target_actor_id: ownerId,
+      target_reason: "manual",
+      target_actor_role: "member",
+    });
+
+    // The worker's commit is what actually removes the row, exactly as it does
+    // for a Call deleted from the browser.
+    const { data: claimed } = await admin.rpc("claim_processing_job", {
+      worker_name: "deletion-worker",
+    });
+    const deleteJob = (claimed ?? []).find(
+      (job: { call_id: string | null }) => job.call_id === callId
+    );
+    expect(deleteJob).toBeTruthy();
+    const { data: committed } = await admin.rpc("commit_call_deletion", {
+      target_job_id: deleteJob.id,
+      target_lease_token: deleteJob.lease_token,
+    });
+    expect(committed).toBe(true);
+
+    for (const [table, column] of [
+      ["calls", "id"],
+      ["transcripts", "call_id"],
+      ["transcription_chunks", "call_id"],
+      ["export_jobs", "call_id"],
+      ["call_reviews", "call_id"],
+      ["source_audio_backups", "call_id"],
+    ] as const) {
+      const { count } = await admin
+        .from(table)
+        .select(column, { count: "exact", head: true })
+        .eq(column, callId);
+      expect(count, table).toBe(0);
+    }
+    const { count: segmentCount } = await admin
+      .from("transcript_segments")
+      .select("id", { count: "exact", head: true })
+      .eq("transcript_id", transcript.id);
+    expect(segmentCount).toBe(0);
+
+    // The instruction to remove the backup survives the Call it came from,
+    // because it has to outlive it to be carried out at all.
+    const { data: stillAuthorized } = await admin
+      .from("backup_deletion_requests")
+      .select("object_name")
+      .eq("object_name", objectName)
+      .single();
+    expect(stillAuthorized?.object_name).toBe(objectName);
+
+    // Evidence outlives content, on its own one-year clock.
+    const { data: survivingAudit } = await admin
+      .from("audit_events")
+      .select("retained_until")
+      .eq("entity_id", callId)
+      .eq("action", "call.deletion.requested")
+      .single();
+    expect(survivingAudit).toBeTruthy();
+    expect(new Date(survivingAudit!.retained_until).getTime()).toBeGreaterThan(
+      Date.now() + 300 * 24 * 60 * 60 * 1_000
+    );
+  });
+
+  it("confines the retention principal to deleting what was authorized", async () => {
+    const { data: privileges, error: privilegeError } = await admin.rpc(
+      "retention_principal_privileges"
+    );
+    if (privilegeError) throw privilegeError;
+    const granted = new Map(
+      (privileges as { object_name: string; granted: boolean }[]).map(
+        (privilege) => [privilege.object_name, privilege.granted]
+      )
+    );
+
+    // It cannot read content, cannot see which Call a backup belongs to, and
+    // cannot create a backup or start a deletion of its own.
+    for (const forbidden of [
+      "public.calls",
+      "public.transcripts",
+      "public.call_reviews",
+      "public.source_audio_backups",
+      "public.backup_deletion_requests",
+      "public.commit_source_audio_backup",
+      "public.request_call_deletion",
+    ]) {
+      expect(granted.get(forbidden), forbidden).toBe(false);
+    }
+    for (const allowed of [
+      "public.claim_backup_deletion",
+      "public.commit_backup_deletion",
+    ]) {
+      expect(granted.get(allowed), allowed).toBe(true);
+    }
+
+    // And an object name it was never handed is refused outright, so the
+    // credential cannot be turned into a way to erase live recovery copies.
+    const { error: unauthorizedError } = await admin.rpc(
+      "commit_backup_deletion",
+      { target_object_name: "9".repeat(64) }
+    );
+    expect(unauthorizedError?.message).toMatch(/never authorized/);
+  });
+
+  it("keeps a failed backup deletion owed rather than lost", async () => {
+    const { userId: ownerId } = await createWorkspaceMember("member");
+    const { callId, objectName } = await createStoredBackupCall(ownerId);
+    await admin.rpc("begin_call_deletion", {
+      target_call_id: callId,
+      target_actor_id: ownerId,
+      target_reason: "manual",
+      target_actor_role: "member",
+    });
+
+    const { data: claimed, error: claimError } = await admin.rpc(
+      "claim_backup_deletion",
+      { worker_name: "retention-worker" }
+    );
+    if (claimError) throw claimError;
+    expect(claimed).toBe(objectName);
+
+    const { data: recorded } = await admin.rpc("fail_backup_deletion", {
+      target_object_name: objectName,
+      target_reason: "The Source Audio Backup could not be deleted (503)",
+    });
+    expect(recorded).toBe(true);
+
+    const { data: owed } = await admin
+      .from("backup_deletion_requests")
+      .select("deleted_at, attempts, last_error")
+      .eq("object_name", objectName)
+      .single();
+    // Still owed, and the reason names the failure rather than the Call.
+    expect(owed).toMatchObject({ deleted_at: null, attempts: 1 });
+    expect(owed!.last_error).not.toContain(callId);
+
+    // The same instruction is not handed out again while an attempt is in
+    // flight, so two retention workers cannot both act on it.
+    const { data: notReclaimed } = await admin.rpc("claim_backup_deletion", {
+      worker_name: "second-retention-worker",
+    });
+    expect(notReclaimed).not.toBe(objectName);
   });
 });

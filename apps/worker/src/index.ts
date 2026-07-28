@@ -8,6 +8,12 @@ import { backupTargetFromEnvironment } from "./backup-target.js";
 import { config } from "./config.js";
 import { claimJob, cleanupAbandonedCalls, runJob } from "./jobs.js";
 import { log, sanitizedError } from "./log.js";
+import {
+  deleteOneAuthorizedBackup,
+  expireCallsForRetention,
+  retentionClientFromEnvironment,
+  retentionTargetFromEnvironment,
+} from "./retention.js";
 import { downloadStorageBuffer } from "./storage.js";
 
 let shuttingDown = false;
@@ -86,6 +92,36 @@ async function workerLoop(index: number) {
   }
 }
 
+/**
+ * Retention runs as two separate authorities on purpose. Deciding that a Call
+ * has expired is the application's, and carrying the removal out on the VPS is
+ * the retention principal's, which holds a different database role and a
+ * different client certificate.
+ */
+async function retentionLoop() {
+  const target = retentionTargetFromEnvironment();
+  const client = retentionClientFromEnvironment() ?? undefined;
+  if (!target || !client) {
+    log.error("backup_retention_principal_not_configured", {});
+  }
+
+  while (!shuttingDown) {
+    try {
+      await expireCallsForRetention();
+      if (target && client) {
+        const worked = await deleteOneAuthorizedBackup({
+          target,
+          client,
+        });
+        if (worked) continue;
+      }
+    } catch (error) {
+      log.error("retention_loop_error", { error: sanitizedError(error) });
+    }
+    await delay(60_000);
+  }
+}
+
 const server = createServer((request, response) => {
   if (request.url === "/health") {
     response.writeHead(shuttingDown ? 503 : 200, {
@@ -116,6 +152,7 @@ for (let index = 0; index < config.concurrency; index += 1) {
   void workerLoop(index);
 }
 void backupLoop();
+void retentionLoop();
 
 async function shutdown(signal: string) {
   if (shuttingDown) return;
