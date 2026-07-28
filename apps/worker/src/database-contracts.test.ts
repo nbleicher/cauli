@@ -2581,6 +2581,158 @@ describe.skipIf(
     expect(targeted).toEqual([]);
   });
 
+  it("audits every artifact handover without recording content or a URL", async () => {
+    const sinceEventId = await latestAuditEventId();
+    const { client, userId } = await createWorkspaceMember();
+    const { callId } = await createCall(userId, {
+      title: "Renewal with Acme",
+      status: "ready",
+      source_path: `${workspaceId}/source.webm`,
+      mp3_path: `${workspaceId}/recording.mp3`,
+    });
+
+    for (const artifact of ["mp3", "source", "transcript_srt"]) {
+      const { error } = await client.rpc("authorize_call_download", {
+        target_call_id: callId,
+        target_artifact: artifact,
+      });
+      if (error) throw error;
+    }
+    const { error: playbackError } = await client.rpc(
+      "authorize_call_download",
+      {
+        target_call_id: callId,
+        target_artifact: "mp3",
+        target_delivery: "playback",
+      }
+    );
+    if (playbackError) throw playbackError;
+
+    const { data: events } = await admin
+      .from("audit_events")
+      .select("id, action, entity_type, entity_id, metadata, actor_id")
+      .gt("id", sinceEventId)
+      .in("action", ["call.download.created", "call.playback.created"])
+      .order("id");
+    expect(events).toHaveLength(4);
+    expect(
+      events?.map((event) => event.metadata as { artifact_type: string })
+    ).toEqual([
+      { artifact_type: "mp3" },
+      { artifact_type: "source" },
+      { artifact_type: "transcript_srt" },
+      { artifact_type: "mp3" },
+    ]);
+    // Taking a copy is distinguishable from pressing play.
+    expect(events?.map((event) => event.action)).toEqual([
+      "call.download.created",
+      "call.download.created",
+      "call.download.created",
+      "call.playback.created",
+    ]);
+    for (const event of events ?? []) {
+      expect(event.entity_type).toBe("call");
+      expect(event.entity_id).toBe(callId);
+      expect(event.actor_id).toBe(userId);
+      // Never the Call title, never a signed URL, never any content.
+      const serialized = JSON.stringify(event.metadata);
+      expect(serialized).not.toContain("Acme");
+      expect(serialized).not.toMatch(/https?:/);
+      expect(Object.keys(event.metadata as object)).toEqual(["artifact_type"]);
+    }
+  });
+
+  it("fails safely for unauthorized, deleted, and cross-Workspace downloads", async () => {
+    const otherWorkspaceId = crypto.randomUUID();
+    await admin.from("workspaces").insert({
+      id: otherWorkspaceId,
+      name: "Other export pilot",
+      slug: `export-${otherWorkspaceId.slice(0, 8)}`,
+    });
+    createdWorkspaceIds.push(otherWorkspaceId);
+
+    const { userId: ownerId } = await createWorkspaceMember();
+    const { client: colleagueClient } = await createWorkspaceMember();
+    const { client: outsiderClient } = await createWorkspaceMember(
+      "admin",
+      otherWorkspaceId
+    );
+    const { callId } = await createCall(ownerId, { status: "ready" });
+
+    // Another Member Role in the same Workspace has no claim on this Call.
+    const { error: colleagueDenied } = await colleagueClient.rpc(
+      "authorize_call_download",
+      { target_call_id: callId, target_artifact: "mp3" }
+    );
+    expect(colleagueDenied?.message).toContain("Call not found");
+
+    // Neither does an Admin of a different Workspace.
+    const { error: outsiderDenied } = await outsiderClient.rpc(
+      "authorize_call_download",
+      { target_call_id: callId, target_artifact: "mp3" }
+    );
+    expect(outsiderDenied?.message).toContain("Call not found");
+
+    // A Call that never existed answers the same way, revealing nothing.
+    const { error: unknownDenied } = await colleagueClient.rpc(
+      "authorize_call_download",
+      { target_call_id: crypto.randomUUID(), target_artifact: "mp3" }
+    );
+    expect(unknownDenied?.message).toContain("Call not found");
+
+    const { data: refusals } = await admin
+      .from("audit_events")
+      .select("id")
+      .eq("action", "call.download.created")
+      .eq("entity_id", callId);
+    // A refused download is not a handover, so it writes no handover event.
+    expect(refusals).toHaveLength(0);
+  });
+
+  it("refuses an export for a deleted Call and rate-limits the rest", async () => {
+    const { client, userId } = await createWorkspaceMember();
+    const { callId: deletedCallId } = await createCall(userId, {
+      status: "ready",
+      deleted_at: new Date().toISOString(),
+    });
+    const { error: deletedDenied } = await client.rpc(
+      "authorize_call_download",
+      { target_call_id: deletedCallId, target_artifact: "mp3" }
+    );
+    expect(deletedDenied?.message).toContain("Call not found");
+
+    // Ten Transcript exports per Call per hour, shared with retries.
+    const { callId } = await createCall(userId, { status: "ready" });
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const { error } = await client.rpc("authorize_call_download", {
+        target_call_id: callId,
+        target_artifact: "transcript_txt",
+      });
+      if (error) throw error;
+    }
+    const { error: exportLimited } = await client.rpc(
+      "authorize_call_download",
+      { target_call_id: callId, target_artifact: "transcript_txt" }
+    );
+    expect(exportLimited?.message).toContain("Too many exports");
+
+    // Sixty signed downloads per Workspace Member per hour, across Calls.
+    const { callId: secondCallId } = await createCall(userId, {
+      status: "ready",
+    });
+    let limitedAt = 0;
+    for (let attempt = 0; attempt < 60 && limitedAt === 0; attempt += 1) {
+      const { error } = await client.rpc("authorize_call_download", {
+        target_call_id: secondCallId,
+        target_artifact: "mp3",
+      });
+      if (error) limitedAt = attempt;
+    }
+    // Ten were already spent above, so the sixty-first overall is refused.
+    expect(limitedAt).toBeGreaterThan(0);
+    expect(limitedAt).toBeLessThanOrEqual(50);
+  });
+
   it("holds work rather than spending against an unpriced model", async () => {
     const { userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId, {

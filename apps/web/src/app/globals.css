@@ -2244,3 +2244,10 @@ textarea:focus {
   margin-top: 16px;
   font-size: 12px;
 }
+
+.transcript-exports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}

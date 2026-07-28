@@ -8,9 +8,11 @@ import type {
 } from "@calllog/shared";
 import {
   AlertTriangle,
+  Captions,
   CheckCircle2,
   Download,
   FileAudio,
+  FileText,
   LoaderCircle,
   RefreshCw,
   Save,
@@ -61,7 +63,9 @@ type CallOperation =
   | "rename"
   | "download-mp3"
   | "download-source"
-  | "download-wav";
+  | "download-wav"
+  | "download-txt"
+  | "download-srt";
 
 export function CallDetailClient({
   call,
@@ -142,6 +146,29 @@ export function CallDetailClient({
       window.location.assign(result.url);
     } catch (error) {
       setMediaError(error instanceof Error ? error.message : "Download failed");
+    } finally {
+      setActiveOperation(null);
+    }
+  }
+
+  /**
+   * The export is generated on request rather than kept in step with the
+   * Transcript, so a Transcript that was regenerated cannot hand back a stale
+   * file, and a Call nobody exports never accumulates artifacts.
+   */
+  async function exportTranscript(format: "txt" | "srt") {
+    setActiveOperation(`download-${format}`);
+    setMediaError("");
+    try {
+      const response = await fetch(
+        `/api/calls/${call.id}/transcript?format=${format}`,
+        { method: "POST" }
+      );
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Export unavailable");
+      window.location.assign(result.url);
+    } catch (error) {
+      setMediaError(error instanceof Error ? error.message : "Export failed");
     } finally {
       setActiveOperation(null);
     }
@@ -365,6 +392,34 @@ export function CallDetailClient({
               <CheckCircle2 size={17} className="success-icon" />
             )}
           </div>
+          {segments.length > 0 && (
+            <div className="transcript-exports">
+              <button
+                className="button button-quiet"
+                disabled={activeOperation !== null}
+                onClick={() => void exportTranscript("txt")}
+              >
+                {activeOperation === "download-txt" ? (
+                  <LoaderCircle className="spin" size={14} />
+                ) : (
+                  <FileText size={14} />
+                )}
+                Export TXT
+              </button>
+              <button
+                className="button button-quiet"
+                disabled={activeOperation !== null}
+                onClick={() => void exportTranscript("srt")}
+              >
+                {activeOperation === "download-srt" ? (
+                  <LoaderCircle className="spin" size={14} />
+                ) : (
+                  <Captions size={14} />
+                )}
+                Export SRT
+              </button>
+            </div>
+          )}
           {segments.length > 0 ? (
             <div className="transcript-list">
               {segments.map((segment) => (

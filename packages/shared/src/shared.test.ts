@@ -8,7 +8,10 @@ import {
   canViewCall,
   decideCaptureSourceLoss,
   offsetTranscriptSegments,
+  srtTimestamp,
+  transcriptSrt,
   transcriptText,
+  transcriptTxt,
   mergeTranscriptChunks,
   validateReviewCompletion,
 } from "./index.js";
@@ -111,6 +114,54 @@ describe("transcript helpers", () => {
       },
     ]);
     expect(transcriptText(segments)).toBe("Hello");
+  });
+
+  it("writes SubRip timestamps exactly as players require them", () => {
+    expect(srtTimestamp(0)).toBe("00:00:00,000");
+    expect(srtTimestamp(1_000)).toBe("00:00:01,000");
+    expect(srtTimestamp(61_500)).toBe("00:01:01,500");
+    expect(srtTimestamp(3_723_004)).toBe("01:02:03,004");
+    // A negative offset is a bug upstream, not a reason to emit "-1".
+    expect(srtTimestamp(-5)).toBe("00:00:00,000");
+  });
+
+  it("numbers SRT cues from one and keeps every cue displayable", () => {
+    expect(
+      transcriptSrt([
+        { sequence: 1, startMs: 2_000, endMs: 4_250, text: " second " },
+        { sequence: 0, startMs: 0, endMs: 2_000, text: "first" },
+        { sequence: 2, startMs: 4_250, endMs: 4_250, text: "third" },
+        { sequence: 3, startMs: 9_000, endMs: 9_500, text: "   " },
+      ])
+    ).toBe(
+      [
+        "1",
+        "00:00:00,000 --> 00:00:02,000",
+        "first",
+        "",
+        "2",
+        "00:00:02,000 --> 00:00:04,250",
+        "second",
+        "",
+        // A zero-length provider segment would never display, so its end is
+        // nudged past its start rather than emitted as an unusable cue.
+        "3",
+        "00:00:04,250 --> 00:00:04,251",
+        "third",
+        "",
+      ].join("\n")
+    );
+  });
+
+  it("writes readable timestamped TXT and nothing at all for an empty Transcript", () => {
+    expect(
+      transcriptTxt([
+        { sequence: 0, startMs: 0, endMs: 2_000, text: "Thanks for joining." },
+        { sequence: 1, startMs: 3_725_000, endMs: 3_726_000, text: "Bye." },
+      ])
+    ).toBe("[00:00:00] Thanks for joining.\n[01:02:05] Bye.\n");
+    expect(transcriptTxt([])).toBe("");
+    expect(transcriptSrt([])).toBe("");
   });
 
   it("merges overlapping chunk text without duplicating the boundary", () => {
