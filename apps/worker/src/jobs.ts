@@ -289,6 +289,29 @@ export async function resumeBudgetPausedJobs() {
   return resumed;
 }
 
+/**
+ * The operator's view of how processing is actually doing, computed from
+ * Cauli's own durable evidence rather than from telemetry that may have been
+ * sampled away or dropped for quota.
+ */
+export async function readOperationalMetrics() {
+  const [level, queueAge, alerts] = await Promise.all([
+    supabase.rpc("processing_service_level", { window_hours: 24 }),
+    supabase.rpc("processing_queue_age_seconds"),
+    supabase.rpc("processing_operational_alerts"),
+  ]);
+  for (const result of [level, queueAge, alerts]) {
+    if (result.error) throw result.error;
+  }
+  return {
+    worker: config.workerName,
+    concurrency: config.concurrency,
+    queueAgeSeconds: queueAge.data ?? 0,
+    serviceLevel: level.data,
+    alerts: alerts.data ?? [],
+  };
+}
+
 export async function claimJob() {
   const { data, error } = await supabase.rpc("claim_processing_job", {
     worker_name: config.workerName,

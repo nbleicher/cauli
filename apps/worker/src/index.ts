@@ -4,6 +4,7 @@ import {
   assertTranscriptionModelsPriced,
   claimJob,
   cleanupAbandonedCalls,
+  readOperationalMetrics,
   resumeBudgetPausedJobs,
   runJob,
 } from "./jobs.js";
@@ -58,8 +59,24 @@ const server = createServer((request, response) => {
         ok: !shuttingDown,
         worker: config.workerName,
         activeJobs,
+        concurrency: config.concurrency,
       })
     );
+    return;
+  }
+  // The alert set and the service level are separate from liveness on purpose:
+  // a healthy worker can still be behind, and an operator needs to see that
+  // without waiting for a sampled telemetry event to arrive.
+  if (request.url === "/metrics") {
+    void readOperationalMetrics()
+      .then((metrics) => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(metrics));
+      })
+      .catch((error) => {
+        response.writeHead(503, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: sanitizedError(error) }));
+      });
     return;
   }
   response.writeHead(404);

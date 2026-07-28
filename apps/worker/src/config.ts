@@ -1,3 +1,5 @@
+import { PILOT_WORKER_CONCURRENCY } from "./capacity.js";
+
 function required(name: string) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -30,7 +32,8 @@ export const config = {
   ffprobePath: process.env.FFPROBE_PATH?.trim() || "ffprobe",
   pollMs: positiveInteger("WORKER_POLL_MS", 2_000),
   budgetResumeMs: positiveInteger("WORKER_BUDGET_RESUME_MS", 60_000),
-  concurrency: positiveInteger("WORKER_CONCURRENCY", 1),
+  // Sized from the recorded five-Call burst, not chosen. See capacity.ts.
+  concurrency: positiveInteger("WORKER_CONCURRENCY", PILOT_WORKER_CONCURRENCY),
   port: positiveInteger("PORT", 8_080),
   workerName:
     process.env.RAILWAY_REPLICA_ID ||

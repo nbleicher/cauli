@@ -82,6 +82,9 @@ afterEach(async () => {
     .neq("workspace_id", zeroUuid);
   await admin.from("processing_budget_warnings").delete().neq("scope_key", "");
   await admin.from("platform_admins").delete().neq("user_id", zeroUuid);
+  // Timing evidence outlives the job it describes, which is the point of it,
+  // so one test's runs must not become the next test's service level.
+  await admin.from("processing_runs").delete().neq("workspace_id", zeroUuid);
   await admin
     .from("platform_processing_budget")
     .update({ daily_limit_usd: 50, warning_ratio: 0.8 })
@@ -2195,6 +2198,125 @@ describe.skipIf(
       .gt("id", sinceEventId);
     expect(budgetEvents).toHaveLength(1);
     expect(budgetEvents?.[0]?.metadata).toMatchObject({ limit_usd: 75 });
+  });
+
+  it("raises the operational alerts an operator is expected to act on", async () => {
+    const { userId } = await createWorkspaceMember();
+
+    const { data: quiet, error: quietError } = await admin.rpc(
+      "processing_operational_alerts"
+    );
+    if (quietError) throw quietError;
+    expect(quiet).toEqual([]);
+
+    // A job that has been waiting longer than the five-minute queue budget.
+    const { callId } = await createCall(userId, {
+      status: "queued",
+      duration_ms: ms("1h"),
+      stopped_at: new Date().toISOString(),
+    });
+    const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
+    await admin.from("processing_jobs").insert({
+      id: jobId,
+      workspace_id: workspaceId,
+      call_id: callId,
+      kind: "process_recording",
+      status: "queued",
+      idempotency_key: `alert-queue:${callId}`,
+      next_attempt_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+
+    const { data: queued } = await admin.rpc("processing_operational_alerts");
+    const queueAlert = (
+      queued as Array<{ alert: string; detail: { queueAgeSeconds: number } }>
+    ).find((entry) => entry.alert === "processing.queue_age");
+    expect(queueAlert).toBeDefined();
+    expect(queueAlert?.detail.queueAgeSeconds).toBeGreaterThan(300);
+
+    // Repeated exhaustion is its own signal, separate from a slow queue.
+    for (let index = 0; index < 3; index += 1) {
+      const { callId: attentionCallId } = await createCall(userId);
+      const attentionJobId = crypto.randomUUID();
+      createdJobIds.push(attentionJobId);
+      await admin.from("processing_jobs").insert({
+        id: attentionJobId,
+        workspace_id: workspaceId,
+        call_id: attentionCallId,
+        kind: "process_recording",
+        status: "failed",
+        attempts: 3,
+        max_attempts: 3,
+        finished_at: new Date().toISOString(),
+        idempotency_key: `alert-attention-${index}:${attentionCallId}`,
+      });
+    }
+    const { data: attention } = await admin.rpc(
+      "processing_operational_alerts"
+    );
+    expect(
+      (attention as Array<{ alert: string }>).map((entry) => entry.alert)
+    ).toContain("processing.needs_attention");
+  });
+
+  it("reports provider incidents apart from Cauli missing its own target", async () => {
+    const { userId } = await createWorkspaceMember();
+    const jobIds: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const { callId } = await createCall(userId, {
+        status: "queued",
+        duration_ms: ms("1h"),
+        stopped_at: new Date().toISOString(),
+      });
+      const jobId = crypto.randomUUID();
+      jobIds.push(jobId);
+      createdJobIds.push(jobId);
+      await admin.from("processing_jobs").insert({
+        id: jobId,
+        workspace_id: workspaceId,
+        call_id: callId,
+        kind: "process_recording",
+        status: "queued",
+        idempotency_key: `alert-provider-${index}:${callId}`,
+      });
+      const { data: claimed } = await admin.rpc("claim_processing_job", {
+        worker_name: `provider-${index}`,
+      });
+      expect((claimed as Array<{ id: string }>)[0]?.id).toBe(jobId);
+      // The provider was unavailable; Cauli itself was not at fault.
+      const { error: failError } = await admin
+        .from("processing_jobs")
+        .update({
+          status: "failed",
+          attempts: 3,
+          error_category: "provider_unavailable",
+          finished_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+      if (failError) throw failError;
+    }
+
+    const { data: runs } = await admin
+      .from("processing_runs")
+      .select("outcome, error_category, counts_toward_target")
+      .in("job_id", jobIds);
+    expect(runs).toHaveLength(3);
+    for (const run of runs ?? []) {
+      expect(run.outcome).toBe("failed");
+      expect(run.error_category).toBe("provider_unavailable");
+    }
+
+    // Reported as a provider incident and still counted against the target:
+    // visible as both, excused as neither.
+    const { data: level } = await admin.rpc("processing_service_level", {
+      window_hours: 1,
+    });
+    expect(level).toMatchObject({ eligibleCalls: 3, providerIncidents: 3 });
+
+    const { data: alerts } = await admin.rpc("processing_operational_alerts");
+    expect(
+      (alerts as Array<{ alert: string }>).map((entry) => entry.alert)
+    ).toContain("processing.provider_incident");
   });
 
   it("holds work rather than spending against an unpriced model", async () => {
