@@ -10,7 +10,8 @@ rebuild the candidate during promotion.
 Create separate private `Cauli Staging` and `Cauli Production` Railway projects.
 Each project contains:
 
-- `web`, the only service with a public application domain;
+- `web`, the only public service, with separate Workspace and Platform Admin
+  domains enforced again by the application host boundary;
 - `worker`, with private networking only and no generated or custom public
   domain.
 
@@ -34,6 +35,7 @@ Web:
 SUPABASE_URL
 SUPABASE_ANON_KEY
 APP_URL
+PLATFORM_ADMIN_HOST
 CSP_MODE=report-only        # staging
 CSP_MODE=enforce            # production candidate after CSP acceptance
 HSTS_INCLUDE_SUBDOMAINS=false
@@ -42,6 +44,9 @@ HSTS_INCLUDE_SUBDOMAINS=false
 `APP_URL` is `https://staging.cauli.pro` in staging and
 `https://app.cauli.pro` in production. Public Supabase configuration is read at
 request time and emitted into the HTML; it is not compiled into the image.
+`PLATFORM_ADMIN_HOST` is `admin.staging.cauli.pro` in staging and
+`admin.cauli.pro` in production. Requests for control-plane paths on any other
+host, and Workspace application paths on the Platform Admin host, fail closed.
 `HSTS_INCLUDE_SUBDOMAINS` remains false until every `cauli.pro` subdomain is
 proven HTTPS during Phase B, then production sets it to true.
 
@@ -158,6 +163,21 @@ Configure the approved domain topology from ADR-0019. The public
 `staging.cauli.pro/login`. Cloudflare Access protects staging and both Platform
 Admin surfaces. Add Supabase Auth site/redirect URLs for the exact application
 origins, including `/auth/callback`.
+
+Create a Cloudflare Access application for each exact Platform Admin origin:
+`admin.staging.cauli.pro` and `admin.cauli.pro`. Do not use a wildcard that also
+admits the Workspace application. Configure both custom domains on the web
+service, then verify that `/platform-admin` returns 404 on the Workspace domain
+and `/record` returns 404 on the Platform Admin domain.
+
+Provision each Platform Admin as a dedicated Supabase Auth identity, then add
+only its environment-scoped `platform_admins` row. The database rejects an
+identity that is also a Workspace Member. Platform Admin identities require
+TOTP, use a 15-minute inactivity timeout and one-hour absolute session, and
+must freshly assert TOTP within five minutes before activating or revoking a
+break-glass grant. Never provide this identity or the web service with worker,
+backup-writer, retention-deleter, Peely, migration/release, Sentry build, or
+service-role credentials.
 
 Do not enable HSTS `includeSubDomains` until every Cauli subdomain is HTTPS.
 Preload is not used during the pilot.
