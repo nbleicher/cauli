@@ -15,11 +15,25 @@ export const CALL_STATUSES = [
   "uploading",
   "queued",
   "processing",
+  "budget_paused",
   "ready",
   "failed",
   "abandoned",
 ] as const;
 export type CallStatus = (typeof CALL_STATUSES)[number];
+
+/**
+ * Nonterminal Call states keep the client polling. Budget Paused belongs here:
+ * it clears on its own when budget capacity returns, with nothing for the
+ * Workspace Member to do.
+ */
+export const ACTIVE_CALL_STATUSES: readonly CallStatus[] = [
+  "recording",
+  "uploading",
+  "queued",
+  "processing",
+  "budget_paused",
+];
 
 export const REVIEW_STATUSES = [
   "unreviewed",
@@ -30,7 +44,12 @@ export const REVIEW_STATUSES = [
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
 
 export type JobStatus =
-  "queued" | "processing" | "retrying" | "complete" | "failed";
+  | "queued"
+  | "processing"
+  | "retrying"
+  | "budget_paused"
+  | "complete"
+  | "failed";
 export type ProcessingJobKind =
   "process_recording" | "generate_wav" | "delete_call" | "cleanup_abandoned";
 

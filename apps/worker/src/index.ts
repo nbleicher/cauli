@@ -1,11 +1,18 @@
 import { createServer } from "node:http";
 import { config } from "./config.js";
-import { claimJob, cleanupAbandonedCalls, runJob } from "./jobs.js";
+import {
+  assertTranscriptionModelsPriced,
+  claimJob,
+  cleanupAbandonedCalls,
+  resumeBudgetPausedJobs,
+  runJob,
+} from "./jobs.js";
 import { log, sanitizedError } from "./log.js";
 
 let shuttingDown = false;
 let activeJobs = 0;
 let lastCleanupAt = 0;
+let lastBudgetResumeAt = 0;
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -17,6 +24,10 @@ async function workerLoop(index: number) {
       if (Date.now() - lastCleanupAt > 24 * 60 * 60 * 1_000) {
         lastCleanupAt = Date.now();
         await cleanupAbandonedCalls();
+      }
+      if (Date.now() - lastBudgetResumeAt > config.budgetResumeMs) {
+        lastBudgetResumeAt = Date.now();
+        await resumeBudgetPausedJobs();
       }
       const job = await claimJob();
       if (!job) {
@@ -39,12 +50,16 @@ async function workerLoop(index: number) {
 
 const server = createServer((request, response) => {
   if (request.url === "/health") {
-    response.writeHead(shuttingDown ? 503 : 200, { "content-type": "application/json" });
-    response.end(JSON.stringify({
-      ok: !shuttingDown,
-      worker: config.workerName,
-      activeJobs,
-    }));
+    response.writeHead(shuttingDown ? 503 : 200, {
+      "content-type": "application/json",
+    });
+    response.end(
+      JSON.stringify({
+        ok: !shuttingDown,
+        worker: config.workerName,
+        activeJobs,
+      })
+    );
     return;
   }
   response.writeHead(404);
@@ -58,6 +73,13 @@ server.listen(config.port, () => {
     port: config.port,
   });
 });
+
+try {
+  await assertTranscriptionModelsPriced();
+} catch (error) {
+  log.error("worker_pricing_unconfigured", { error: sanitizedError(error) });
+  process.exit(1);
+}
 
 for (let index = 0; index < config.concurrency; index += 1) {
   void workerLoop(index);

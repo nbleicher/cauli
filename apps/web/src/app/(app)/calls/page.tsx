@@ -1,3 +1,4 @@
+import { ACTIVE_CALL_STATUSES } from "@calllog/shared";
 import { CallTable } from "@/components/CallTable";
 import { PageHeader } from "@/components/PageHeader";
 import { ProcessingPoller } from "@/components/ProcessingPoller";
@@ -16,9 +17,7 @@ export default async function MyCallsPage() {
       />
       <ProcessingPoller
         active={calls.some((call) =>
-          ["recording", "uploading", "queued", "processing"].includes(
-            call.status
-          )
+          ACTIVE_CALL_STATUSES.includes(call.status)
         )}
       />
       <CallTable calls={calls} showOwner={false} />

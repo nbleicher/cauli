@@ -261,6 +261,34 @@ async function handleJob(job: ProcessingJob, stopHeartbeat: StopHeartbeat) {
   throw new Error(`Unsupported job kind: ${job.kind}`);
 }
 
+/**
+ * Refuses to start against a model nobody has priced. Without this the first
+ * Call of a misconfigured deployment would sit in Budget Paused with no
+ * explanation until somebody went looking for it.
+ */
+export async function assertTranscriptionModelsPriced() {
+  const { error } = await supabase.rpc("assert_transcription_models_priced", {
+    target_models: [
+      config.transcriptionModel,
+      config.transcriptionFallbackModel,
+    ],
+  });
+  if (error) throw error;
+}
+
+/**
+ * Budget Paused work has nothing to retry — it is waiting for money. Asking on
+ * a cadence covers both ways capacity returns: the daily ledger rolling over,
+ * and a Platform Admin raising a limit.
+ */
+export async function resumeBudgetPausedJobs() {
+  const { data, error } = await supabase.rpc("resume_budget_paused_jobs");
+  if (error) throw error;
+  const resumed = (data as number | null) ?? 0;
+  if (resumed > 0) log.info("budget_paused_jobs_resumed", { resumed });
+  return resumed;
+}
+
 export async function claimJob() {
   const { data, error } = await supabase.rpc("claim_processing_job", {
     worker_name: config.workerName,

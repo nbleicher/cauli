@@ -783,7 +783,8 @@ textarea:focus {
   color: var(--coral-strong);
 }
 
-.status-needs_follow_up {
+.status-needs_follow_up,
+.status-budget_paused {
   border-color: var(--amber-line);
   background: var(--amber-soft);
   color: var(--amber-text);

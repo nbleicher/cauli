@@ -1,3 +1,4 @@
+import { ACTIVE_CALL_STATUSES } from "@calllog/shared";
 import { redirect } from "next/navigation";
 import { CallTable } from "@/components/CallTable";
 import { PageHeader } from "@/components/PageHeader";
@@ -18,9 +19,7 @@ export default async function WorkspaceCallsPage() {
       />
       <ProcessingPoller
         active={calls.some((call) =>
-          ["recording", "uploading", "queued", "processing"].includes(
-            call.status
-          )
+          ACTIVE_CALL_STATUSES.includes(call.status)
         )}
       />
       <CallTable calls={calls} showOwner />

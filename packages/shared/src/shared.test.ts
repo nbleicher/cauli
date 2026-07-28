@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ACTIVE_CALL_STATUSES,
   calculateNormalizedScore,
   canDeleteCall,
   canReviewCall,
@@ -66,6 +67,14 @@ describe("call transitions", () => {
   it("accepts the processing path and rejects skips", () => {
     expect(canTransitionCall("recording", "uploading")).toBe(true);
     expect(canTransitionCall("uploading", "ready")).toBe(false);
+  });
+
+  it("treats Budget Paused as a wait that only returns to the queue", () => {
+    expect(canTransitionCall("queued", "budget_paused")).toBe(true);
+    expect(canTransitionCall("budget_paused", "queued")).toBe(true);
+    // A pause is not an outcome: it cannot become a finished Call by itself.
+    expect(canTransitionCall("budget_paused", "ready")).toBe(false);
+    expect(ACTIVE_CALL_STATUSES).toContain("budget_paused");
   });
 });
 
