@@ -1,13 +1,20 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
 import { createHash } from "node:crypto";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 export interface ReceiverObject {
   ciphertext: Buffer;
@@ -31,11 +38,12 @@ interface ReceiverStoreOptions {
    * before publication. Production leaves this unset.
    */
   beforePublish?: () => Promise<void>;
-  lockTimeoutMs?: number;
 }
 
-const delay = (milliseconds: number) =>
-  new Promise((resolve) => setTimeout(resolve, milliseconds));
+interface LedgerRow {
+  state: "published" | "tombstoned";
+  checksum_sha256: string | null;
+}
 
 function assertObjectName(objectName: string) {
   if (!/^[0-9a-f]{64}$/.test(objectName)) {
@@ -43,42 +51,52 @@ function assertObjectName(objectName: string) {
   }
 }
 
-function isAlreadyExists(error: unknown) {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error as NodeJS.ErrnoException).code === "EEXIST"
-  );
+function syncDirectory(directory: string) {
+  const descriptor = openSync(directory, constants.O_RDONLY);
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
-function isMissing(error: unknown) {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error as NodeJS.ErrnoException).code === "ENOENT"
+function writeDurably(path: string, content: string | Buffer) {
+  const descriptor = openSync(
+    path,
+    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+    0o600
   );
+  try {
+    writeFileSync(descriptor, content);
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 /**
- * Filesystem state machine for the narrow VPS receiver.
+ * Crash-safe filesystem state machine for the narrow VPS receiver.
  *
- * PUT stages bytes before taking the per-object filesystem lock. DELETE writes
- * a durable tombstone before removing the object. Publication and deletion
- * both hold that same lock, so their order is definitive even across multiple
- * receiver processes:
+ * The SQLite ledger supplies an OS-managed cross-process write lock, released
+ * automatically on process death. FULL synchronous commits make tombstones
+ * durable before DELETE is acknowledged. Object bytes and directories are
+ * explicitly flushed before a publication commit.
+ *
+ * PUT stages bytes before entering the transaction. DELETE commits a durable
+ * tombstone before removing the object. Their order is therefore definitive:
  *
  * - DELETE first: the later PUT observes the tombstone and receives 410.
- * - PUT first: DELETE waits, then tombstones and removes the published object.
+ * - PUT first: DELETE waits for the transaction, then tombstones and removes.
  *
- * A client clock, database clock, process pause, or disconnected HTTP client
- * therefore cannot recreate an object after a successful DELETE/404.
+ * A client clock, database clock, process pause, disconnected HTTP client, or
+ * receiver crash therefore cannot recreate an object after DELETE/404.
  */
 export class BackupReceiverStore {
   readonly #objectsDirectory: string;
   readonly #incomingDirectory: string;
-  readonly #locksDirectory: string;
-  readonly #tombstonesDirectory: string;
+  readonly #ledgerPath: string;
   readonly #options: ReceiverStoreOptions;
+  #database: DatabaseSync | null = null;
 
   constructor(
     private readonly rootDirectory: string,
@@ -86,21 +104,40 @@ export class BackupReceiverStore {
   ) {
     this.#objectsDirectory = join(rootDirectory, "objects");
     this.#incomingDirectory = join(rootDirectory, "incoming");
-    this.#locksDirectory = join(rootDirectory, "locks");
-    this.#tombstonesDirectory = join(rootDirectory, "tombstones");
+    this.#ledgerPath = join(rootDirectory, "receiver-ledger.sqlite");
     this.#options = options;
   }
 
   async initialize() {
-    await Promise.all(
-      [
-        this.rootDirectory,
-        this.#objectsDirectory,
-        this.#incomingDirectory,
-        this.#locksDirectory,
-        this.#tombstonesDirectory,
-      ].map((directory) => mkdir(directory, { recursive: true, mode: 0o700 }))
-    );
+    if (this.#database) return;
+    for (const directory of [
+      this.rootDirectory,
+      this.#objectsDirectory,
+      this.#incomingDirectory,
+    ]) {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+    }
+    this.#database = new DatabaseSync(this.#ledgerPath);
+    this.#database.exec(`
+      pragma journal_mode = WAL;
+      pragma synchronous = FULL;
+      pragma busy_timeout = 60000;
+      create table if not exists receiver_objects (
+        object_name text primary key
+          check (length(object_name) = 64),
+        state text not null
+          check (state in ('published', 'tombstoned')),
+        checksum_sha256 text,
+        changed_at text not null
+      ) strict;
+    `);
+    syncDirectory(this.rootDirectory);
+    this.#reconcilePublishedDirectories();
+  }
+
+  close() {
+    this.#database?.close();
+    this.#database = null;
   }
 
   async put(objectName: string, object: ReceiverObject): Promise<PutResult> {
@@ -116,78 +153,90 @@ export class BackupReceiverStore {
     }
 
     await this.initialize();
-    const stagedDirectory = await mkdtemp(
+    const stagedDirectory = mkdtempSync(
       join(this.#incomingDirectory, `${objectName}-`)
     );
-    await Promise.all([
-      writeFile(join(stagedDirectory, "ciphertext"), object.ciphertext, {
-        mode: 0o600,
-      }),
-      writeFile(
-        join(stagedDirectory, "metadata.json"),
-        JSON.stringify(object.metadata),
-        { mode: 0o600 }
-      ),
-    ]);
-
     try {
+      writeDurably(join(stagedDirectory, "ciphertext"), object.ciphertext);
+      writeDurably(
+        join(stagedDirectory, "metadata.json"),
+        JSON.stringify(object.metadata)
+      );
+      syncDirectory(stagedDirectory);
+      syncDirectory(this.#incomingDirectory);
+
       await this.#options.beforePublish?.();
-      return await this.#withLock(objectName, async () => {
-        if (await this.#tombstoneExists(objectName)) {
+      return this.#transaction(() => {
+        const existing = this.#ledgerRow(objectName);
+        if (existing?.state === "tombstoned") {
           return { status: "tombstoned" };
         }
-
-        const existing = await this.get(objectName);
-        if (existing) {
+        if (existing?.state === "published") {
           return {
             status: "existing",
-            checksumSha256: existing.metadata.checksumSha256,
+            checksumSha256: existing.checksum_sha256 ?? "",
           };
         }
 
-        await rename(stagedDirectory, this.#objectDirectory(objectName));
+        const objectDirectory = this.#objectDirectory(objectName);
+        if (existsSync(objectDirectory)) {
+          const recovered = this.#readObject(objectName);
+          this.#recordPublished(objectName, recovered.metadata.checksumSha256);
+          return {
+            status: "existing",
+            checksumSha256: recovered.metadata.checksumSha256,
+          };
+        }
+
+        renameSync(stagedDirectory, objectDirectory);
+        syncDirectory(this.#objectsDirectory);
+        this.#recordPublished(objectName, object.metadata.checksumSha256);
         return { status: "created" };
       });
     } finally {
-      await rm(stagedDirectory, { recursive: true, force: true });
+      rmSync(stagedDirectory, { recursive: true, force: true });
     }
   }
 
   async delete(objectName: string) {
     assertObjectName(objectName);
     await this.initialize();
-    await this.#withLock(objectName, async () => {
-      try {
-        await writeFile(
-          join(this.#tombstonesDirectory, objectName),
-          `${new Date().toISOString()}\n`,
-          { flag: "wx", mode: 0o600 }
-        );
-      } catch (error) {
-        if (!isAlreadyExists(error)) throw error;
-      }
-      await rm(this.#objectDirectory(objectName), {
-        recursive: true,
-        force: true,
-      });
+    this.#transaction(() => {
+      this.#database!.prepare(
+        `insert into receiver_objects (
+           object_name, state, checksum_sha256, changed_at
+         ) values (?, 'tombstoned', null, ?)
+         on conflict (object_name) do update
+         set state = 'tombstoned',
+             checksum_sha256 = null,
+             changed_at = excluded.changed_at`
+      ).run(objectName, new Date().toISOString());
     });
+
+    // The committed ledger fence already prevents every future PUT. Removing
+    // bytes after that commit makes a crash between the two steps converge on
+    // retry without reopening publication.
+    rmSync(this.#objectDirectory(objectName), {
+      recursive: true,
+      force: true,
+    });
+    syncDirectory(this.#objectsDirectory);
   }
 
   async get(objectName: string): Promise<ReceiverObject | null> {
     assertObjectName(objectName);
+    await this.initialize();
+    if (this.#ledgerRow(objectName)?.state !== "published") return null;
     try {
-      const [ciphertext, metadata] = await Promise.all([
-        readFile(join(this.#objectDirectory(objectName), "ciphertext")),
-        readFile(join(this.#objectDirectory(objectName), "metadata.json"), {
-          encoding: "utf8",
-        }),
-      ]);
-      return {
-        ciphertext,
-        metadata: JSON.parse(metadata) as ReceiverObject["metadata"],
-      };
+      return this.#readObject(objectName);
     } catch (error) {
-      if (isMissing(error)) return null;
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+      ) {
+        return null;
+      }
       throw error;
     }
   }
@@ -195,43 +244,92 @@ export class BackupReceiverStore {
   async isTombstoned(objectName: string) {
     assertObjectName(objectName);
     await this.initialize();
-    return this.#tombstoneExists(objectName);
+    return this.#ledgerRow(objectName)?.state === "tombstoned";
+  }
+
+  durabilitySettings() {
+    if (!this.#database) throw new Error("Receiver store is not initialized");
+    return {
+      journalMode: (
+        this.#database.prepare("pragma journal_mode").get() as {
+          journal_mode: string;
+        }
+      ).journal_mode,
+      synchronous: (
+        this.#database.prepare("pragma synchronous").get() as {
+          synchronous: number;
+        }
+      ).synchronous,
+    };
   }
 
   #objectDirectory(objectName: string) {
     return join(this.#objectsDirectory, objectName);
   }
 
-  async #tombstoneExists(objectName: string) {
-    try {
-      await readFile(join(this.#tombstonesDirectory, objectName));
-      return true;
-    } catch (error) {
-      if (isMissing(error)) return false;
-      throw error;
-    }
+  #ledgerRow(objectName: string) {
+    return this.#database!.prepare(
+      `select state, checksum_sha256
+       from receiver_objects
+       where object_name = ?`
+    ).get(objectName) as LedgerRow | undefined;
   }
 
-  async #withLock<T>(objectName: string, operation: () => Promise<T>) {
-    const lockDirectory = join(this.#locksDirectory, objectName);
-    const deadline = Date.now() + (this.#options.lockTimeoutMs ?? 60_000);
-    while (true) {
-      try {
-        await mkdir(lockDirectory, { mode: 0o700 });
-        break;
-      } catch (error) {
-        if (!isAlreadyExists(error)) throw error;
-        if (Date.now() >= deadline) {
-          throw new Error("Backup receiver object lock timed out");
-        }
-        await delay(10);
-      }
-    }
+  #readObject(objectName: string): ReceiverObject {
+    const objectDirectory = this.#objectDirectory(objectName);
+    return {
+      ciphertext: readFileSync(join(objectDirectory, "ciphertext")),
+      metadata: JSON.parse(
+        readFileSync(join(objectDirectory, "metadata.json"), "utf8")
+      ) as ReceiverObject["metadata"],
+    };
+  }
 
+  #recordPublished(objectName: string, checksumSha256: string) {
+    this.#database!.prepare(
+      `insert into receiver_objects (
+         object_name, state, checksum_sha256, changed_at
+       ) values (?, 'published', ?, ?)
+       on conflict (object_name) do update
+       set state = 'published',
+           checksum_sha256 = excluded.checksum_sha256,
+           changed_at = excluded.changed_at
+       where receiver_objects.state != 'tombstoned'`
+    ).run(objectName, checksumSha256, new Date().toISOString());
+  }
+
+  #reconcilePublishedDirectories() {
+    this.#transaction(() => {
+      let changed = false;
+      for (const objectName of readdirSync(this.#objectsDirectory)) {
+        if (!/^[0-9a-f]{64}$/.test(objectName)) continue;
+        const row = this.#ledgerRow(objectName);
+        if (row?.state === "tombstoned") {
+          rmSync(this.#objectDirectory(objectName), {
+            recursive: true,
+            force: true,
+          });
+          changed = true;
+          continue;
+        }
+        if (!row) {
+          const recovered = this.#readObject(objectName);
+          this.#recordPublished(objectName, recovered.metadata.checksumSha256);
+        }
+      }
+      if (changed) syncDirectory(this.#objectsDirectory);
+    });
+  }
+
+  #transaction<T>(operation: () => T) {
+    this.#database!.exec("begin immediate");
     try {
-      return await operation();
-    } finally {
-      await rm(lockDirectory, { recursive: true, force: true });
+      const result = operation();
+      this.#database!.exec("commit");
+      return result;
+    } catch (error) {
+      this.#database!.exec("rollback");
+      throw error;
     }
   }
 }

@@ -1,4 +1,9 @@
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer, request } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +14,7 @@ import {
 import { createBackupReceiverHandler } from "./backup-receiver.js";
 
 const directories: string[] = [];
+const stores: BackupReceiverStore[] = [];
 const objectName = "a".repeat(64);
 const object: ReceiverObject = {
   ciphertext: Buffer.from("encrypted Source Audio"),
@@ -29,7 +35,17 @@ async function temporaryDirectory() {
   return directory;
 }
 
+function receiverStore(
+  directory: string,
+  options?: ConstructorParameters<typeof BackupReceiverStore>[1]
+) {
+  const store = new BackupReceiverStore(directory, options);
+  stores.push(store);
+  return store;
+}
+
 afterEach(async () => {
+  for (const store of stores.splice(0)) store.close();
   await Promise.all(
     directories
       .splice(0)
@@ -39,7 +55,7 @@ afterEach(async () => {
 
 describe("the durable Source Audio Backup receiver fence", () => {
   it("creates once and never overwrites different bytes", async () => {
-    const store = new BackupReceiverStore(await temporaryDirectory());
+    const store = receiverStore(await temporaryDirectory());
     expect(await store.put(objectName, object)).toEqual({ status: "created" });
     expect(await store.put(objectName, object)).toEqual({
       status: "existing",
@@ -51,7 +67,7 @@ describe("the durable Source Audio Backup receiver fence", () => {
   });
 
   it("tombstones a completed deletion so a later PUT cannot recreate it", async () => {
-    const store = new BackupReceiverStore(await temporaryDirectory());
+    const store = receiverStore(await temporaryDirectory());
     await store.delete(objectName);
 
     expect(await store.put(objectName, object)).toEqual({
@@ -71,7 +87,7 @@ describe("the durable Source Audio Backup receiver fence", () => {
       releasePublication = resolve;
     });
     const directory = await temporaryDirectory();
-    const delayedReceiver = new BackupReceiverStore(directory, {
+    const delayedReceiver = receiverStore(directory, {
       beforePublish: async () => {
         bodyAccepted();
         await release;
@@ -83,7 +99,7 @@ describe("the durable Source Audio Backup receiver fence", () => {
     // complete a DELETE/404 in that interval.
     const latePut = delayedReceiver.put(objectName, object);
     await accepted;
-    const retentionReceiver = new BackupReceiverStore(directory);
+    const retentionReceiver = receiverStore(directory);
     await retentionReceiver.delete(objectName);
     releasePublication();
 
@@ -101,7 +117,7 @@ describe("the durable Source Audio Backup receiver fence", () => {
     const release = new Promise<void>((resolve) => {
       releasePublication = resolve;
     });
-    const store = new BackupReceiverStore(await temporaryDirectory(), {
+    const store = receiverStore(await temporaryDirectory(), {
       beforePublish: async () => {
         bodyAccepted();
         await release;
@@ -177,7 +193,52 @@ describe("the durable Source Audio Backup receiver fence", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it("releases an in-flight transaction lock when the receiver process dies", async () => {
+    const directory = await temporaryDirectory();
+    const store = receiverStore(directory);
+    await store.initialize();
+    store.close();
+
+    const child = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          import { DatabaseSync } from "node:sqlite";
+          const database = new DatabaseSync(process.argv[1]);
+          database.exec("pragma busy_timeout = 60000; begin immediate");
+          process.stdout.write("locked");
+          setInterval(() => {}, 1000);
+        `,
+        join(directory, "receiver-ledger.sqlite"),
+      ],
+      { stdio: ["ignore", "pipe", "ignore"] }
+    );
+    await once(child.stdout!, "data");
+    child.kill("SIGKILL");
+    await once(child, "exit");
+
+    const restarted = receiverStore(directory);
+    await restarted.delete(objectName);
+    expect(await restarted.isTombstoned(objectName)).toBe(true);
+  });
+
+  it("persists an acknowledged tombstone across a receiver restart", async () => {
+    const directory = await temporaryDirectory();
+    const firstProcess = receiverStore(directory);
+    await firstProcess.delete(objectName);
+    expect(firstProcess.durabilitySettings()).toEqual({
+      journalMode: "wal",
+      synchronous: 2,
+    });
+    firstProcess.close();
+
+    const restarted = receiverStore(directory);
+    expect(await restarted.put(objectName, object)).toEqual({
+      status: "tombstoned",
+    });
+    expect(await restarted.get(objectName)).toBeNull();
+  });
 });
-import { createHash } from "node:crypto";
-import { createServer, request } from "node:http";
-import type { AddressInfo } from "node:net";
