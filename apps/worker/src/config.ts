@@ -17,9 +17,7 @@ function positiveInteger(name: string, fallback: number) {
 export const config = {
   supabaseUrl:
     process.env.SUPABASE_URL?.trim() || required("NEXT_PUBLIC_SUPABASE_URL"),
-  workerKey:
-    process.env.SUPABASE_WORKER_KEY?.trim() ||
-    required("SUPABASE_SERVICE_ROLE_KEY"),
+  workerKey: required("SUPABASE_WORKER_KEY"),
   openRouterKey: required("OPENROUTER_API_KEY"),
   transcriptionModel:
     process.env.OPENROUTER_STT_MODEL?.trim() || "openai/whisper-large-v3-turbo",

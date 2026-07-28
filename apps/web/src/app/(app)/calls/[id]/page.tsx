@@ -78,6 +78,14 @@ export default async function CallDetailPage({
     rawCall.owner as unknown as ProfileRelation | ProfileRelation[] | null
   );
 
+  // The database calculates the schedule from the Workspace's Retention Policy
+  // so a policy change moves every Call at once and none can show a stale date.
+  const { data: retentionSchedule } = await supabase
+    .from("call_retention_schedule")
+    .select("retention_days, scheduled_deletion_at")
+    .eq("call_id", id)
+    .maybeSingle();
+
   const { data: transcript } = await supabase
     .from("transcripts")
     .select("id, full_text")
@@ -313,6 +321,8 @@ export default async function CallDetailPage({
           hasSource: Boolean(rawCall.source_path),
           hasMp3: Boolean(rawCall.mp3_path),
           hasWav: Boolean(rawCall.wav_path),
+          retentionDays: retentionSchedule?.retention_days ?? null,
+          scheduledDeletionAt: retentionSchedule?.scheduled_deletion_at ?? null,
         }}
         segments={segments ?? []}
         transcriptText={transcript?.full_text ?? ""}

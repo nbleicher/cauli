@@ -75,6 +75,11 @@ jobs:
       - name: Install Chrome
         run: npx playwright install --with-deps chromium
 
+      # The offline Source Audio Backup recovery path is proven against the
+      # official tool an operator would actually use, not a reimplementation.
+      - name: Install age
+        run: sudo apt-get update && sudo apt-get install --yes age
+
       - name: Audit production dependencies
         run: npm audit --omit=dev
 
@@ -93,6 +98,10 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.API_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SECRET_KEY }}
+          SUPABASE_WORKER_KEY: ${{ env.SECRET_KEY }}
+          # Lets the retention-principal contract mint a real cauli_retention
+          # credential and prove the boundary by behaviour, not by assertion.
+          SUPABASE_JWT_SECRET: ${{ env.JWT_SECRET }}
           OPENROUTER_API_KEY: integration-test-key
         run: npm test
 
@@ -103,6 +112,7 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.API_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SECRET_KEY }}
+          SUPABASE_WORKER_KEY: ${{ env.SECRET_KEY }}
           APP_URL: http://127.0.0.1:3102
           MAILPIT_URL: http://127.0.0.1:54324
         run: |
@@ -138,5 +148,6 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.API_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SECRET_KEY }}
+          SUPABASE_WORKER_KEY: ${{ env.SECRET_KEY }}
           OPENROUTER_API_KEY: build-placeholder
         run: npm run build

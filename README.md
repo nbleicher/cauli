@@ -71,6 +71,8 @@ Create separate Railway services from this repository:
 
 - Web service: config file `/railway.web.toml`
 - Worker service: config file `/railway.worker.toml`
+- Backup writer: config file `/railway.backup-worker.toml`
+- Retention worker: config file `/railway.retention-worker.toml`
 
 Staging and production use separate credentials. See
 [Deployment](docs/DEPLOYMENT.md) for setup and

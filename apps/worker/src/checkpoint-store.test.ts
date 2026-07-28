@@ -1,12 +1,14 @@
 import { createClient } from "@supabase/supabase-js";
 import { afterEach, describe, expect, it } from "vitest";
 
-const localUrl = "http://127.0.0.1:54321";
+const localUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54321";
 const localServiceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 
 process.env.NEXT_PUBLIC_SUPABASE_URL = localUrl;
 process.env.SUPABASE_SERVICE_ROLE_KEY = localServiceRoleKey;
+process.env.SUPABASE_WORKER_KEY = localServiceRoleKey;
 process.env.OPENROUTER_API_KEY = "integration-test-key";
 
 const supabase = createClient(localUrl, localServiceRoleKey, {

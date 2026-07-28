@@ -1,5 +1,9 @@
 import { createServer } from "node:http";
 import {
+  expireCallsForRetention,
+  reportBackupDeletionBacklog,
+} from "./application-retention.js";
+import {
   captureWorkerError,
   flushTelemetry,
   traceWorkerJob,
@@ -18,6 +22,7 @@ import { log, sanitizedError } from "./log.js";
 let shuttingDown = false;
 let activeJobs = 0;
 let lastCleanupAt = 0;
+let lastExpiryAt = 0;
 let lastBudgetResumeAt = 0;
 
 function delay(ms: number) {
@@ -56,6 +61,27 @@ async function workerLoop(index: number) {
       });
       await delay(config.pollMs);
     }
+  }
+}
+
+/**
+ * This application-owned sweep decides what expires and reports the backlog.
+ * It has no backup-writer or VPS-deletion credentials.
+ */
+async function applicationRetentionLoop() {
+  while (!shuttingDown) {
+    try {
+      await reportBackupDeletionBacklog();
+      if (Date.now() - lastExpiryAt > 60_000) {
+        lastExpiryAt = Date.now();
+        await expireCallsForRetention();
+      }
+    } catch (error) {
+      log.error("application_retention_loop_error", {
+        error: sanitizedError(error),
+      });
+    }
+    await delay(60_000);
   }
 }
 
@@ -120,6 +146,7 @@ try {
 for (let index = 0; index < config.concurrency; index += 1) {
   void workerLoop(index);
 }
+void applicationRetentionLoop();
 
 async function shutdown(signal: string) {
   if (shuttingDown) return;

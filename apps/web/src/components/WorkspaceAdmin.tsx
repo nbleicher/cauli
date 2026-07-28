@@ -1,6 +1,6 @@
 "use client";
 
-import type { Role } from "@calllog/shared";
+import { RETENTION_DAY_OPTIONS, type Role } from "@calllog/shared";
 import {
   LoaderCircle,
   MailPlus,
@@ -46,11 +46,13 @@ export function WorkspaceAdmin({
   members,
   invites,
   currentUserId,
+  retentionDays,
   recoveryLockouts = [],
 }: {
   members: Member[];
   invites: Invite[];
   currentUserId: string;
+  retentionDays: number;
   recoveryLockouts?: string[];
 }) {
   const router = useRouter();
@@ -59,6 +61,36 @@ export function WorkspaceAdmin({
   const [working, setWorking] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+
+  async function changeRetention(days: number) {
+    setWorking("retention");
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/admin/retention", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ retentionDays: days }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (reassertIfRequired(result)) return;
+        throw new Error(result.error || "Retention Policy update failed");
+      }
+      setNotice(
+        `Calls are now deleted ${result.retentionDays} days after they are recorded.`
+      );
+      router.refresh();
+    } catch (retentionError) {
+      setError(
+        retentionError instanceof Error
+          ? retentionError.message
+          : "Retention Policy update failed"
+      );
+    } finally {
+      setWorking("");
+    }
+  }
 
   async function invite(event: FormEvent) {
     event.preventDefault();
@@ -379,6 +411,36 @@ export function WorkspaceAdmin({
               </button>
             </div>
           ))}
+        </div>
+      </section>
+
+      <section className="admin-section">
+        <div className="section-heading">
+          <div>
+            <h2>Retention Policy</h2>
+            <p>
+              Every Call and everything derived from it is permanently deleted
+              this long after it was recorded. There is no retain-forever option
+              and no per-Call exception.
+            </p>
+          </div>
+        </div>
+        <div className="field">
+          <label htmlFor="retention-days">Delete Calls after</label>
+          <select
+            id="retention-days"
+            value={retentionDays}
+            disabled={Boolean(working)}
+            onChange={(event) =>
+              void changeRetention(Number(event.target.value))
+            }
+          >
+            {RETENTION_DAY_OPTIONS.map((days) => (
+              <option key={days} value={days}>
+                {days} days
+              </option>
+            ))}
+          </select>
         </div>
       </section>
 

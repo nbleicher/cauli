@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   CALL_STATUSES,
+  RETENTION_DAY_OPTIONS,
   REVIEW_STATUSES,
   ROLES,
   SOURCE_MODES,
@@ -10,6 +11,11 @@ export const roleSchema = z.enum(ROLES);
 export const sourceModeSchema = z.enum(SOURCE_MODES);
 export const callStatusSchema = z.enum(CALL_STATUSES);
 export const reviewStatusSchema = z.enum(REVIEW_STATUSES);
+export const retentionDaysSchema = z.literal(RETENTION_DAY_OPTIONS);
+
+export const setRetentionPolicySchema = z.object({
+  retentionDays: retentionDaysSchema,
+});
 
 export const createCallSchema = z.object({
   sourceMode: sourceModeSchema,

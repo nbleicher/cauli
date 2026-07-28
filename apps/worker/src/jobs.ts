@@ -221,6 +221,11 @@ async function generateWav(job: ProcessingJob, stopHeartbeat: StopHeartbeat) {
 
 async function deleteCall(job: ProcessingJob, stopHeartbeat: StopHeartbeat) {
   if (!job.call_id) throw new Error("Delete job has no call");
+  const { error: startError } = await supabase.rpc(
+    "start_call_deletion_execution",
+    { target_call_id: job.call_id }
+  );
+  if (startError) throw startError;
   const prefix = `${job.workspace_id}/${job.call_id}`;
   const chunkFiles = await listStorageFiles(`${prefix}/chunks`);
   const artifactFiles = await listStorageFiles(`${prefix}/artifacts`);
@@ -415,6 +420,16 @@ export async function runJob(job: ProcessingJob) {
     });
     const ownsLease = await heartbeat.stop();
     const message = sanitizedError(error);
+    if (ownsLease && job.kind === "delete_call") {
+      const { error: deletionAuditError } = await supabase.rpc(
+        "fail_call_deletion_execution",
+        {
+          target_job_id: job.id,
+          target_lease_token: job.lease_token,
+        }
+      );
+      if (deletionAuditError) throw deletionAuditError;
+    }
     const transcriptionError =
       error instanceof OpenRouterTranscriptionError ? error : null;
     const exhausted =

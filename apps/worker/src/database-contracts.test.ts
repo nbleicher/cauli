@@ -8,11 +8,13 @@ const serviceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const anonKey =
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "integration-test-anon-key";
+const jwtSecret = process.env.SUPABASE_JWT_SECRET ?? "";
 const workspaceId = "00000000-0000-0000-0000-000000000001";
 const zeroUuid = "00000000-0000-0000-0000-000000000000";
 
 process.env.NEXT_PUBLIC_SUPABASE_URL = localUrl;
 process.env.SUPABASE_SERVICE_ROLE_KEY = serviceRoleKey;
+process.env.SUPABASE_WORKER_KEY = serviceRoleKey;
 process.env.OPENROUTER_API_KEY = "integration-test-key";
 
 const admin = createClient(localUrl, serviceRoleKey, {
@@ -25,6 +27,31 @@ const createdScorecardTemplateIds: string[] = [];
 const createdStoragePaths: string[] = [];
 const createdUserIds: string[] = [];
 const createdWorkspaceIds: string[] = [];
+const createdKeyVersions: number[] = [];
+const createdObjectNames: string[] = [];
+
+function base64Url(value: Buffer | string) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+function roleCredential(role: string) {
+  const header = base64Url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payload = base64Url(
+    JSON.stringify({
+      role,
+      iss: "supabase-demo",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+    })
+  );
+  const signature = base64Url(
+    createHmac("sha256", jwtSecret).update(`${header}.${payload}`).digest()
+  );
+  return `${header}.${payload}.${signature}`;
+}
 
 async function deleteAuthUser(userId: string) {
   let lastError: { message: string; status?: number } | null = null;
@@ -67,6 +94,17 @@ afterEach(async () => {
   if (createdCallIds.length) {
     await admin.from("calls").delete().in("id", createdCallIds.splice(0));
   }
+  // Backup deletion is a single global queue that hands out the oldest
+  // outstanding instruction, so one test's leftovers would be claimed by the
+  // next. Clear the whole queue, as the rate-limit counters already do.
+  createdObjectNames.splice(0);
+  await admin.from("backup_deletion_requests").delete().neq("object_name", "");
+  if (createdKeyVersions.length) {
+    await admin
+      .from("backup_key_versions")
+      .delete()
+      .in("version", createdKeyVersions.splice(0));
+  }
   if (createdScorecardTemplateIds.length) {
     const { error: scorecardCleanupError } = await admin
       .from("scorecard_templates")
@@ -98,7 +136,11 @@ afterEach(async () => {
   }
   await admin
     .from("workspaces")
-    .update({ legal_gate_required: false })
+    .update({
+      legal_gate_required: false,
+      retention_days: 90,
+      retention_effective_from: new Date().toISOString(),
+    })
     .eq("id", workspaceId);
   // Rate-limit counters are Workspace- and Call-scoped, so one test's spending
   // would otherwise be charged to the next.
@@ -294,6 +336,59 @@ async function createCall(
   if (error) throw error;
   createdCallIds.push(callId);
   return { callId, chunkPrefix };
+}
+
+/**
+ * A Call whose Source Audio has already been copied to the VPS — the state a
+ * deletion actually has to reach through, rather than a bare Call row.
+ */
+async function createStoredBackupCall(
+  ownerId: string,
+  overrides: Record<string, unknown> = {}
+) {
+  const version = Math.floor(Math.random() * 1_000_000) + 7_000_000;
+  const { error: keyError } = await admin.from("backup_key_versions").insert({
+    version,
+    kms_key_id: "arn:aws:kms:us-east-2:000000000000:key/cauli-backup",
+    kms_public_key_sha256: "a".repeat(64),
+    age_recipient:
+      "age18m4055pa59f7cz07xf8uzhu9e6ykyl26taccljde405xeulmpv9sym64p7",
+    age_recipient_sha256: "b".repeat(64),
+  });
+  if (keyError) throw keyError;
+  createdKeyVersions.push(version);
+
+  const { callId } = await createCall(ownerId, overrides);
+  const { error: sourceError } = await admin
+    .from("calls")
+    .update({
+      source_path: `${workspaceId}/${callId}/artifacts/source.webm`,
+      status: "ready",
+    })
+    .eq("id", callId);
+  if (sourceError) throw sourceError;
+
+  const { data: claimed, error: claimError } = await admin.rpc(
+    "claim_source_audio_backup",
+    { worker_name: "deletion-fixture" }
+  );
+  if (claimError) throw claimError;
+  // The claim reserved the name this attempt will use, so the fixture stores
+  // under the same one the worker would.
+  const objectName = claimed.object_name as string;
+  const { error: commitError } = await admin.rpc("commit_source_audio_backup", {
+    target_call_id: claimed.call_id,
+    target_lease_token: claimed.lease_token,
+    target_object_name: objectName,
+    target_key_version: version,
+    target_kms_wrapped_key: "kms-wrapped",
+    target_age_wrapped_key: "age-wrapped",
+    target_ciphertext_sha256: "d".repeat(64),
+    target_ciphertext_bytes: 1_024,
+  });
+  if (commitError) throw commitError;
+  createdObjectNames.push(objectName);
+  return { callId: claimed.call_id as string, objectName };
 }
 
 describe.skipIf(
@@ -3327,6 +3422,1343 @@ describe.skipIf(
       call_id: null,
       lease_token: null,
     });
+  });
+
+  it("gives every Workspace one bounded Retention Policy nobody but an Admin can change", async () => {
+    const bareWorkspaceId = crypto.randomUUID();
+    createdWorkspaceIds.push(bareWorkspaceId);
+    const { data: defaulted, error: defaultError } = await admin
+      .from("workspaces")
+      .insert({
+        id: bareWorkspaceId,
+        name: "Retention Default",
+        slug: `retention-${bareWorkspaceId.slice(0, 8)}`,
+      })
+      .select("retention_days")
+      .single();
+    if (defaultError) throw defaultError;
+    expect(defaulted?.retention_days).toBe(90);
+
+    // The bound is a table constraint, so it holds against the service role and
+    // not only against the Admin command.
+    const { error: unboundedError } = await admin
+      .from("workspaces")
+      .update({ retention_days: 3650 })
+      .eq("id", bareWorkspaceId);
+    expect(unboundedError?.message).toMatch(
+      /workspaces_retention_days_allowed/
+    );
+
+    // The policy has been in force since long before these Calls, so the
+    // schedule is measured from when each was recorded.
+    await admin
+      .from("workspaces")
+      .update({ retention_effective_from: "2025-01-01T00:00:00Z" })
+      .eq("id", workspaceId);
+
+    const { client: retentionAdmin, userId: retentionAdminId } =
+      await createWorkspaceMember("admin");
+    const { client: retentionManager } = await createWorkspaceMember("manager");
+    const { client: retentionMember, userId: retentionMemberId } =
+      await createWorkspaceMember("member");
+
+    for (const [role, client] of [
+      ["Manager", retentionManager],
+      ["Member Role", retentionMember],
+    ] as const) {
+      const { data: readable } = await client
+        .from("workspaces")
+        .select("retention_days")
+        .eq("id", workspaceId)
+        .single();
+      expect(readable?.retention_days, `${role} reads the policy`).toBe(90);
+
+      const { error: writeError } = await client
+        .from("workspaces")
+        .update({ retention_days: 30 })
+        .eq("id", workspaceId);
+      const { data: unchanged } = await admin
+        .from("workspaces")
+        .select("retention_days")
+        .eq("id", workspaceId)
+        .single();
+      expect(unchanged?.retention_days, `${role} cannot write it`).toBe(90);
+      expect(writeError === null || writeError.code === "42501").toBe(true);
+
+      const { error: commandError } = await client.rpc(
+        "set_workspace_retention_days_for_current_admin",
+        { target_retention_days: 30 }
+      );
+      expect(commandError?.message).toMatch(/only an admin/i);
+    }
+
+    // There is no retain-forever value and no unlisted period.
+    for (const rejected of [0, 45, 730]) {
+      const { error: valueError } = await retentionAdmin.rpc(
+        "set_workspace_retention_days_for_current_admin",
+        { target_retention_days: rejected }
+      );
+      expect(valueError?.message).toMatch(/30, 60, 90, 180, or 365 days/);
+    }
+
+    const { data: scheduledCalls, error: scheduledCallsError } = await admin
+      .from("calls")
+      .insert(
+        ["2026-01-01T00:00:00Z", "2026-03-15T12:00:00Z"].map((startedAt) => ({
+          workspace_id: workspaceId,
+          owner_id: retentionMemberId,
+          source_mode: "both",
+          chunk_prefix: `${workspaceId}/${startedAt}/chunks`,
+          started_at: startedAt,
+          recording_attested_by: retentionMemberId,
+          recording_attested_at: startedAt,
+        }))
+      )
+      .select("id, started_at");
+    if (scheduledCallsError) throw scheduledCallsError;
+    for (const scheduled of scheduledCalls ?? [])
+      createdCallIds.push(scheduled.id);
+
+    const { data: beforeChange } = await retentionAdmin
+      .from("call_retention_schedule")
+      .select("retention_days, scheduled_deletion_at")
+      .in(
+        "call_id",
+        (scheduledCalls ?? []).map((scheduled) => scheduled.id)
+      )
+      .order("scheduled_deletion_at");
+    expect(beforeChange).toEqual([
+      {
+        retention_days: 90,
+        scheduled_deletion_at: "2026-04-01T00:00:00+00:00",
+      },
+      {
+        retention_days: 90,
+        scheduled_deletion_at: "2026-06-13T12:00:00+00:00",
+      },
+    ]);
+
+    const { data: applied, error: changeError } = await retentionAdmin.rpc(
+      "set_workspace_retention_days_for_current_admin",
+      { target_retention_days: 30 }
+    );
+    expect(changeError).toBeNull();
+    expect(applied).toBe(30);
+
+    // The schedule is calculated from the policy, so every existing Call moved
+    // with it rather than keeping a date written when it was recorded.
+    const { data: afterChange } = await retentionAdmin
+      .from("call_retention_schedule")
+      .select("retention_days, scheduled_deletion_at")
+      .in(
+        "call_id",
+        (scheduledCalls ?? []).map((scheduled) => scheduled.id)
+      )
+      .order("scheduled_deletion_at");
+    expect(afterChange).toEqual([
+      {
+        retention_days: 30,
+        scheduled_deletion_at: "2026-01-31T00:00:00+00:00",
+      },
+      {
+        retention_days: 30,
+        scheduled_deletion_at: "2026-04-14T12:00:00+00:00",
+      },
+    ]);
+
+    const { data: retentionAudit } = await admin
+      .from("audit_events")
+      .select("action, entity_type, entity_id, metadata")
+      .eq("workspace_id", workspaceId)
+      .eq("action", "workspace.retention.changed")
+      .eq("actor_id", retentionAdminId)
+      .single();
+    expect(retentionAudit).toMatchObject({
+      entity_type: "workspace",
+      entity_id: workspaceId,
+      metadata: { previous_days: 90, retention_days: 30 },
+    });
+
+    // Another Workspace's policy and schedules stay out of reach.
+    const { data: isolated } = await retentionAdmin
+      .from("workspaces")
+      .select("id")
+      .eq("id", bareWorkspaceId);
+    expect(isolated).toEqual([]);
+  });
+
+  it("never lets a new Retention Policy reach back before it existed", async () => {
+    const { client: prospectiveAdmin, userId: prospectiveAdminId } =
+      await createWorkspaceMember("admin");
+    const policyStartedAt = new Date();
+    await admin
+      .from("workspaces")
+      .update({
+        retention_days: 30,
+        retention_effective_from: policyStartedAt.toISOString(),
+      })
+      .eq("id", workspaceId);
+
+    // A Call recorded years before anyone chose a Retention Policy. Measured
+    // from when it was recorded it expired long ago.
+    const { callId: ancientCallId } = await createCall(prospectiveAdminId, {
+      started_at: "2020-01-01T00:00:00Z",
+    });
+
+    const { data: schedule } = await prospectiveAdmin
+      .from("call_retention_schedule")
+      .select("scheduled_deletion_at")
+      .eq("call_id", ancientCallId)
+      .single();
+    const scheduled = new Date(schedule!.scheduled_deletion_at);
+
+    // It gets the full 30 days from the day the rule began, not from 2020.
+    expect(scheduled.getTime()).toBeGreaterThan(Date.now());
+    expect(
+      Math.round((scheduled.getTime() - policyStartedAt.getTime()) / 86_400_000)
+    ).toBe(30);
+
+    // So the sweep that would otherwise have destroyed it on the day this
+    // shipped leaves it alone.
+    const { data: expired, error: expiryError } = await admin.rpc(
+      "expire_calls_for_retention",
+      { batch_size: 100, target_workspace_id: workspaceId }
+    );
+    if (expiryError) throw expiryError;
+    expect(Number(expired)).toBe(0);
+
+    const { data: survivor } = await admin
+      .from("calls")
+      .select("deleted_at")
+      .eq("id", ancientCallId)
+      .single();
+    expect(survivor?.deleted_at).toBeNull();
+  });
+
+  it("keeps retention a Workspace rule with no per-Call exception or hold", async () => {
+    const { client: exceptionAdmin, userId: exceptionAdminId } =
+      await createWorkspaceMember("admin");
+    const { callId } = await createCall(exceptionAdminId);
+
+    // A per-Call override would have to land somewhere. Nothing accepts one —
+    // not even the service role, which every other escape hatch answers to.
+    for (const override of [
+      { retention_days: 365 },
+      { retained_until: "2099-01-01T00:00:00Z" },
+      { legal_hold: true },
+    ]) {
+      const { error: overrideError } = await admin
+        .from("calls")
+        .update(override)
+        .eq("id", callId);
+      expect(overrideError?.code, JSON.stringify(override)).toBe("PGRST204");
+    }
+
+    // The schedule an Admin can read reports the Workspace policy, so no Call
+    // can be carrying a different one.
+    const { data: schedule } = await exceptionAdmin
+      .from("call_retention_schedule")
+      .select("retention_days")
+      .eq("call_id", callId)
+      .single();
+    expect(schedule?.retention_days).toBe(90);
+  });
+
+  it("queues an encrypted Source Audio Backup without gating Call readiness", async () => {
+    const { userId } = await createWorkspaceMember("member");
+    const { callId } = await createCall(userId, {
+      stopped_at: "2026-05-01T00:00:00Z",
+    });
+
+    // No Source Audio yet, so nothing to copy.
+    const { count: prematureCount } = await admin
+      .from("source_audio_backups")
+      .select("call_id", { count: "exact", head: true })
+      .eq("call_id", callId);
+    expect(prematureCount).toBe(0);
+
+    const { error: readyError } = await admin
+      .from("calls")
+      .update({
+        source_path: `${workspaceId}/${callId}/artifacts/source.webm`,
+        status: "ready",
+      })
+      .eq("id", callId);
+    expect(readyError).toBeNull();
+
+    const { data: queued } = await admin
+      .from("source_audio_backups")
+      .select("state, workspace_id, queued_at, attempts, object_name")
+      .eq("call_id", callId)
+      .single();
+    expect(queued).toEqual({
+      state: "pending",
+      workspace_id: workspaceId,
+      // The clock starts at Stop & Save, not when processing happened to end.
+      queued_at: "2026-05-01T00:00:00+00:00",
+      attempts: 0,
+      object_name: null,
+    });
+
+    // The Call is Ready regardless of the copy, so backup never gates use.
+    const { data: readyCall } = await admin
+      .from("calls")
+      .select("status")
+      .eq("id", callId)
+      .single();
+    expect(readyCall?.status).toBe("ready");
+
+    // Re-announcing the same Source Audio must not queue a second copy.
+    await admin
+      .from("calls")
+      .update({ source_path: `${workspaceId}/${callId}/artifacts/source.webm` })
+      .eq("id", callId);
+    const { count: afterRepeat } = await admin
+      .from("source_audio_backups")
+      .select("call_id", { count: "exact", head: true })
+      .eq("call_id", callId);
+    expect(afterRepeat).toBe(1);
+  });
+
+  it("stores a Source Audio Backup once and never lets it be overwritten", async () => {
+    const keyVersion = Math.floor(Math.random() * 1_000_000) + 1_000;
+    const { error: keyError } = await admin.from("backup_key_versions").insert({
+      version: keyVersion,
+      kms_key_id: "arn:aws:kms:us-east-2:000000000000:key/cauli-backup",
+      kms_public_key_sha256: "a".repeat(64),
+      age_recipient:
+        "age18m4055pa59f7cz07xf8uzhu9e6ykyl26taccljde405xeulmpv9sym64p7",
+      age_recipient_sha256: "b".repeat(64),
+    });
+    if (keyError) throw keyError;
+    createdKeyVersions.push(keyVersion);
+
+    const { userId } = await createWorkspaceMember("member");
+    const { callId } = await createCall(userId);
+    await admin
+      .from("calls")
+      .update({ source_path: `${workspaceId}/${callId}/artifacts/source.webm` })
+      .eq("id", callId);
+
+    const { data: claimed, error: claimError } = await admin.rpc(
+      "claim_source_audio_backup",
+      { worker_name: "backup-worker" }
+    );
+    if (claimError) throw claimError;
+    expect(claimed).toMatchObject({
+      call_id: callId,
+      state: "in_progress",
+      attempts: 1,
+      locked_by: "backup-worker",
+    });
+    const leaseToken = claimed.lease_token as string;
+
+    // Only the worker holding the lease may declare the copy stored, and the
+    // name it stores under is the one the claim reserved for it.
+    const objectName = claimed.object_name as string;
+    const commitArguments = {
+      target_call_id: callId,
+      target_object_name: objectName,
+      target_key_version: keyVersion,
+      target_kms_wrapped_key: "kms-wrapped",
+      target_age_wrapped_key: "age-wrapped",
+      target_ciphertext_sha256: "d".repeat(64),
+      target_ciphertext_bytes: 4_096,
+    };
+    const { data: rejected } = await admin.rpc("commit_source_audio_backup", {
+      ...commitArguments,
+      target_lease_token: crypto.randomUUID(),
+    });
+    expect(rejected).toBe(false);
+
+    const { data: committed, error: commitError } = await admin.rpc(
+      "commit_source_audio_backup",
+      { ...commitArguments, target_lease_token: leaseToken }
+    );
+    if (commitError) throw commitError;
+    expect(committed).toBe(true);
+
+    // Committing the same copy again converges instead of storing it twice.
+    const { data: repeated } = await admin.rpc("commit_source_audio_backup", {
+      ...commitArguments,
+      target_lease_token: leaseToken,
+    });
+    expect(repeated).toBe(true);
+
+    const { data: stored } = await admin
+      .from("source_audio_backups")
+      .select("state, object_name, key_version, ciphertext_sha256, lease_token")
+      .eq("call_id", callId)
+      .single();
+    expect(stored).toEqual({
+      state: "stored",
+      object_name: objectName,
+      key_version: keyVersion,
+      ciphertext_sha256: "d".repeat(64),
+      lease_token: null,
+    });
+
+    // A stored copy cannot be overwritten or walked back, and that holds
+    // against the operational plane itself rather than only against a missing
+    // grant — so it holds for the commands too.
+    for (const [overwrite, refusal] of [
+      [{ object_name: "e".repeat(64) }, /cannot be overwritten/],
+      [{ ciphertext_sha256: "f".repeat(64) }, /cannot be overwritten/],
+      [{ state: "pending" }, /cannot be un-stored/],
+    ] as const) {
+      const { error: overwriteError } = await admin
+        .from("source_audio_backups")
+        .update(overwrite)
+        .eq("call_id", callId);
+      expect(overwriteError?.message, JSON.stringify(overwrite)).toMatch(
+        refusal
+      );
+    }
+
+    // And the commit command will not let a different copy take the place of
+    // one already stored.
+    const { data: displaced } = await admin.rpc("commit_source_audio_backup", {
+      ...commitArguments,
+      target_object_name: "e".repeat(64),
+      target_ciphertext_sha256: "f".repeat(64),
+      target_lease_token: leaseToken,
+    });
+    expect(displaced).toBe(false);
+    const { data: survived } = await admin
+      .from("source_audio_backups")
+      .select("object_name, ciphertext_sha256")
+      .eq("call_id", callId)
+      .single();
+    expect(survived).toEqual({
+      object_name: objectName,
+      ciphertext_sha256: "d".repeat(64),
+    });
+
+    // An already stored Call is never claimed again.
+    const { data: nothingLeft } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "backup-worker",
+    });
+    expect(nothingLeft?.call_id ?? null).not.toBe(callId);
+
+    const { data: storedAudit } = await admin
+      .from("audit_events")
+      .select("action, entity_id, metadata")
+      .eq("action", "call.backup.stored")
+      .eq("entity_id", callId)
+      .single();
+    expect(storedAudit).toMatchObject({
+      metadata: { key_version: keyVersion, attempts: 1 },
+    });
+    // The evidence says a copy exists; it does not say what was recorded.
+    expect(JSON.stringify(storedAudit)).not.toMatch(/source|title|owner|webm/i);
+  });
+
+  it("reclaims a backup whose worker never came back", async () => {
+    const { userId } = await createWorkspaceMember("member");
+    const { callId } = await createCall(userId);
+    await admin
+      .from("calls")
+      .update({ source_path: `${workspaceId}/${callId}/artifacts/source.webm` })
+      .eq("id", callId);
+
+    const { data: claimed } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "worker-that-dies",
+    });
+    expect(claimed).toMatchObject({ call_id: callId, state: "in_progress" });
+
+    // It is not handed to a second worker while the first may still be working.
+    const { data: notStolen } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "second-worker",
+    });
+    expect(notStolen?.call_id ?? null).not.toBe(callId);
+
+    // The worker is killed mid-upload — a redeploy, an OOM — so it never
+    // commits and never reports failure. Age the lease rather than wait.
+    await admin
+      .from("source_audio_backups")
+      .update({
+        locked_at: new Date(Date.now() - 20 * 60_000).toISOString(),
+      })
+      .eq("call_id", callId);
+
+    const { data: reclaimed } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "worker-that-finishes",
+    });
+    expect(reclaimed).toMatchObject({
+      call_id: callId,
+      state: "in_progress",
+      attempts: 2,
+      locked_by: "worker-that-finishes",
+    });
+    // The abandoned lease cannot be used to commit after it was taken away.
+    expect(reclaimed.lease_token).not.toBe(claimed.lease_token);
+    const { data: refused } = await admin.rpc("commit_source_audio_backup", {
+      target_call_id: callId,
+      target_lease_token: claimed.lease_token,
+      target_object_name: claimed.object_name,
+      target_key_version: null,
+      target_kms_wrapped_key: "kms",
+      target_age_wrapped_key: "age",
+      target_ciphertext_sha256: "d".repeat(64),
+      target_ciphertext_bytes: 1,
+    });
+    expect(refused).toBe(false);
+  });
+
+  it("authorizes removal of a copy that was in flight when deletion arrived", async () => {
+    const { userId } = await createWorkspaceMember("member");
+    const { callId } = await createCall(userId);
+    await admin
+      .from("calls")
+      .update({ source_path: `${workspaceId}/${callId}/artifacts/source.webm` })
+      .eq("id", callId);
+
+    // The claim reserves the name before a byte is sent, so an upload that is
+    // about to land is already nameable.
+    const { data: claimed } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "slow-uploader",
+    });
+    const inFlightName = claimed.object_name as string;
+    expect(inFlightName).toMatch(/^[0-9a-f]{64}$/);
+    const { data: uploadAuthorized } = await admin.rpc(
+      "authorize_source_audio_backup_upload",
+      {
+        target_call_id: callId,
+        target_lease_token: claimed.lease_token,
+        target_object_name: inFlightName,
+      }
+    );
+    expect(new Date(uploadAuthorized as string).getTime()).toBeGreaterThan(
+      Date.now()
+    );
+
+    // Deletion arrives mid-upload. The copy has not committed and now never
+    // will, but it may already be sitting on the VPS.
+    await admin.rpc("begin_call_deletion", {
+      target_call_id: callId,
+      target_actor_id: userId,
+      target_reason: "manual",
+      target_actor_role: "member",
+    });
+
+    const { data: authorization } = await admin
+      .from("backup_deletion_requests")
+      .select("object_name")
+      .eq("object_name", inFlightName)
+      .single();
+    expect(authorization?.object_name).toBe(inFlightName);
+
+    const { data: auditEvent } = await admin
+      .from("audit_events")
+      .select("metadata")
+      .eq("action", "call.deletion.requested")
+      .eq("entity_id", callId)
+      .single();
+    expect(auditEvent?.metadata).toMatchObject({
+      backup_deletion_requested: true,
+      backup_objects_authorized: 1,
+    });
+
+    // DELETE waits while the bounded PUT is active, then becomes claimable as
+    // soon as the writer records that its request has settled.
+    const { data: whileUploading } = await admin.rpc("claim_backup_deletion", {
+      worker_name: "too-early-retention",
+    });
+    expect(whileUploading).not.toBe(inFlightName);
+    await admin.rpc("finish_source_audio_backup_upload", {
+      target_call_id: callId,
+      target_lease_token: claimed.lease_token,
+      target_object_name: inFlightName,
+    });
+    const { data: afterUpload } = await admin.rpc("claim_backup_deletion", {
+      worker_name: "retention-after-upload",
+    });
+    expect(afterUpload).toBe(inFlightName);
+  });
+
+  it.skipIf(!jwtSecret)(
+    "lets deletion tombstone a reserved name before the narrow backup writer can upload",
+    async () => {
+      const { userId } = await createWorkspaceMember("member");
+      const { callId } = await createCall(userId);
+      await admin
+        .from("calls")
+        .update({
+          source_path: `${workspaceId}/${callId}/artifacts/source.webm`,
+        })
+        .eq("id", callId);
+
+      const writer = createClient(
+        localUrl,
+        roleCredential("cauli_backup_writer"),
+        { auth: { persistSession: false } }
+      );
+      const { data: claimed, error: claimError } = await writer.rpc(
+        "claim_source_audio_backup",
+        { worker_name: "narrow-backup-writer" }
+      );
+      if (claimError) throw claimError;
+
+      // The writer cannot use its credential to inspect Calls or carry out
+      // retention. It receives only the source descriptor for its own lease.
+      expect((await writer.from("calls").select("id")).error).toBeTruthy();
+      expect(
+        (
+          await writer.rpc("commit_backup_deletion", {
+            target_object_name: claimed.object_name,
+          })
+        ).error
+      ).toBeTruthy();
+      const source = await writer.rpc("claimed_source_audio_backup_source", {
+        target_call_id: callId,
+        target_lease_token: claimed.lease_token,
+      });
+      expect(source.error).toBeNull();
+      expect(source.data?.[0]?.source_path).toContain(callId);
+
+      await admin.rpc("begin_call_deletion", {
+        target_call_id: callId,
+        target_actor_id: userId,
+        target_reason: "manual",
+        target_actor_role: "member",
+      });
+
+      // This is the 404-delete/late-PUT race: once deletion has acknowledged
+      // the reserved name, no later PUT can receive authorization.
+      const lateUpload = await writer.rpc(
+        "authorize_source_audio_backup_upload",
+        {
+          target_call_id: callId,
+          target_lease_token: claimed.lease_token,
+          target_object_name: claimed.object_name,
+        }
+      );
+      expect(lateUpload.error).toBeNull();
+      expect(lateUpload.data).toBeNull();
+
+      const deletion = await admin.rpc("claim_backup_deletion", {
+        worker_name: "retention-after-404",
+      });
+      expect(deletion.data).toBe(claimed.object_name);
+      await admin.rpc("commit_backup_deletion", {
+        target_object_name: claimed.object_name,
+      });
+      const committedLate = await writer.rpc("commit_source_audio_backup", {
+        target_call_id: callId,
+        target_lease_token: claimed.lease_token,
+        target_object_name: claimed.object_name,
+        target_key_version: 1,
+        target_kms_wrapped_key: "kms",
+        target_age_wrapped_key: "age",
+        target_ciphertext_sha256: "d".repeat(64),
+        target_ciphertext_bytes: 1,
+      });
+      expect(committedLate.data).toBe(false);
+    }
+  );
+
+  it("retries a failed copy on a backoff until it succeeds", async () => {
+    const { userId } = await createWorkspaceMember("member");
+    const { callId } = await createCall(userId);
+    await admin
+      .from("calls")
+      .update({ source_path: `${workspaceId}/${callId}/artifacts/source.webm` })
+      .eq("id", callId);
+
+    const { data: claimed } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "backup-worker",
+    });
+    const { data: failed, error: failError } = await admin.rpc(
+      "fail_source_audio_backup",
+      {
+        target_call_id: callId,
+        target_lease_token: claimed.lease_token,
+        target_reason: "The Source Audio Backup receiver is unavailable (503)",
+        target_retryable: true,
+      }
+    );
+    if (failError) throw failError;
+    expect(failed).toBe(true);
+
+    const { data: retrying } = await admin
+      .from("source_audio_backups")
+      .select("state, attempts, next_attempt_at, lease_token, last_error")
+      .eq("call_id", callId)
+      .single();
+    // It stays queued rather than failing out — a missing recovery copy never
+    // becomes permanent through exhausted attempts.
+    expect(retrying).toMatchObject({
+      state: "pending",
+      attempts: 1,
+      lease_token: null,
+    });
+    // It waits before trying again rather than spinning against a sick target.
+    expect(new Date(retrying!.next_attempt_at).getTime()).toBeGreaterThan(
+      Date.now() + 20_000
+    );
+
+    // Waiting means waiting: it is not claimable until the backoff elapses.
+    const { data: tooSoon } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "backup-worker",
+    });
+    expect(tooSoon?.call_id ?? null).not.toBe(callId);
+
+    // The wait grows with each attempt and then stops growing, so a target
+    // that is down for a day is neither hammered nor abandoned.
+    const backoffs = await Promise.all(
+      [1, 2, 3, 8, 20].map(async (attempt) => {
+        const { data } = await admin.rpc("source_audio_backup_backoff", {
+          attempt_count: attempt,
+        });
+        return data as string;
+      })
+    );
+    expect(backoffs).toEqual([
+      "00:00:30",
+      "00:01:00",
+      "00:02:00",
+      "00:32:00",
+      "00:32:00",
+    ]);
+  });
+
+  it("reports a late copy as lag without naming what is late", async () => {
+    const { userId } = await createWorkspaceMember("member");
+    const { callId } = await createCall(userId, {
+      stopped_at: new Date(Date.now() - 40 * 60_000).toISOString(),
+    });
+    await admin
+      .from("calls")
+      .update({ source_path: `${workspaceId}/${callId}/artifacts/source.webm` })
+      .eq("id", callId);
+
+    const { data: alert, error: alertError } = await admin.rpc(
+      "source_audio_backup_lag_alert"
+    );
+    if (alertError) throw alertError;
+    expect(alert?.[0]?.lagging).toBeGreaterThanOrEqual(1);
+    expect(alert?.[0]?.worst_lag_seconds).toBeGreaterThanOrEqual(2_400);
+
+    const { data: lagRows } = await admin
+      .from("source_audio_backup_lag")
+      .select("call_id, lag_seconds, state")
+      .eq("call_id", callId);
+    expect(lagRows?.[0]?.state).toBe("pending");
+    expect(lagRows?.[0]?.lag_seconds).toBeGreaterThanOrEqual(2_400);
+
+    // A copy that lands inside the objective is not lag.
+    const { callId: freshCallId } = await createCall(userId);
+    await admin
+      .from("calls")
+      .update({
+        source_path: `${workspaceId}/${freshCallId}/artifacts/source.webm`,
+      })
+      .eq("id", freshCallId);
+    const { data: freshLag } = await admin
+      .from("source_audio_backup_lag")
+      .select("call_id")
+      .eq("call_id", freshCallId);
+    expect(freshLag).toEqual([]);
+  });
+
+  it("keeps a wrapping key version restorable until its backups are rewrapped", async () => {
+    const baseVersion = Math.floor(Math.random() * 1_000_000) + 2_000_000;
+    for (const version of [baseVersion, baseVersion + 1]) {
+      const { error: keyError } = await admin
+        .from("backup_key_versions")
+        .insert({
+          version,
+          kms_key_id: `arn:aws:kms:us-east-2:000000000000:key/v${version}`,
+          kms_public_key_sha256: "a".repeat(64),
+          age_recipient:
+            "age18m4055pa59f7cz07xf8uzhu9e6ykyl26taccljde405xeulmpv9sym64p7",
+          age_recipient_sha256: "b".repeat(64),
+        });
+      if (keyError) throw keyError;
+      createdKeyVersions.push(version);
+    }
+
+    const { userId } = await createWorkspaceMember("member");
+    const { callId } = await createCall(userId);
+    await admin
+      .from("calls")
+      .update({ source_path: `${workspaceId}/${callId}/artifacts/source.webm` })
+      .eq("id", callId);
+    const { data: claimed } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "backup-worker",
+    });
+    const objectName = claimed.object_name as string;
+    const checksum = "d".repeat(64);
+    await admin.rpc("commit_source_audio_backup", {
+      target_call_id: callId,
+      target_lease_token: claimed.lease_token,
+      target_object_name: objectName,
+      target_key_version: baseVersion,
+      target_kms_wrapped_key: "kms-v1",
+      target_age_wrapped_key: "age-v1",
+      target_ciphertext_sha256: checksum,
+      target_ciphertext_bytes: 2_048,
+    });
+
+    // Retiring a generation that still opens a stored copy would strand it.
+    const { error: prematureRetireError } = await admin.rpc(
+      "retire_backup_key_version",
+      { target_version: baseVersion }
+    );
+    expect(prematureRetireError?.message).toMatch(
+      /keeps 1 unexpired Source Audio Backup/
+    );
+
+    const { data: rewrapped, error: rewrapError } = await admin.rpc(
+      "rewrap_source_audio_backup",
+      {
+        target_call_id: callId,
+        target_key_version: baseVersion + 1,
+        target_kms_wrapped_key: "kms-v2",
+        target_age_wrapped_key: "age-v2",
+      }
+    );
+    if (rewrapError) throw rewrapError;
+    expect(rewrapped).toBe(true);
+
+    // Rewrapping changes the wrapping and nothing else, so the copy on the VPS
+    // is still the copy the checksum describes.
+    const { data: afterRewrap } = await admin
+      .from("source_audio_backups")
+      .select("key_version, kms_wrapped_key, object_name, ciphertext_sha256")
+      .eq("call_id", callId)
+      .single();
+    expect(afterRewrap).toEqual({
+      key_version: baseVersion + 1,
+      kms_wrapped_key: "kms-v2",
+      object_name: objectName,
+      ciphertext_sha256: checksum,
+    });
+
+    const { data: retired } = await admin.rpc("retire_backup_key_version", {
+      target_version: baseVersion,
+    });
+    expect(retired).toBe(true);
+
+    // Nothing may be rewrapped onto a generation that is no longer trusted.
+    const { error: retiredTargetError } = await admin.rpc(
+      "rewrap_source_audio_backup",
+      {
+        target_call_id: callId,
+        target_key_version: baseVersion,
+        target_kms_wrapped_key: "kms-v1",
+        target_age_wrapped_key: "age-v1",
+      }
+    );
+    expect(retiredTargetError?.message).toMatch(/retired key version/);
+  });
+
+  it("keeps backup state readable by an Admin and unwritable by everyone", async () => {
+    const { client: backupAdmin, userId: backupAdminId } =
+      await createWorkspaceMember("admin");
+    const { client: backupMember } = await createWorkspaceMember("member");
+    const { callId } = await createCall(backupAdminId);
+    await admin
+      .from("calls")
+      .update({ source_path: `${workspaceId}/${callId}/artifacts/source.webm` })
+      .eq("id", callId);
+
+    const { data: adminView } = await backupAdmin
+      .from("source_audio_backups")
+      .select("call_id, state")
+      .eq("call_id", callId);
+    expect(adminView).toEqual([{ call_id: callId, state: "pending" }]);
+
+    // A Member Role has no business in operational backup evidence.
+    const { data: memberView } = await backupMember
+      .from("source_audio_backups")
+      .select("call_id")
+      .eq("call_id", callId);
+    expect(memberView).toEqual([]);
+
+    // Nor may an Admin claim a copy exists that does not.
+    const { error: adminWriteError } = await backupAdmin
+      .from("source_audio_backups")
+      .update({ state: "stored" })
+      .eq("call_id", callId);
+    const { data: untouched } = await admin
+      .from("source_audio_backups")
+      .select("state")
+      .eq("call_id", callId)
+      .single();
+    expect(untouched?.state).toBe("pending");
+    expect(adminWriteError === null || adminWriteError.code === "42501").toBe(
+      true
+    );
+
+    for (const command of [
+      "claim_source_audio_backup",
+      "commit_source_audio_backup",
+      "fail_source_audio_backup",
+      "rewrap_source_audio_backup",
+      "retire_backup_key_version",
+      "source_audio_backup_lag_alert",
+    ]) {
+      const { error: deniedError } = await backupAdmin.rpc(command, {});
+      expect(deniedError?.message, command).toMatch(
+        /Could not find the function|permission denied/i
+      );
+    }
+  });
+
+  it("sends manual deletion and retention expiry down one workflow", async () => {
+    // The policy has been in force for years, so a Call recorded in 2020 is
+    // genuinely past its date rather than merely older than the rule.
+    await admin
+      .from("workspaces")
+      .update({ retention_effective_from: "2020-01-01T00:00:00Z" })
+      .eq("id", workspaceId);
+
+    const { userId: ownerId } = await createWorkspaceMember("member");
+    const manual = await createStoredBackupCall(ownerId);
+    // Recorded long enough ago that the 90-day default has passed.
+    const expired = await createStoredBackupCall(ownerId, {
+      started_at: "2020-01-01T00:00:00Z",
+    });
+
+    const { data: manualDeleted, error: manualError } = await admin.rpc(
+      "begin_call_deletion",
+      {
+        target_call_id: manual.callId,
+        target_actor_id: ownerId,
+        target_reason: "manual",
+        target_actor_role: "member",
+      }
+    );
+    if (manualError) throw manualError;
+    expect(manualDeleted).toBe(true);
+
+    const { data: expiredCount, error: expiryError } = await admin.rpc(
+      "expire_calls_for_retention",
+      { batch_size: 100, target_workspace_id: workspaceId }
+    );
+    if (expiryError) throw expiryError;
+    expect(Number(expiredCount)).toBeGreaterThanOrEqual(1);
+
+    // Both arrived at the same place: soft-deleted, one delete_call job each,
+    // and one authorization for the retention principal each.
+    for (const { callId, objectName, reason } of [
+      { ...manual, reason: "manual" },
+      { ...expired, reason: "retention" },
+    ]) {
+      const [{ data: call }, { data: jobs }, { data: authorization }] =
+        await Promise.all([
+          admin.from("calls").select("deleted_at").eq("id", callId).single(),
+          admin
+            .from("processing_jobs")
+            .select("id")
+            .eq("call_id", callId)
+            .eq("kind", "delete_call"),
+          admin
+            .from("backup_deletion_requests")
+            .select("reason, deleted_at")
+            .eq("object_name", objectName)
+            .single(),
+        ]);
+      expect(call?.deleted_at, callId).not.toBeNull();
+      expect(jobs, callId).toHaveLength(1);
+      expect(authorization, callId).toEqual({ reason, deleted_at: null });
+    }
+
+    // A Call that never had a backup produces no authorization to invent one.
+    const { callId: unbackedCallId } = await createCall(ownerId);
+    await admin.rpc("begin_call_deletion", {
+      target_call_id: unbackedCallId,
+      target_actor_id: ownerId,
+      target_reason: "manual",
+      target_actor_role: "member",
+    });
+    const { data: unbackedAudit } = await admin
+      .from("audit_events")
+      .select("metadata")
+      .eq("action", "call.deletion.requested")
+      .eq("entity_id", unbackedCallId)
+      .single();
+    expect(unbackedAudit?.metadata).toMatchObject({
+      backup_deletion_requested: false,
+    });
+
+    const { data: expiryAudit } = await admin
+      .from("audit_events")
+      .select("metadata")
+      .eq("action", "call.retention.expired")
+      .eq("entity_id", expired.callId)
+      .single();
+    expect(expiryAudit?.metadata).toMatchObject({
+      reason: "retention",
+      backup_deletion_requested: true,
+    });
+  });
+
+  it("converges on a retry instead of duplicating work or evidence", async () => {
+    const { userId: ownerId } = await createWorkspaceMember("member");
+    const { callId, objectName } = await createStoredBackupCall(ownerId);
+
+    const first = await admin.rpc("begin_call_deletion", {
+      target_call_id: callId,
+      target_actor_id: ownerId,
+      target_reason: "manual",
+      target_actor_role: "member",
+    });
+    expect(first.data).toBe(true);
+
+    // The same request arriving again — a retried browser action, a redelivered
+    // sweep — must change nothing the first one already did.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const repeat = await admin.rpc("begin_call_deletion", {
+        target_call_id: callId,
+        target_actor_id: ownerId,
+        target_reason: "manual",
+        target_actor_role: "member",
+      });
+      expect(repeat.data).toBe(false);
+    }
+    await admin.rpc("expire_calls_for_retention", {
+      batch_size: 100,
+      target_workspace_id: workspaceId,
+    });
+
+    const [
+      { count: jobCount },
+      { count: auditCount },
+      { count: requestCount },
+    ] = await Promise.all([
+      admin
+        .from("processing_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("call_id", callId)
+        .eq("kind", "delete_call"),
+      admin
+        .from("audit_events")
+        .select("id", { count: "exact", head: true })
+        .eq("entity_id", callId)
+        .in("action", ["call.deletion.requested", "call.retention.expired"]),
+      admin
+        .from("backup_deletion_requests")
+        .select("object_name", { count: "exact", head: true })
+        .eq("object_name", objectName),
+    ]);
+    expect(jobCount).toBe(1);
+    expect(auditCount).toBe(1);
+    expect(requestCount).toBe(1);
+
+    // Carrying out the removal twice is also safe: the second is a no-op and
+    // never revives the copy the first removed.
+    const { data: committed } = await admin.rpc("commit_backup_deletion", {
+      target_object_name: objectName,
+    });
+    expect(committed).toBe(true);
+    const { data: repeatCommit } = await admin.rpc("commit_backup_deletion", {
+      target_object_name: objectName,
+    });
+    expect(repeatCommit).toBe(false);
+  });
+
+  it("removes every owned artifact while its Audit Events outlive it", async () => {
+    const { userId: ownerId } = await createWorkspaceMember("member");
+    const { callId, objectName } = await createStoredBackupCall(ownerId);
+
+    const { data: transcript, error: transcriptError } = await admin
+      .from("transcripts")
+      .insert({ call_id: callId, model: "test", full_text: "spoken words" })
+      .select("id")
+      .single();
+    if (transcriptError) throw transcriptError;
+    await admin.from("transcript_segments").insert({
+      transcript_id: transcript.id,
+      sequence: 0,
+      start_ms: 0,
+      end_ms: 1_000,
+      text: "spoken words",
+    });
+    await admin.from("transcription_chunks").insert({
+      call_id: callId,
+      chunk_index: 0,
+      text: "spoken words",
+      model: "test",
+    });
+    await admin.from("export_jobs").insert({
+      call_id: callId,
+      requested_by: ownerId,
+      format: "wav",
+    });
+
+    await admin.rpc("begin_call_deletion", {
+      target_call_id: callId,
+      target_actor_id: ownerId,
+      target_reason: "manual",
+      target_actor_role: "member",
+    });
+
+    // The worker's commit is what actually removes the row, exactly as it does
+    // for a Call deleted from the browser.
+    const { data: claimed } = await admin.rpc("claim_processing_job", {
+      worker_name: "deletion-worker",
+    });
+    const deleteJob = (claimed ?? []).find(
+      (job: { call_id: string | null }) => job.call_id === callId
+    );
+    expect(deleteJob).toBeTruthy();
+    await admin.rpc("start_call_deletion_execution", {
+      target_call_id: callId,
+    });
+    const firstPrimaryFailure = await admin.rpc(
+      "fail_call_deletion_execution",
+      {
+        target_job_id: deleteJob.id,
+        target_lease_token: deleteJob.lease_token,
+      }
+    );
+    const duplicatePrimaryFailure = await admin.rpc(
+      "fail_call_deletion_execution",
+      {
+        target_job_id: deleteJob.id,
+        target_lease_token: deleteJob.lease_token,
+      }
+    );
+    expect(firstPrimaryFailure.data).toBe(true);
+    expect(duplicatePrimaryFailure.data).toBe(false);
+    const { data: committed } = await admin.rpc("commit_call_deletion", {
+      target_job_id: deleteJob.id,
+      target_lease_token: deleteJob.lease_token,
+    });
+    expect(committed).toBe(true);
+
+    for (const [table, column] of [
+      ["calls", "id"],
+      ["transcripts", "call_id"],
+      ["transcription_chunks", "call_id"],
+      ["export_jobs", "call_id"],
+      ["call_reviews", "call_id"],
+      ["source_audio_backups", "call_id"],
+    ] as const) {
+      const { count } = await admin
+        .from(table)
+        .select(column, { count: "exact", head: true })
+        .eq(column, callId);
+      expect(count, table).toBe(0);
+    }
+    const { count: segmentCount } = await admin
+      .from("transcript_segments")
+      .select("id", { count: "exact", head: true })
+      .eq("transcript_id", transcript.id);
+    expect(segmentCount).toBe(0);
+
+    // The instruction to remove the backup survives the Call it came from,
+    // because it has to outlive it to be carried out at all.
+    const { data: stillAuthorized } = await admin
+      .from("backup_deletion_requests")
+      .select("object_name")
+      .eq("object_name", objectName)
+      .single();
+    expect(stillAuthorized?.object_name).toBe(objectName);
+
+    // Evidence outlives content, on its own one-year clock.
+    const { data: survivingAudit } = await admin
+      .from("audit_events")
+      .select("retained_until")
+      .eq("entity_id", callId)
+      .eq("action", "call.deletion.requested")
+      .single();
+    expect(survivingAudit).toBeTruthy();
+    expect(new Date(survivingAudit!.retained_until).getTime()).toBeGreaterThan(
+      Date.now() + 300 * 24 * 60 * 60 * 1_000
+    );
+
+    const { data: backupClaimed } = await admin.rpc("claim_backup_deletion", {
+      worker_name: "retention-audit",
+    });
+    expect(backupClaimed).toBe(objectName);
+    await admin.rpc("fail_backup_deletion", {
+      target_object_name: objectName,
+      target_reason: "receiver unavailable",
+    });
+    await admin.rpc("commit_backup_deletion", {
+      target_object_name: objectName,
+    });
+
+    const { data: lifecycleEvents } = await admin
+      .from("audit_events")
+      .select("action")
+      .eq("entity_id", callId)
+      .in("action", [
+        "call.deletion.execution_started",
+        "call.deletion.primary_failed",
+        "call.deletion.primary_completed",
+        "call.deletion.backup_execution_started",
+        "call.deletion.backup_failed",
+        "call.deletion.backup_completed",
+      ]);
+    expect(lifecycleEvents?.map((event) => event.action).sort()).toEqual(
+      [
+        "call.deletion.backup_completed",
+        "call.deletion.backup_execution_started",
+        "call.deletion.backup_failed",
+        "call.deletion.execution_started",
+        "call.deletion.primary_failed",
+        "call.deletion.primary_completed",
+      ].sort()
+    );
+  });
+
+  it("confines the retention principal to deleting what was authorized", async () => {
+    const { data: privileges, error: privilegeError } = await admin.rpc(
+      "retention_principal_privileges"
+    );
+    if (privilegeError) throw privilegeError;
+    const granted = new Map(
+      (privileges as { object_name: string; granted: boolean }[]).map(
+        (privilege) => [privilege.object_name, privilege.granted]
+      )
+    );
+
+    // It cannot read content, cannot see which Call a backup belongs to, and
+    // cannot create a backup or start a deletion of its own.
+    for (const forbidden of [
+      "public.calls",
+      "public.transcripts",
+      "public.call_reviews",
+      "public.source_audio_backups",
+      "public.backup_deletion_requests",
+      "public.commit_source_audio_backup",
+      "public.request_call_deletion",
+    ]) {
+      expect(granted.get(forbidden), forbidden).toBe(false);
+    }
+    for (const allowed of [
+      "public.claim_backup_deletion",
+      "public.commit_backup_deletion",
+    ]) {
+      expect(granted.get(allowed), allowed).toBe(true);
+    }
+
+    // And an object name it was never handed is refused outright, so the
+    // credential cannot be turned into a way to erase live recovery copies.
+    const { error: unauthorizedError } = await admin.rpc(
+      "commit_backup_deletion",
+      { target_object_name: "9".repeat(64) }
+    );
+    expect(unauthorizedError?.message).toMatch(/never authorized/);
+  });
+
+  it.skipIf(!jwtSecret)(
+    "gives the processing worker its own operational role and no neighboring authority",
+    async () => {
+      const { data: privileges, error } = await admin.rpc(
+        "worker_principal_privileges"
+      );
+      if (error) throw error;
+      const granted = new Map(
+        (privileges as { object_name: string; granted: boolean }[]).map(
+          (privilege) => [privilege.object_name, privilege.granted]
+        )
+      );
+      for (const allowed of [
+        "public.calls",
+        "public.processing_jobs",
+        "storage.objects",
+        "public.claim_processing_job",
+        "public.assert_transcription_models_priced",
+        "public.resume_budget_paused_jobs",
+        "public.processing_service_level",
+        "public.processing_queue_age_seconds",
+        "public.processing_operational_alerts",
+      ]) {
+        expect(granted.get(allowed), allowed).toBe(true);
+      }
+      for (const forbidden of [
+        "public.workspace_members",
+        "public.platform_admins",
+        "public.audit_events",
+        "public.source_audio_backups",
+        "public.backup_deletion_requests",
+        "public.peely_sync_runs",
+        "public.claim_source_audio_backup",
+        "public.claim_backup_deletion",
+        "public.list_backup_objects_for_sync",
+      ]) {
+        expect(granted.get(forbidden), forbidden).toBe(false);
+      }
+
+      const worker = createClient(localUrl, roleCredential("cauli_worker"), {
+        auth: { persistSession: false },
+      });
+      expect(
+        (await worker.from("calls").select("id").limit(1)).error
+      ).toBeNull();
+      expect(
+        (await worker.from("workspace_members").select("user_id").limit(1))
+          .error
+      ).toBeTruthy();
+      expect(
+        (
+          await worker.rpc("claim_backup_deletion", {
+            worker_name: "not-retention",
+          })
+        ).error
+      ).toBeTruthy();
+
+      const workerOperations = await Promise.all([
+        worker.rpc("assert_transcription_models_priced", {
+          target_models: [
+            "openai/whisper-large-v3-turbo",
+            "openai/whisper-large-v3",
+          ],
+        }),
+        worker.rpc("resume_budget_paused_jobs"),
+        worker.rpc("processing_service_level", { window_hours: 24 }),
+        worker.rpc("processing_queue_age_seconds"),
+        worker.rpc("processing_operational_alerts"),
+      ]);
+      for (const [index, operation] of workerOperations.entries()) {
+        expect(operation.error, `worker operation ${index}`).toBeNull();
+      }
+    }
+  );
+
+  it("keeps a failed backup deletion owed rather than lost", async () => {
+    const { userId: ownerId } = await createWorkspaceMember("member");
+    const { callId, objectName } = await createStoredBackupCall(ownerId);
+    await admin.rpc("begin_call_deletion", {
+      target_call_id: callId,
+      target_actor_id: ownerId,
+      target_reason: "manual",
+      target_actor_role: "member",
+    });
+
+    const { data: claimed, error: claimError } = await admin.rpc(
+      "claim_backup_deletion",
+      { worker_name: "retention-worker" }
+    );
+    if (claimError) throw claimError;
+    expect(claimed).toBe(objectName);
+
+    const { data: recorded } = await admin.rpc("fail_backup_deletion", {
+      target_object_name: objectName,
+      target_reason: "The Source Audio Backup could not be deleted (503)",
+    });
+    expect(recorded).toBe(true);
+
+    const { data: owed } = await admin
+      .from("backup_deletion_requests")
+      .select("deleted_at, attempts, last_error")
+      .eq("object_name", objectName)
+      .single();
+    // Still owed, and the reason names the failure rather than the Call.
+    expect(owed).toMatchObject({ deleted_at: null, attempts: 1 });
+    expect(owed!.last_error).not.toContain(callId);
+
+    // The same instruction is not handed out again while an attempt is in
+    // flight, so two retention workers cannot both act on it.
+    const { data: notReclaimed } = await admin.rpc("claim_backup_deletion", {
+      worker_name: "second-retention-worker",
+    });
+    expect(notReclaimed).not.toBe(objectName);
   });
 
   it("pauses transcription on a spent budget without consuming an attempt", async () => {
