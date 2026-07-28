@@ -75,6 +75,11 @@ jobs:
       - name: Install Chrome
         run: npx playwright install --with-deps chromium
 
+      # The offline Source Audio Backup recovery path is proven against the
+      # official tool an operator would actually use, not a reimplementation.
+      - name: Install age
+        run: sudo apt-get update && sudo apt-get install --yes age
+
       - name: Audit production dependencies
         run: npm audit --omit=dev
 

@@ -1,14 +1,63 @@
 import { createServer } from "node:http";
+import {
+  backUpOneSourceAudio,
+  loadActiveBackupRecipients,
+  reportBackupLag,
+} from "./backup.js";
+import { backupTargetFromEnvironment } from "./backup-target.js";
 import { config } from "./config.js";
 import { claimJob, cleanupAbandonedCalls, runJob } from "./jobs.js";
 import { log, sanitizedError } from "./log.js";
+import { downloadStorageBuffer } from "./storage.js";
 
 let shuttingDown = false;
 let activeJobs = 0;
 let lastCleanupAt = 0;
+let lastLagReportAt = 0;
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Source Audio Backup runs on its own loop rather than inside the processing
+ * job, so a slow or unreachable VPS delays only the recovery copy and never a
+ * Call reaching Ready.
+ */
+async function backupLoop() {
+  const target = backupTargetFromEnvironment();
+  if (!target) {
+    // Loudly, and once: a Workspace whose Source Audio is not being copied
+    // anywhere should not look healthy.
+    log.error("source_audio_backup_not_configured", {});
+    return;
+  }
+
+  while (!shuttingDown) {
+    try {
+      if (Date.now() - lastLagReportAt > 60_000) {
+        lastLagReportAt = Date.now();
+        await reportBackupLag();
+      }
+      const recipients = await loadActiveBackupRecipients();
+      if (!recipients) {
+        log.error("source_audio_backup_has_no_key_version", {});
+        await delay(60_000);
+        continue;
+      }
+      const worked = await backUpOneSourceAudio({
+        downloadSourceAudio: downloadStorageBuffer,
+        target,
+        recipients,
+      });
+      if (!worked) await delay(config.pollMs);
+    } catch (error) {
+      log.error("source_audio_backup_loop_error", {
+        error: sanitizedError(error),
+      });
+      await delay(config.pollMs);
+    }
+  }
 }
 
 async function workerLoop(index: number) {
@@ -39,12 +88,16 @@ async function workerLoop(index: number) {
 
 const server = createServer((request, response) => {
   if (request.url === "/health") {
-    response.writeHead(shuttingDown ? 503 : 200, { "content-type": "application/json" });
-    response.end(JSON.stringify({
-      ok: !shuttingDown,
-      worker: config.workerName,
-      activeJobs,
-    }));
+    response.writeHead(shuttingDown ? 503 : 200, {
+      "content-type": "application/json",
+    });
+    response.end(
+      JSON.stringify({
+        ok: !shuttingDown,
+        worker: config.workerName,
+        activeJobs,
+      })
+    );
     return;
   }
   response.writeHead(404);
@@ -62,6 +115,7 @@ server.listen(config.port, () => {
 for (let index = 0; index < config.concurrency; index += 1) {
   void workerLoop(index);
 }
+void backupLoop();
 
 async function shutdown(signal: string) {
   if (shuttingDown) return;
