@@ -7,8 +7,8 @@ import {
   reportBackupLag,
 } from "./backup.js";
 import { backupTargetFromEnvironment } from "./backup-target.js";
+import { downloadBackupSource } from "./backup-storage.js";
 import { log, sanitizedError } from "./log.js";
-import { downloadStorageBufferWithClient } from "./storage.js";
 
 function required(name: string) {
   const value = process.env[name]?.trim();
@@ -60,8 +60,7 @@ async function run() {
       const worked = await backUpOneSourceAudio({
         client,
         workerName,
-        downloadSourceAudio: (path) =>
-          downloadStorageBufferWithClient(client, path),
+        downloadSourceAudio: (path) => downloadBackupSource(client, path),
         target,
         recipients,
       });
