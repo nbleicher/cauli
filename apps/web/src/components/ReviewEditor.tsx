@@ -32,8 +32,13 @@ interface ReviewAnswer {
 interface Revision {
   id: string;
   revision: number;
+  scorecardVersionId: string;
   status: ReviewStatus;
   score: number | null;
+  summary: string;
+  followUp: string;
+  followUpState: string;
+  answers: ReviewAnswer[];
   submittedAt: string;
   submittedBy: string;
 }
@@ -41,6 +46,7 @@ interface Revision {
 export interface ReviewEditorProps {
   callId: string;
   scorecardVersionId: string;
+  scorecardVersionNumber: number;
   scorecardName: string;
   categories: Category[];
   initialReview: {
@@ -62,6 +68,7 @@ export interface ReviewEditorProps {
 export function ReviewEditor({
   callId,
   scorecardVersionId,
+  scorecardVersionNumber,
   scorecardName,
   categories,
   initialReview,
@@ -318,16 +325,51 @@ export function ReviewEditor({
       {revisions.length > 0 && (
         <details className="review-history">
           <summary>
-            <History size={14} /> {revisions.length} submitted revision
+            <History size={14} /> {revisions.length} visible revision
             {revisions.length === 1 ? "" : "s"}
           </summary>
-          <div>
+          <div className="revision-list">
             {revisions.map((revision) => (
-              <p key={revision.id}>
-                <Check size={13} />v{revision.revision} ·{" "}
-                {revision.status.replaceAll("_", " ")} · {revision.score ?? "—"}{" "}
-                · {revision.submittedBy}
-              </p>
+              <details className="revision-card" key={revision.id}>
+                <summary>
+                  <Check size={13} />
+                  Revision {revision.revision} ·{" "}
+                  {revision.status.replaceAll("_", " ")} ·{" "}
+                  {revision.score ?? "—"} · {revision.submittedBy}
+                </summary>
+                <div>
+                  <p>
+                    Scorecard Version {scorecardVersionNumber} ·{" "}
+                    {new Date(revision.submittedAt).toLocaleString()}
+                  </p>
+                  <p>
+                    <strong>Summary:</strong>{" "}
+                    {revision.summary || "No summary provided."}
+                  </p>
+                  {revision.followUpState !== "not_required" && (
+                    <p>
+                      <strong>Follow-up:</strong>{" "}
+                      {revision.followUp || revision.followUpState}
+                    </p>
+                  )}
+                  <div className="revision-answers">
+                    {revision.answers.map((answer) => {
+                      const criterion = categories
+                        .flatMap((category) => category.criteria)
+                        .find((item) => item.id === answer.criterionId);
+                      return (
+                        <p key={answer.criterionId}>
+                          <strong>
+                            {criterion?.label ?? "Historical criterion"}:
+                          </strong>{" "}
+                          {answer.value ?? "N/A"}
+                          {answer.comment ? ` · ${answer.comment}` : ""}
+                        </p>
+                      );
+                    })}
+                  </div>
+                </div>
+              </details>
             ))}
           </div>
         </details>

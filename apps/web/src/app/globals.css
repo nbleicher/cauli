@@ -1399,6 +1399,47 @@ textarea:focus {
   font-size: 12px;
 }
 
+.revision-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.revision-card {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-subtle);
+}
+
+.revision-card > summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.revision-card > div {
+  display: grid;
+  gap: 6px;
+  padding: 10px 2px 2px;
+}
+
+.revision-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.revision-answers {
+  display: grid;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
 .review-queue {
   display: grid;
   gap: 14px;

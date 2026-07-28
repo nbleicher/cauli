@@ -20,6 +20,26 @@ interface ScorecardTemplate {
   name: string;
 }
 
+interface RevisionAnswer {
+  criterionId: string;
+  value: 1 | 2 | 3 | 4 | 5 | null;
+  comment: string;
+}
+
+interface RevisionHistoryRow {
+  id: string;
+  revision: number;
+  scorecard_version_id: string;
+  status: ReviewStatus;
+  score: number | string | null;
+  summary: string;
+  follow_up: string;
+  follow_up_state: string;
+  answers: RevisionAnswer[];
+  submitted_by_name: string;
+  submitted_at: string;
+}
+
 function firstRelation<T>(relation: T | T[] | null): T | null {
   return Array.isArray(relation) ? (relation[0] ?? null) : relation;
 }
@@ -92,12 +112,24 @@ export default async function CallDetailPage({
     .eq("call_id", id)
     .maybeSingle();
 
+  const { data: revisionHistoryData } = await supabase.rpc(
+    "review_revision_history",
+    { target_call_id: id }
+  );
+  const revisionHistory =
+    (revisionHistoryData as RevisionHistoryRow[] | null) ?? [];
+  const latestVisibleRevision = revisionHistory[0] ?? null;
+
   let template: ScorecardTemplate | null = null;
-  let scorecardVersionId = existingReview?.scorecard_version_id ?? "";
+  let scorecardVersionNumber = 0;
+  let scorecardVersionId =
+    existingReview?.scorecard_version_id ??
+    latestVisibleRevision?.scorecard_version_id ??
+    "";
   if (scorecardVersionId) {
     const { data: boundVersion } = await supabase
       .from("scorecard_versions")
-      .select("template_id, name")
+      .select("template_id, name, version")
       .eq("id", scorecardVersionId)
       .maybeSingle();
     if (boundVersion) {
@@ -108,6 +140,7 @@ export default async function CallDetailPage({
         .maybeSingle();
       template = boundTemplate;
       if (template && boundVersion.name) template.name = boundVersion.name;
+      scorecardVersionNumber = boundVersion.version;
     }
   } else {
     const { data: activeTemplate } = await supabase
@@ -124,12 +157,13 @@ export default async function CallDetailPage({
   if (!scorecardVersionId && template) {
     const { data: latestVersion } = await supabase
       .from("scorecard_versions")
-      .select("id")
+      .select("id, version")
       .eq("template_id", template.id)
       .order("version", { ascending: false })
       .limit(1)
       .maybeSingle();
     scorecardVersionId = latestVersion?.id ?? "";
+    scorecardVersionNumber = latestVersion?.version ?? 0;
   }
 
   let reviewProps: ReviewEditorProps | null = null;
@@ -157,22 +191,17 @@ export default async function CallDetailPage({
           .eq("review_id", existingReview.id)
       : { data: [] };
 
-    const { data: revisions } = existingReview
-      ? await supabase
-          .from("review_revisions")
-          .select(
-            `
-          id, revision, status, score, submitted_at,
-          submitter:profiles!review_revisions_submitted_by_fkey(display_name, email)
-        `
-          )
-          .eq("review_id", existingReview.id)
-          .order("revision", { ascending: false })
-      : { data: [] };
+    const assignee = assignment
+      ? firstRelation(
+          assignment.assignee as unknown as
+            ProfileRelation | ProfileRelation[] | null
+        )
+      : null;
 
     reviewProps = {
       callId: id,
       scorecardVersionId,
+      scorecardVersionNumber,
       scorecardName: template.name,
       categories: (categories ?? []).map((category) => ({
         id: category.id,
@@ -199,37 +228,36 @@ export default async function CallDetailPage({
               comment: answer.comment,
             })),
           }
-        : null,
+        : latestVisibleRevision
+          ? {
+              version: latestVisibleRevision.revision,
+              status: latestVisibleRevision.status,
+              summary: latestVisibleRevision.summary,
+              followUp: latestVisibleRevision.follow_up,
+              answers: latestVisibleRevision.answers,
+            }
+          : null,
       assignment: assignment
         ? {
             assigneeId: assignment.assignee_id,
             assigneeName:
-              firstRelation(
-                assignment.assignee as unknown as
-                  ProfileRelation | ProfileRelation[] | null
-              )?.display_name ||
-              firstRelation(
-                assignment.assignee as unknown as
-                  ProfileRelation | ProfileRelation[] | null
-              )?.email ||
-              "Unknown",
+              assignee?.display_name || assignee?.email || "Unknown",
             version: assignment.version,
           }
         : null,
-      revisions: (revisions ?? []).map((revision) => {
-        const submitter = firstRelation(
-          revision.submitter as unknown as
-            ProfileRelation | ProfileRelation[] | null
-        );
-        return {
-          id: revision.id,
-          revision: revision.revision,
-          status: revision.status as ReviewStatus,
-          score: revision.score === null ? null : Number(revision.score),
-          submittedAt: revision.submitted_at,
-          submittedBy: submitter?.display_name || submitter?.email || "Unknown",
-        };
-      }),
+      revisions: revisionHistory.map((revision) => ({
+        id: revision.id,
+        revision: revision.revision,
+        scorecardVersionId: revision.scorecard_version_id,
+        status: revision.status,
+        score: revision.score === null ? null : Number(revision.score),
+        summary: revision.summary,
+        followUp: revision.follow_up,
+        followUpState: revision.follow_up_state,
+        answers: revision.answers,
+        submittedAt: revision.submitted_at,
+        submittedBy: revision.submitted_by_name,
+      })),
     };
   }
 

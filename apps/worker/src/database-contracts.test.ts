@@ -756,6 +756,280 @@ describe.skipIf(
     }
   });
 
+  it("preserves complete immutable Review Revision history with draft privacy", async () => {
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const manager = await createWorkspaceMember("manager");
+    const owner = await createWorkspaceMember("member");
+    const sameWorkspaceNonOwner = await createWorkspaceMember("member");
+
+    const { data: scorecardVersionId, error: publishError } =
+      await workspaceAdmin.client.rpc("publish_scorecard_for_current_admin", {
+        target_template_id: null,
+        target_name: "Revision history Scorecard",
+        target_categories: [
+          {
+            name: "Quality",
+            criteria: [
+              {
+                label: "Required outcome",
+                description: "",
+                weight: 3,
+                required: true,
+              },
+              {
+                label: "Optional detail",
+                description: "",
+                weight: 1,
+                required: false,
+              },
+            ],
+          },
+        ],
+      });
+    expect(publishError).toBeNull();
+    const { data: version } = await admin
+      .from("scorecard_versions")
+      .select("template_id")
+      .eq("id", scorecardVersionId)
+      .single();
+    createdScorecardTemplateIds.push(version!.template_id);
+    const { data: categories } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", scorecardVersionId);
+    const { data: criteria } = await admin
+      .from("scorecard_criteria")
+      .select("id, required")
+      .in(
+        "category_id",
+        (categories ?? []).map((category) => category.id)
+      )
+      .order("position");
+    const requiredCriterion = criteria?.find((criterion) => criterion.required);
+    const optionalCriterion = criteria?.find(
+      (criterion) => !criterion.required
+    );
+    if (!requiredCriterion || !optionalCriterion) {
+      throw new Error("Expected both revision-history criteria");
+    }
+
+    const call = await createCall(owner.userId, { status: "ready" });
+    const { error: claimError } = await manager.client.rpc("claim_review", {
+      target_call_id: call.callId,
+    });
+    expect(claimError).toBeNull();
+
+    const { data: firstReview, error: firstSubmitError } =
+      await manager.client.rpc("submit_call_review", {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 0,
+        expected_assignment_version: 1,
+        target_status: "reviewed",
+        target_summary: "First submitted summary.",
+        target_follow_up: "",
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: 5,
+            comment: "First required comment.",
+          },
+          {
+            criterionId: optionalCriterion.id,
+            value: null,
+            comment: "First optional N/A comment.",
+          },
+        ],
+      });
+    expect(firstSubmitError).toBeNull();
+    expect(firstReview).toMatchObject({ version: 1, score: 100 });
+
+    const { error: draftSubmitError } = await manager.client.rpc(
+      "submit_call_review",
+      {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 1,
+        expected_assignment_version: 1,
+        target_status: "in_progress",
+        target_summary: "Private draft summary.",
+        target_follow_up: "",
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: 1,
+            comment: "Private draft comment.",
+          },
+        ],
+      }
+    );
+    expect(draftSubmitError).toBeNull();
+
+    const { data: ownerHistoryDuringDraft, error: ownerHistoryError } =
+      await owner.client.rpc("review_revision_history", {
+        target_call_id: call.callId,
+      });
+    expect(ownerHistoryError).toBeNull();
+    expect(ownerHistoryDuringDraft).toHaveLength(1);
+    expect(ownerHistoryDuringDraft?.[0]).toMatchObject({
+      revision: 1,
+      scorecard_version_id: scorecardVersionId,
+      status: "reviewed",
+      score: 100,
+      summary: "First submitted summary.",
+      follow_up_state: "not_required",
+      submitted_by: manager.userId,
+    });
+    expect(JSON.stringify(ownerHistoryDuringDraft)).not.toContain(
+      "Private draft"
+    );
+
+    const { data: thirdReview, error: thirdSubmitError } =
+      await manager.client.rpc("submit_call_review", {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 2,
+        expected_assignment_version: 1,
+        target_status: "needs_follow_up",
+        target_summary: "Third submitted summary.",
+        target_follow_up: "Complete the documented action.",
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: 3,
+            comment: "Third required comment.",
+          },
+          {
+            criterionId: optionalCriterion.id,
+            value: 5,
+            comment: "Third optional comment.",
+          },
+        ],
+      });
+    expect(thirdSubmitError).toBeNull();
+    expect(thirdReview).toMatchObject({
+      version: 3,
+      status: "needs_follow_up",
+    });
+
+    const { data: managerHistory, error: managerHistoryError } =
+      await manager.client.rpc("review_revision_history", {
+        target_call_id: call.callId,
+      });
+    expect(managerHistoryError).toBeNull();
+    expect(
+      managerHistory?.map((revision: { revision: number }) => revision.revision)
+    ).toEqual([3, 2, 1]);
+    expect(managerHistory?.[0]).toMatchObject({
+      scorecard_version_id: scorecardVersionId,
+      status: "needs_follow_up",
+      summary: "Third submitted summary.",
+      follow_up: "Complete the documented action.",
+      follow_up_state: "required",
+      submitted_by: manager.userId,
+    });
+    expect(managerHistory?.[0]?.answers).toEqual([
+      {
+        criterionId: requiredCriterion.id,
+        value: 3,
+        comment: "Third required comment.",
+      },
+      {
+        criterionId: optionalCriterion.id,
+        value: 5,
+        comment: "Third optional comment.",
+      },
+    ]);
+    expect(Date.parse(managerHistory![0]!.submitted_at)).not.toBeNaN();
+
+    const { data: ownerHistoryAfterSubmission } = await owner.client.rpc(
+      "review_revision_history",
+      { target_call_id: call.callId }
+    );
+    expect(
+      ownerHistoryAfterSubmission?.map(
+        (revision: { revision: number }) => revision.revision
+      )
+    ).toEqual([3, 1]);
+    const { data: nonOwnerHistory } = await sameWorkspaceNonOwner.client.rpc(
+      "review_revision_history",
+      { target_call_id: call.callId }
+    );
+    expect(nonOwnerHistory).toEqual([]);
+
+    const { error: staleReviewError } = await manager.client.rpc(
+      "submit_call_review",
+      {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 2,
+        expected_assignment_version: 1,
+        target_status: "reviewed",
+        target_summary: "Stale overwrite.",
+        target_follow_up: "",
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: 1,
+            comment: "",
+          },
+        ],
+      }
+    );
+    expect(staleReviewError?.message).toMatch(/Review version conflict/i);
+    const { count: unchangedRevisionCount } = await admin
+      .from("review_revisions")
+      .select("id", { count: "exact", head: true })
+      .eq("review_id", firstReview.id);
+    expect(unchangedRevisionCount).toBe(3);
+
+    const firstRevisionId = managerHistory?.find(
+      (revision: { revision: number }) => revision.revision === 1
+    )?.id;
+    if (!firstRevisionId) throw new Error("Expected the first Review Revision");
+    const { error: mutationError } = await admin
+      .from("review_revisions")
+      .update({ summary: "Mutated history" })
+      .eq("id", firstRevisionId);
+    expect(mutationError?.message).toMatch(/permission denied|immutable/i);
+    const { error: individualDeleteError } = await admin
+      .from("review_revisions")
+      .delete()
+      .eq("id", firstRevisionId);
+    expect(individualDeleteError?.message).toMatch(
+      /permission denied|whole-Call deletion/i
+    );
+
+    const otherWorkspaceId = crypto.randomUUID();
+    createdWorkspaceIds.push(otherWorkspaceId);
+    const { error: workspaceError } = await admin.from("workspaces").insert({
+      id: otherWorkspaceId,
+      name: "Other revision Workspace",
+      slug: `other-revision-${otherWorkspaceId.slice(0, 8)}`,
+    });
+    if (workspaceError) throw workspaceError;
+    const otherWorkspaceMember = await createWorkspaceMember(
+      "member",
+      otherWorkspaceId
+    );
+    const { data: crossWorkspaceHistory } =
+      await otherWorkspaceMember.client.rpc("review_revision_history", {
+        target_call_id: call.callId,
+      });
+    expect(crossWorkspaceHistory).toEqual([]);
+
+    const { error: wholeCallDeleteError } = await admin
+      .from("calls")
+      .delete()
+      .eq("id", call.callId);
+    expect(wholeCallDeleteError).toBeNull();
+    const { count: retainedAfterCallDelete } = await admin
+      .from("review_revisions")
+      .select("id", { count: "exact", head: true })
+      .eq("review_id", firstReview.id);
+    expect(retainedAfterCallDelete).toBe(0);
+  });
+
   it("enforces one Workspace per person and the ten-active-member pilot cap", async () => {
     const members = [];
     for (let index = 0; index < 10; index += 1) {
