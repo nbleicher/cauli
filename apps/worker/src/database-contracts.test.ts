@@ -10,6 +10,7 @@ const anonKey =
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "integration-test-anon-key";
 const jwtSecret = process.env.SUPABASE_JWT_SECRET ?? "";
 const workspaceId = "00000000-0000-0000-0000-000000000001";
+const zeroUuid = "00000000-0000-0000-0000-000000000000";
 
 process.env.NEXT_PUBLIC_SUPABASE_URL = localUrl;
 process.env.SUPABASE_SERVICE_ROLE_KEY = serviceRoleKey;
@@ -144,6 +145,21 @@ afterEach(async () => {
   // Rate-limit counters are Workspace- and Call-scoped, so one test's spending
   // would otherwise be charged to the next.
   await admin.from("rate_limit_state").delete().neq("bucket", "");
+  // Budgets, the daily ledger, and the once-per-day warning claim are all
+  // Workspace-scoped state that would otherwise leak into the next test.
+  await admin.from("processing_spend").delete().neq("workspace_id", zeroUuid);
+  await admin
+    .from("workspace_processing_budget")
+    .delete()
+    .neq("workspace_id", zeroUuid);
+  await admin.from("processing_budget_warnings").delete().neq("scope_key", "");
+  // Timing evidence outlives the job it describes, which is the point of it,
+  // so one test's runs must not become the next test's service level.
+  await admin.from("processing_runs").delete().neq("workspace_id", zeroUuid);
+  await admin
+    .from("platform_processing_budget")
+    .update({ daily_limit_usd: 50, warning_ratio: 0.8 })
+    .eq("singleton", true);
 });
 
 async function createWorkspaceMember(
@@ -284,6 +300,21 @@ function ms(span: string) {
   };
   const amount = Number.parseInt(span, 10);
   return amount * units[span.slice(-1)]!;
+}
+
+/**
+ * Audit Events are immutable, so they outlive every test that produced them.
+ * Anchoring on the last identifier before a test starts scopes an assertion to
+ * that test's own evidence without depending on the database clock.
+ */
+async function latestAuditEventId() {
+  const { data } = await admin
+    .from("audit_events")
+    .select("id")
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return (data?.id as number | undefined) ?? 0;
 }
 
 async function createCall(
@@ -4707,5 +4738,1163 @@ describe.skipIf(
       worker_name: "second-retention-worker",
     });
     expect(notReclaimed).not.toBe(objectName);
+  });
+
+  it("pauses transcription on a spent budget without consuming an attempt", async () => {
+    const { userId } = await createWorkspaceMember();
+    // One hour of audio at the worst active price is well over a cent, so a
+    // one-cent limit is guaranteed to be in the way.
+    const { callId } = await createCall(userId, {
+      status: "queued",
+      duration_ms: ms("1h"),
+      stopped_at: new Date().toISOString(),
+    });
+    const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
+    const { error: insertError } = await admin.from("processing_jobs").insert({
+      id: jobId,
+      workspace_id: workspaceId,
+      call_id: callId,
+      kind: "process_recording",
+      status: "queued",
+      idempotency_key: `budget-pause:${callId}`,
+    });
+    if (insertError) throw insertError;
+
+    const { error: budgetError } = await admin
+      .from("workspace_processing_budget")
+      .insert({ workspace_id: workspaceId, daily_limit_usd: 0.01 });
+    if (budgetError) throw budgetError;
+
+    const { data: claimed, error: claimError } = await admin.rpc(
+      "claim_processing_job",
+      { worker_name: "budget-worker" }
+    );
+    if (claimError) throw claimError;
+    expect(claimed).toHaveLength(0);
+
+    const { data: pausedJob } = await admin
+      .from("processing_jobs")
+      .select("status, attempts, budget_paused_reason, budget_reserved_usd")
+      .eq("id", jobId)
+      .single();
+    expect(pausedJob).toEqual({
+      status: "budget_paused",
+      attempts: 0,
+      budget_paused_reason: "workspace_limit",
+      budget_reserved_usd: 0,
+    });
+
+    // The Call says so too, in words its Admin can repeat to the Call's owner.
+    const { data: pausedCall } = await admin
+      .from("calls")
+      .select("status, error_message, source_path, deleted_at")
+      .eq("id", callId)
+      .single();
+    expect(pausedCall?.status).toBe("budget_paused");
+    expect(pausedCall?.error_message).toContain("Your recording is safe");
+    expect(pausedCall?.deleted_at).toBeNull();
+
+    const { data: pauseEvents } = await admin
+      .from("audit_events")
+      .select("action, metadata")
+      .eq("entity_id", jobId)
+      .eq("action", "processing.budget.paused");
+    expect(pauseEvents).toHaveLength(1);
+    expect(pauseEvents?.[0]?.metadata).toMatchObject({
+      reason_code: "workspace_limit",
+    });
+
+    // Nothing was charged for work that never started.
+    const { data: ledger } = await admin
+      .from("processing_spend")
+      .select("reserved_usd, settled_usd")
+      .eq("workspace_id", workspaceId);
+    expect(Number(ledger?.[0]?.reserved_usd ?? 0)).toBe(0);
+  });
+
+  it("keeps recording and Source Audio capture working while Budget Paused", async () => {
+    const { client, userId } = await createWorkspaceMember();
+    const { error: budgetError } = await admin
+      .from("workspace_processing_budget")
+      .insert({ workspace_id: workspaceId, daily_limit_usd: 0 });
+    if (budgetError) throw budgetError;
+
+    const pausedCallId = crypto.randomUUID();
+    createdCallIds.push(pausedCallId);
+    const { error: pausedInsertError } = await admin.from("calls").insert({
+      id: pausedCallId,
+      workspace_id: workspaceId,
+      owner_id: userId,
+      source_mode: "mic",
+      status: "queued",
+      duration_ms: ms("1h"),
+      chunk_prefix: `${workspaceId}/${pausedCallId}/chunks`,
+      recording_attested_by: userId,
+      recording_attested_at: new Date().toISOString(),
+    });
+    if (pausedInsertError) throw pausedInsertError;
+    const pausedJobId = crypto.randomUUID();
+    createdJobIds.push(pausedJobId);
+    await admin.from("processing_jobs").insert({
+      id: pausedJobId,
+      workspace_id: workspaceId,
+      call_id: pausedCallId,
+      kind: "process_recording",
+      status: "queued",
+      idempotency_key: `budget-capture:${pausedCallId}`,
+    });
+    await admin.rpc("claim_processing_job", { worker_name: "budget-worker" });
+
+    // A spent budget must not become a recording outage: a Workspace Member
+    // can still start a new Call and its Source Audio still lands.
+    const newCallId = crypto.randomUUID();
+    createdCallIds.push(newCallId);
+    const { data: created, error: createError } = await client.rpc(
+      "create_attested_call_for_current_user",
+      {
+        target_call_id: newCallId,
+        target_source_mode: "mic",
+        target_mic_label: "Built-in",
+        target_tab_label: "",
+        target_title: null,
+        target_recording_attested: true,
+      }
+    );
+    if (createError) throw createError;
+    expect((created as { status: string }).status).toBe("recording");
+
+    const { data: finalized, error: finalizeError } = await client.rpc(
+      "finalize_owned_call",
+      {
+        target_call_id: newCallId,
+        final_chunk_sequence: 0,
+        target_duration_ms: 1_000,
+        target_mime_type: "audio/webm;codecs=opus",
+        target_source_mode: "mic",
+        target_mic_label: "Built-in",
+        target_tab_label: "",
+        target_degraded_intervals: [],
+      }
+    );
+    if (finalizeError) throw finalizeError;
+    expect((finalized as { status: string }).status).toBe("queued");
+  });
+
+  it("cannot overspend a budget through racing workers", async () => {
+    const { userId } = await createWorkspaceMember();
+    const jobIds: string[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const { callId } = await createCall(userId, {
+        status: "queued",
+        duration_ms: ms("1h"),
+        stopped_at: new Date().toISOString(),
+      });
+      const jobId = crypto.randomUUID();
+      jobIds.push(jobId);
+      createdJobIds.push(jobId);
+      await admin.from("processing_jobs").insert({
+        id: jobId,
+        workspace_id: workspaceId,
+        call_id: callId,
+        kind: "process_recording",
+        status: "queued",
+        idempotency_key: `budget-race-${index}:${callId}`,
+      });
+    }
+
+    const { data: unitCost, error: costError } = await admin.rpc(
+      "estimated_transcription_cost_usd",
+      { target_duration_ms: ms("1h") }
+    );
+    if (costError) throw costError;
+    const perJob = Number(unitCost);
+    expect(perJob).toBeGreaterThan(0);
+
+    // Exactly two of the five fit. Five workers ask at once.
+    const limit = perJob * 2.5;
+    await admin
+      .from("workspace_processing_budget")
+      .insert({ workspace_id: workspaceId, daily_limit_usd: limit.toFixed(2) });
+
+    const claims = await Promise.all(
+      Array.from({ length: 5 }, (_unused, index) =>
+        admin.rpc("claim_processing_job", { worker_name: `race-${index}` })
+      )
+    );
+    for (const claim of claims) {
+      if (claim.error) throw claim.error;
+    }
+
+    const { data: finalJobs } = await admin
+      .from("processing_jobs")
+      .select("status")
+      .in("id", jobIds);
+    const claimedCount = (finalJobs ?? []).filter(
+      (job) => job.status === "processing"
+    ).length;
+    expect(claimedCount).toBe(2);
+
+    const { data: ledger } = await admin
+      .from("processing_spend")
+      .select("reserved_usd")
+      .eq("workspace_id", workspaceId)
+      .single();
+    expect(Number(ledger?.reserved_usd)).toBeLessThanOrEqual(limit);
+    expect(Number(ledger?.reserved_usd)).toBeCloseTo(perJob * 2, 6);
+  });
+
+  it("warns a Platform Admin at 80% before any work is paused", async () => {
+    const sinceEventId = await latestAuditEventId();
+    await createPlatformAdmin();
+    const { userId } = await createWorkspaceMember();
+    const { callId } = await createCall(userId, {
+      status: "queued",
+      duration_ms: ms("1h"),
+      stopped_at: new Date().toISOString(),
+    });
+    const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
+    await admin.from("processing_jobs").insert({
+      id: jobId,
+      workspace_id: workspaceId,
+      call_id: callId,
+      kind: "process_recording",
+      status: "queued",
+      idempotency_key: `budget-warn:${callId}`,
+    });
+
+    const { data: unitCost } = await admin.rpc(
+      "estimated_transcription_cost_usd",
+      { target_duration_ms: ms("1h") }
+    );
+    // A limit this job fills to 90% of: above the 80% warning, below the pause.
+    await admin.from("workspace_processing_budget").insert({
+      workspace_id: workspaceId,
+      daily_limit_usd: (Number(unitCost) / 0.9).toFixed(2),
+    });
+
+    const { data: claimed, error: claimError } = await admin.rpc(
+      "claim_processing_job",
+      { worker_name: "warn-worker" }
+    );
+    if (claimError) throw claimError;
+    expect(claimed).toHaveLength(1);
+
+    const { data: warnings } = await admin
+      .from("audit_events")
+      .select(
+        "id, action, entity_type, entity_id, metadata, workspace_id, platform_environment"
+      )
+      .eq("action", "platform.budget.warned")
+      .eq("entity_id", workspaceId)
+      .gt("id", sinceEventId);
+    expect(warnings).toHaveLength(1);
+    expect(warnings?.[0]?.metadata).toMatchObject({ scope: "workspace" });
+    // Warnings belong to the operator, not to the Workspace's own Audit Log.
+    expect(warnings?.[0]).toMatchObject({
+      workspace_id: null,
+      platform_environment: "staging",
+    });
+
+    // A second claim on the same day does not warn twice.
+    await admin.rpc("claim_processing_job", { worker_name: "warn-worker" });
+    const { count: warningCount } = await admin
+      .from("audit_events")
+      .select("id", { count: "exact", head: true })
+      .eq("action", "platform.budget.warned")
+      .eq("entity_id", workspaceId)
+      .gt("id", sinceEventId);
+    expect(warningCount).toBe(1);
+  });
+
+  it("resumes Budget Paused work after a limit change and after the daily reset", async () => {
+    const { userId } = await createWorkspaceMember();
+    const { callId } = await createCall(userId, {
+      status: "queued",
+      duration_ms: ms("1h"),
+      stopped_at: new Date().toISOString(),
+    });
+    const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
+    await admin.from("processing_jobs").insert({
+      id: jobId,
+      workspace_id: workspaceId,
+      call_id: callId,
+      kind: "process_recording",
+      status: "queued",
+      idempotency_key: `budget-resume:${callId}`,
+    });
+    await admin
+      .from("workspace_processing_budget")
+      .insert({ workspace_id: workspaceId, daily_limit_usd: 0 });
+    await admin.rpc("claim_processing_job", { worker_name: "resume-worker" });
+    const { data: paused } = await admin
+      .from("processing_jobs")
+      .select("status")
+      .eq("id", jobId)
+      .single();
+    expect(paused?.status).toBe("budget_paused");
+
+    // A raised limit is enough on its own: nobody has to press retry.
+    await admin
+      .from("workspace_processing_budget")
+      .update({ daily_limit_usd: 10 })
+      .eq("workspace_id", workspaceId);
+    const { data: resumedCount, error: resumeError } = await admin.rpc(
+      "resume_budget_paused_jobs"
+    );
+    if (resumeError) throw resumeError;
+    expect(resumedCount).toBe(1);
+
+    const [{ data: resumedJob }, { data: resumedCall }] = await Promise.all([
+      admin
+        .from("processing_jobs")
+        .select("status, attempts, budget_paused_reason")
+        .eq("id", jobId)
+        .single(),
+      admin
+        .from("calls")
+        .select("status, error_message")
+        .eq("id", callId)
+        .single(),
+    ]);
+    expect(resumedJob).toEqual({
+      status: "queued",
+      attempts: 0,
+      budget_paused_reason: null,
+    });
+    expect(resumedCall).toEqual({ status: "queued", error_message: null });
+
+    const { data: resumeEvents } = await admin
+      .from("audit_events")
+      .select("action")
+      .eq("entity_id", jobId)
+      .eq("action", "processing.budget.resumed");
+    expect(resumeEvents).toHaveLength(1);
+
+    // The daily reset is the same mechanism seen from the other side: the
+    // ledger is keyed by day, so yesterday's spending stops being in the way
+    // without anybody resetting a counter.
+    await admin
+      .from("processing_jobs")
+      .update({
+        status: "budget_paused",
+        budget_paused_reason: "workspace_limit",
+      })
+      .eq("id", jobId);
+    const today = new Date().toISOString().slice(0, 10);
+    await admin.from("processing_spend").upsert({
+      spend_date: today,
+      workspace_id: workspaceId,
+      settled_usd: 9.99,
+    });
+    const { data: stillPaused } = await admin.rpc("resume_budget_paused_jobs");
+    expect(stillPaused).toBe(0);
+
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1_000)
+      .toISOString()
+      .slice(0, 10);
+    await admin
+      .from("processing_spend")
+      .update({ spend_date: yesterday })
+      .eq("spend_date", today)
+      .eq("workspace_id", workspaceId);
+    const { data: resumedNextDay } = await admin.rpc(
+      "resume_budget_paused_jobs"
+    );
+    expect(resumedNextDay).toBe(1);
+  });
+
+  it("lets only a Platform Admin move a budget, and only a Workspace Admin read it", async () => {
+    const sinceEventId = await latestAuditEventId();
+    const { client: adminClient } = await createWorkspaceMember("admin");
+    const { client: memberClient } = await createWorkspaceMember();
+    const platformAdmin = await createPlatformAdmin();
+
+    const { error: deniedPlatform } = await adminClient.rpc(
+      "set_platform_processing_budget",
+      { target_daily_limit_usd: 500 }
+    );
+    expect(deniedPlatform?.message).toContain("Platform Admin");
+
+    const { error: deniedWorkspace } = await adminClient.rpc(
+      "set_workspace_processing_budget",
+      { target_workspace_id: workspaceId, target_daily_limit_usd: 500 }
+    );
+    expect(deniedWorkspace?.message).toContain("Platform Admin");
+
+    const { data: unchanged } = await admin
+      .from("platform_processing_budget")
+      .select("daily_limit_usd")
+      .single();
+    expect(Number(unchanged?.daily_limit_usd)).toBe(50);
+
+    // The pause and its operational reason are the Admin's to see.
+    const { data: status, error: statusError } = await adminClient.rpc(
+      "workspace_processing_budget_status"
+    );
+    if (statusError) throw statusError;
+    expect(status).toMatchObject({
+      dailyLimitUsd: 10,
+      pausedJobCount: 0,
+      editable: false,
+    });
+    expect(status).not.toHaveProperty("platformLimitUsd");
+
+    const { error: memberDenied } = await memberClient.rpc(
+      "workspace_processing_budget_status"
+    );
+    expect(memberDenied?.message).toContain("Workspace Admin");
+
+    // A separate, MFA-verified operator identity succeeds and is audited in its
+    // Platform Environment rather than in an arbitrary customer Workspace.
+    const { data: changed, error: changeError } =
+      await platformAdmin.client.rpc("set_platform_processing_budget", {
+        target_daily_limit_usd: 75,
+      });
+    if (changeError) throw changeError;
+    expect(changed).toMatchObject({ dailyLimitUsd: 75 });
+
+    const { data: budgetEvents } = await admin
+      .from("audit_events")
+      .select(
+        "id, action, entity_type, metadata, workspace_id, platform_environment"
+      )
+      .eq("action", "platform.budget.changed")
+      .eq("entity_type", "platform_budget")
+      .gt("id", sinceEventId);
+    expect(budgetEvents).toHaveLength(1);
+    expect(budgetEvents?.[0]?.metadata).toMatchObject({ limit_usd: 75 });
+    expect(budgetEvents?.[0]).toMatchObject({
+      workspace_id: null,
+      platform_environment: "staging",
+    });
+  });
+
+  it("raises the operational alerts an operator is expected to act on", async () => {
+    const { userId } = await createWorkspaceMember();
+
+    const { data: quiet, error: quietError } = await admin.rpc(
+      "processing_operational_alerts"
+    );
+    if (quietError) throw quietError;
+    expect(quiet).toEqual([]);
+
+    // A job that has been waiting longer than the five-minute queue budget.
+    const { callId } = await createCall(userId, {
+      status: "queued",
+      duration_ms: ms("1h"),
+      stopped_at: new Date().toISOString(),
+    });
+    const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
+    await admin.from("processing_jobs").insert({
+      id: jobId,
+      workspace_id: workspaceId,
+      call_id: callId,
+      kind: "process_recording",
+      status: "queued",
+      idempotency_key: `alert-queue:${callId}`,
+      next_attempt_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+
+    const { data: queued } = await admin.rpc("processing_operational_alerts");
+    const queueAlert = (
+      queued as Array<{ alert: string; detail: { queueAgeSeconds: number } }>
+    ).find((entry) => entry.alert === "processing.queue_age");
+    expect(queueAlert).toBeDefined();
+    expect(queueAlert?.detail.queueAgeSeconds).toBeGreaterThan(300);
+
+    // Repeated exhaustion is its own signal, separate from a slow queue.
+    for (let index = 0; index < 3; index += 1) {
+      const { callId: attentionCallId } = await createCall(userId);
+      const attentionJobId = crypto.randomUUID();
+      createdJobIds.push(attentionJobId);
+      await admin.from("processing_jobs").insert({
+        id: attentionJobId,
+        workspace_id: workspaceId,
+        call_id: attentionCallId,
+        kind: "process_recording",
+        status: "failed",
+        attempts: 3,
+        max_attempts: 3,
+        finished_at: new Date().toISOString(),
+        idempotency_key: `alert-attention-${index}:${attentionCallId}`,
+      });
+    }
+    const { data: attention } = await admin.rpc(
+      "processing_operational_alerts"
+    );
+    expect(
+      (attention as Array<{ alert: string }>).map((entry) => entry.alert)
+    ).toContain("processing.needs_attention");
+  });
+
+  it("reports provider incidents apart from Cauli missing its own target", async () => {
+    const { userId } = await createWorkspaceMember();
+    const jobIds: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const { callId } = await createCall(userId, {
+        status: "queued",
+        duration_ms: ms("1h"),
+        stopped_at: new Date().toISOString(),
+      });
+      const jobId = crypto.randomUUID();
+      jobIds.push(jobId);
+      createdJobIds.push(jobId);
+      await admin.from("processing_jobs").insert({
+        id: jobId,
+        workspace_id: workspaceId,
+        call_id: callId,
+        kind: "process_recording",
+        status: "queued",
+        idempotency_key: `alert-provider-${index}:${callId}`,
+      });
+      const { data: claimed } = await admin.rpc("claim_processing_job", {
+        worker_name: `provider-${index}`,
+      });
+      expect((claimed as Array<{ id: string }>)[0]?.id).toBe(jobId);
+      // The provider was unavailable; Cauli itself was not at fault.
+      const { error: failError } = await admin
+        .from("processing_jobs")
+        .update({
+          status: "failed",
+          attempts: 3,
+          error_category: "provider_unavailable",
+          finished_at: new Date().toISOString(),
+        })
+        .eq("id", jobId);
+      if (failError) throw failError;
+    }
+
+    const { data: runs } = await admin
+      .from("processing_runs")
+      .select("outcome, error_category, counts_toward_target")
+      .in("job_id", jobIds);
+    expect(runs).toHaveLength(3);
+    for (const run of runs ?? []) {
+      expect(run.outcome).toBe("failed");
+      expect(run.error_category).toBe("provider_unavailable");
+    }
+
+    // Reported as a provider incident and still counted against the target:
+    // visible as both, excused as neither.
+    const { data: level } = await admin.rpc("processing_service_level", {
+      window_hours: 1,
+    });
+    expect(level).toMatchObject({ eligibleCalls: 3, providerIncidents: 3 });
+
+    const { data: alerts } = await admin.rpc("processing_operational_alerts");
+    expect(
+      (alerts as Array<{ alert: string }>).map((entry) => entry.alert)
+    ).toContain("processing.provider_incident");
+  });
+
+  it("pages 250+ Calls by cursor and stays correct as Calls change", async () => {
+    const { client, userId } = await createWorkspaceMember("manager");
+    const total = 260;
+    const base = Date.parse("2026-06-01T00:00:00.000Z");
+    // Seeded rows are cleaned up in bulk by owner below rather than one
+    // identifier at a time: 260 of them in a shared teardown makes a request
+    // line long enough to be its own failure.
+    const rows = Array.from({ length: total }, (_unused, index) => {
+      const callId = crypto.randomUUID();
+      return {
+        id: callId,
+        workspace_id: workspaceId,
+        owner_id: userId,
+        title: `Call ${String(index).padStart(3, "0")}`,
+        source_mode: "mic" as const,
+        status: "ready" as const,
+        chunk_prefix: `${workspaceId}/${callId}/chunks`,
+        started_at: new Date(base + index * 60_000).toISOString(),
+        recording_attested_by: userId,
+        recording_attested_at: new Date(base).toISOString(),
+      };
+    });
+    const { error: seedError } = await admin.from("calls").insert(rows);
+    if (seedError) throw seedError;
+
+    async function page(cursor: { startedAt: string; id: string } | null) {
+      const { data, error } = await client.rpc("list_calls_page", {
+        cursor_started_at: cursor?.startedAt ?? null,
+        cursor_id: cursor?.id ?? null,
+      });
+      if (error) throw error;
+      return data as Array<{ id: string; started_at: string; title: string }>;
+    }
+
+    // A page is 50 Calls plus the one row that answers "is there more".
+    const first = await page(null);
+    expect(first).toHaveLength(51);
+    const seen = new Set<string>();
+    let walked = 0;
+    let cursor: { startedAt: string; id: string } | null = null;
+    for (let index = 0; index < 8; index += 1) {
+      const rowsPage: Array<{ id: string; started_at: string }> =
+        await page(cursor);
+      const visible = rowsPage.slice(0, 50);
+      for (const row of visible) {
+        // No Call is ever shown twice, which is the whole point of a cursor.
+        expect(seen.has(row.id)).toBe(false);
+        seen.add(row.id);
+      }
+      walked += visible.length;
+      if (rowsPage.length <= 50) break;
+      const last = visible[visible.length - 1]!;
+      cursor = { startedAt: last.started_at, id: last.id };
+    }
+    expect(walked).toBe(total);
+
+    // Now change the set between two page requests: a newer Call inserted
+    // above page one, and a Call deleted below the cursor.
+    const restartFirst = await page(null);
+    const boundary = restartFirst[49]!;
+    const newerId = crypto.randomUUID();
+    await admin.from("calls").insert({
+      id: newerId,
+      workspace_id: workspaceId,
+      owner_id: userId,
+      title: "Inserted between pages",
+      source_mode: "mic",
+      status: "ready",
+      chunk_prefix: `${workspaceId}/${newerId}/chunks`,
+      started_at: new Date(base + total * 60_000).toISOString(),
+      recording_attested_by: userId,
+      recording_attested_at: new Date(base).toISOString(),
+    });
+    const droppedId = restartFirst[50]!.id;
+    await admin
+      .from("calls")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("id", droppedId);
+
+    const secondPage = await page({
+      startedAt: boundary.started_at,
+      id: boundary.id,
+    });
+    // The insert went above the cursor, so it cannot shift page two down...
+    expect(secondPage.map((row) => row.id)).not.toContain(newerId);
+    // ...and the deleted Call is simply gone rather than leaving a hole.
+    expect(secondPage.map((row) => row.id)).not.toContain(droppedId);
+    for (const row of secondPage) {
+      expect(
+        restartFirst.slice(0, 50).map((seenRow) => seenRow.id)
+      ).not.toContain(row.id);
+    }
+
+    const { error: cleanupError } = await admin
+      .from("calls")
+      .delete()
+      .eq("owner_id", userId);
+    if (cleanupError) throw cleanupError;
+  });
+
+  it("filters, searches metadata only, and never reads a Transcript", async () => {
+    const { client, userId } = await createWorkspaceMember("manager");
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const { callId: degradedId } = await createCall(userId, {
+      title: "Renewal conversation",
+      status: "ready",
+      degraded_intervals: [{ source: "mic", startMs: 0, endMs: 10 }],
+      started_at: "2026-06-10T10:00:00.000Z",
+    });
+    const { callId: cleanId } = await createCall(userId, {
+      title: "Onboarding walkthrough",
+      status: "failed",
+      started_at: "2026-06-11T10:00:00.000Z",
+    });
+
+    // A Transcript whose text matches nothing in any title.
+    const { data: transcript, error: transcriptError } = await admin
+      .from("transcripts")
+      .insert({
+        call_id: cleanId,
+        model: "openai/whisper-large-v3-turbo",
+        full_text: "the customer mentioned pomegranate pricing",
+      })
+      .select("id")
+      .single();
+    if (transcriptError) throw transcriptError;
+    expect(transcript.id).toBeTruthy();
+
+    const { data: scorecardVersionId, error: publishError } = await admin.rpc(
+      "publish_scorecard",
+      {
+        target_workspace_id: workspaceId,
+        target_template_id: null,
+        target_name: "Discovery filter Scorecard",
+        target_actor_id: userId,
+        target_categories: [
+          {
+            name: "Quality",
+            criteria: [
+              {
+                label: "Complete the action",
+                weight: 1,
+                required: true,
+              },
+            ],
+          },
+        ],
+      }
+    );
+    if (publishError) throw publishError;
+    const { data: scorecardVersion, error: scorecardVersionError } = await admin
+      .from("scorecard_versions")
+      .select("template_id")
+      .eq("id", scorecardVersionId)
+      .single();
+    if (scorecardVersionError) throw scorecardVersionError;
+    createdScorecardTemplateIds.push(scorecardVersion.template_id);
+
+    const { data: category, error: categoryError } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", scorecardVersionId)
+      .single();
+    if (categoryError) throw categoryError;
+    const { data: criterion, error: criterionError } = await admin
+      .from("scorecard_criteria")
+      .select("id")
+      .eq("category_id", category.id)
+      .single();
+    if (criterionError) throw criterionError;
+
+    for (const submission of [
+      {
+        callId: degradedId,
+        summary: "Open tracked Follow-up.",
+        followUp: "Complete the open action.",
+      },
+      {
+        callId: cleanId,
+        summary: "Resolved tracked Follow-up.",
+        followUp: "Complete the resolved action.",
+      },
+    ]) {
+      const { error: submitError } = await workspaceAdmin.client.rpc(
+        "submit_call_review_with_follow_up",
+        {
+          target_call_id: submission.callId,
+          target_scorecard_version_id: scorecardVersionId,
+          expected_version: 0,
+          expected_assignment_version: 0,
+          target_status: "needs_follow_up",
+          target_summary: submission.summary,
+          target_follow_up: submission.followUp,
+          target_follow_up_due_date: null,
+          target_answers: [
+            {
+              criterionId: criterion.id,
+              value: 3,
+              comment: "",
+            },
+          ],
+        }
+      );
+      if (submitError) throw submitError;
+    }
+
+    const { error: assignmentError } = await workspaceAdmin.client.rpc(
+      "assign_review",
+      {
+        target_call_id: degradedId,
+        target_assignee_id: userId,
+        expected_assignment_version: 0,
+      }
+    );
+    if (assignmentError) throw assignmentError;
+    const { data: resolvedFollowUp, error: resolvedFollowUpError } =
+      await client
+        .from("follow_ups")
+        .select("id, version")
+        .eq("call_id", cleanId)
+        .single();
+    if (resolvedFollowUpError) throw resolvedFollowUpError;
+    const { error: resolveError } = await client.rpc("resolve_follow_up", {
+      target_follow_up_id: resolvedFollowUp.id,
+      expected_version: resolvedFollowUp.version,
+    });
+    if (resolveError) throw resolveError;
+
+    async function search(args: Record<string, unknown>) {
+      const { data, error } = await client.rpc("list_calls_page", args);
+      if (error) throw error;
+      return (data as Array<{ id: string }>).map((row) => row.id);
+    }
+
+    expect(await search({ target_search: "renewal" })).toEqual([degradedId]);
+    expect(await search({ target_quality: "degraded" })).toEqual([degradedId]);
+    expect(await search({ target_quality: "complete" })).toEqual([cleanId]);
+    expect(await search({ target_statuses: ["failed"] })).toEqual([cleanId]);
+    expect(await search({ target_owner_id: userId })).toEqual([
+      cleanId,
+      degradedId,
+    ]);
+    expect(await search({ target_assignee_id: userId })).toEqual([degradedId]);
+    expect(await search({ target_unassigned: true })).toEqual([cleanId]);
+    expect(await search({ target_follow_up: "open" })).toEqual([degradedId]);
+    expect(await search({ target_follow_up: "awaiting_verification" })).toEqual(
+      [cleanId]
+    );
+    const { error: verifyError } = await workspaceAdmin.client.rpc(
+      "verify_follow_up",
+      {
+        target_follow_up_id: resolvedFollowUp.id,
+        expected_version: resolvedFollowUp.version + 1,
+      }
+    );
+    if (verifyError) throw verifyError;
+    expect(await search({ target_follow_up: "verified" })).toEqual([cleanId]);
+    // Metadata search matches the owner too.
+    expect(
+      (await search({ target_search: "database-contract" })).sort()
+    ).toEqual([cleanId, degradedId].sort());
+    // Combined filters narrow rather than widen.
+    expect(
+      await search({ target_search: "renewal", target_statuses: ["failed"] })
+    ).toEqual([]);
+    // Transcript content is not searchable, and the empty result is the proof.
+    expect(await search({ target_search: "pomegranate" })).toEqual([]);
+
+    // Date filters bound both ends.
+    expect(await search({ target_from: "2026-06-11T00:00:00.000Z" })).toEqual([
+      cleanId,
+    ]);
+    expect(await search({ target_to: "2026-06-10T23:59:59.000Z" })).toEqual([
+      degradedId,
+    ]);
+  });
+
+  it("bounds and validates every discovery parameter", async () => {
+    const { client } = await createWorkspaceMember("manager");
+
+    const { error: longSearch } = await client.rpc("list_calls_page", {
+      target_search: "x".repeat(121),
+    });
+    expect(longSearch?.message).toContain("120 characters");
+
+    const { error: badQuality } = await client.rpc("list_calls_page", {
+      target_quality: "excellent",
+    });
+    expect(badQuality?.message).toContain("complete or degraded");
+
+    const { error: badFollowUp } = await client.rpc("list_calls_page", {
+      target_follow_up: "someday",
+    });
+    expect(badFollowUp?.message).toContain("awaiting_verification");
+
+    const { error: halfCursor } = await client.rpc("list_calls_page", {
+      cursor_started_at: new Date().toISOString(),
+    });
+    expect(halfCursor?.message).toContain("both its parts");
+
+    const { error: backwardsRange } = await client.rpc("list_calls_page", {
+      target_from: "2026-06-11T00:00:00.000Z",
+      target_to: "2026-06-01T00:00:00.000Z",
+    });
+    expect(backwardsRange?.message).toContain("starts after it ends");
+
+    // An unknown processing state is refused by the type, not silently ignored.
+    const { error: badStatus } = await client.rpc("list_calls_page", {
+      target_statuses: ["not_a_status"],
+    });
+    expect(badStatus).not.toBeNull();
+  });
+
+  it("keeps Call access rules and Workspace isolation inside the page", async () => {
+    const otherWorkspaceId = crypto.randomUUID();
+    const { error: workspaceError } = await admin.from("workspaces").insert({
+      id: otherWorkspaceId,
+      name: "Other pilot",
+      slug: `other-${otherWorkspaceId.slice(0, 8)}`,
+    });
+    if (workspaceError) throw workspaceError;
+    createdWorkspaceIds.push(otherWorkspaceId);
+
+    const { client: memberClient, userId: memberId } =
+      await createWorkspaceMember();
+    const { userId: colleagueId } = await createWorkspaceMember();
+    const { client: managerClient } = await createWorkspaceMember("manager");
+    const { userId: outsiderId } = await createWorkspaceMember(
+      "admin",
+      otherWorkspaceId
+    );
+
+    const { callId: ownCallId } = await createCall(memberId, {
+      title: "Mine",
+      status: "ready",
+    });
+    const { callId: colleagueCallId } = await createCall(colleagueId, {
+      title: "Not mine",
+      status: "ready",
+    });
+    const foreignCallId = crypto.randomUUID();
+    createdCallIds.push(foreignCallId);
+    await admin.from("calls").insert({
+      id: foreignCallId,
+      workspace_id: otherWorkspaceId,
+      owner_id: outsiderId,
+      title: "Another Workspace",
+      source_mode: "mic",
+      status: "ready",
+      chunk_prefix: `${otherWorkspaceId}/${foreignCallId}/chunks`,
+      recording_attested_by: outsiderId,
+      recording_attested_at: new Date().toISOString(),
+    });
+
+    const { data: memberPage, error: memberError } =
+      await memberClient.rpc("list_calls_page");
+    if (memberError) throw memberError;
+    const memberIds = (memberPage as Array<{ id: string }>).map(
+      (row) => row.id
+    );
+    // A Member Role sees only their own Calls, filtered or not.
+    expect(memberIds).toContain(ownCallId);
+    expect(memberIds).not.toContain(colleagueCallId);
+    expect(memberIds).not.toContain(foreignCallId);
+
+    const { data: managerPage } = await managerClient.rpc("list_calls_page");
+    const managerIds = (managerPage as Array<{ id: string }>).map(
+      (row) => row.id
+    );
+    expect(managerIds).toEqual(
+      expect.arrayContaining([ownCallId, colleagueCallId])
+    );
+    // Never across the Workspace boundary, whoever is asking.
+    expect(managerIds).not.toContain(foreignCallId);
+
+    // Naming another Workspace's Call explicitly does not reveal it either.
+    const { data: targeted } = await managerClient.rpc("list_calls_page", {
+      target_search: "Another Workspace",
+    });
+    expect(targeted).toEqual([]);
+  });
+
+  it("audits every artifact handover without recording content or a URL", async () => {
+    const sinceEventId = await latestAuditEventId();
+    const { client, userId } = await createWorkspaceMember();
+    const { callId } = await createCall(userId, {
+      title: "Renewal with Acme",
+      status: "ready",
+      source_path: `${workspaceId}/source.webm`,
+      mp3_path: `${workspaceId}/recording.mp3`,
+    });
+
+    for (const artifact of ["mp3", "source", "transcript_srt"]) {
+      const { error } = await client.rpc("authorize_call_download", {
+        target_call_id: callId,
+        target_artifact: artifact,
+      });
+      if (error) throw error;
+    }
+    const { error: playbackError } = await client.rpc(
+      "authorize_call_download",
+      {
+        target_call_id: callId,
+        target_artifact: "mp3",
+        target_delivery: "playback",
+      }
+    );
+    if (playbackError) throw playbackError;
+
+    const { data: events } = await admin
+      .from("audit_events")
+      .select("id, action, entity_type, entity_id, metadata, actor_id")
+      .gt("id", sinceEventId)
+      .in("action", ["call.download.created", "call.playback.created"])
+      .order("id");
+    expect(events).toHaveLength(4);
+    expect(
+      events?.map((event) => event.metadata as { artifact_type: string })
+    ).toEqual([
+      { artifact_type: "mp3" },
+      { artifact_type: "source" },
+      { artifact_type: "transcript_srt" },
+      { artifact_type: "mp3" },
+    ]);
+    // Taking a copy is distinguishable from pressing play.
+    expect(events?.map((event) => event.action)).toEqual([
+      "call.download.created",
+      "call.download.created",
+      "call.download.created",
+      "call.playback.created",
+    ]);
+    for (const event of events ?? []) {
+      expect(event.entity_type).toBe("call");
+      expect(event.entity_id).toBe(callId);
+      expect(event.actor_id).toBe(userId);
+      // Never the Call title, never a signed URL, never any content.
+      const serialized = JSON.stringify(event.metadata);
+      expect(serialized).not.toContain("Acme");
+      expect(serialized).not.toMatch(/https?:/);
+      expect(Object.keys(event.metadata as object)).toEqual(["artifact_type"]);
+    }
+  });
+
+  it("binds a Transcript export path to the Call's actual Workspace", async () => {
+    const { client, userId } = await createWorkspaceMember();
+    const { callId } = await createCall(userId, { status: "ready" });
+    const validPath = `${workspaceId}/${callId}/artifacts/transcript.txt`;
+    const forgedPath = `${crypto.randomUUID()}/${callId}/artifacts/transcript.txt`;
+
+    try {
+      const { error: validError } = await client.storage
+        .from("recordings")
+        .upload(validPath, new Blob(["safe transcript fixture"]));
+      if (validError) throw validError;
+
+      const { error: forgedError } = await client.storage
+        .from("recordings")
+        .upload(forgedPath, new Blob(["must not be accepted"]));
+      expect(forgedError?.message).toMatch(/row-level security|policy/i);
+    } finally {
+      await admin.storage.from("recordings").remove([validPath, forgedPath]);
+    }
+  });
+
+  it("fails safely for unauthorized, deleted, and cross-Workspace downloads", async () => {
+    const otherWorkspaceId = crypto.randomUUID();
+    await admin.from("workspaces").insert({
+      id: otherWorkspaceId,
+      name: "Other export pilot",
+      slug: `export-${otherWorkspaceId.slice(0, 8)}`,
+    });
+    createdWorkspaceIds.push(otherWorkspaceId);
+
+    const { userId: ownerId } = await createWorkspaceMember();
+    const { client: colleagueClient } = await createWorkspaceMember();
+    const { client: outsiderClient } = await createWorkspaceMember(
+      "admin",
+      otherWorkspaceId
+    );
+    const { callId } = await createCall(ownerId, { status: "ready" });
+
+    // Another Member Role in the same Workspace has no claim on this Call.
+    const { error: colleagueDenied } = await colleagueClient.rpc(
+      "authorize_call_download",
+      { target_call_id: callId, target_artifact: "mp3" }
+    );
+    expect(colleagueDenied?.message).toContain("Call not found");
+
+    // Neither does an Admin of a different Workspace.
+    const { error: outsiderDenied } = await outsiderClient.rpc(
+      "authorize_call_download",
+      { target_call_id: callId, target_artifact: "mp3" }
+    );
+    expect(outsiderDenied?.message).toContain("Call not found");
+
+    // A Call that never existed answers the same way, revealing nothing.
+    const { error: unknownDenied } = await colleagueClient.rpc(
+      "authorize_call_download",
+      { target_call_id: crypto.randomUUID(), target_artifact: "mp3" }
+    );
+    expect(unknownDenied?.message).toContain("Call not found");
+
+    const { data: refusals } = await admin
+      .from("audit_events")
+      .select("id")
+      .eq("action", "call.download.created")
+      .eq("entity_id", callId);
+    // A refused download is not a handover, so it writes no handover event.
+    expect(refusals).toHaveLength(0);
+  });
+
+  it("refuses an export for a deleted Call and rate-limits the rest", async () => {
+    const { client, userId } = await createWorkspaceMember();
+    const { callId: deletedCallId } = await createCall(userId, {
+      status: "ready",
+      deleted_at: new Date().toISOString(),
+    });
+    const { error: deletedDenied } = await client.rpc(
+      "authorize_call_download",
+      { target_call_id: deletedCallId, target_artifact: "mp3" }
+    );
+    expect(deletedDenied?.message).toContain("Call not found");
+
+    // Ten Transcript exports per Call per hour, shared with retries.
+    const { callId } = await createCall(userId, { status: "ready" });
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const { error } = await client.rpc("authorize_call_download", {
+        target_call_id: callId,
+        target_artifact: "transcript_txt",
+      });
+      if (error) throw error;
+    }
+    const { error: exportLimited } = await client.rpc(
+      "authorize_call_download",
+      { target_call_id: callId, target_artifact: "transcript_txt" }
+    );
+    expect(exportLimited?.message).toContain("Too many exports");
+
+    // Sixty signed downloads per Workspace Member per hour, across Calls.
+    const { callId: secondCallId } = await createCall(userId, {
+      status: "ready",
+    });
+    let limitedAt = 0;
+    for (let attempt = 0; attempt < 60 && limitedAt === 0; attempt += 1) {
+      const { error } = await client.rpc("authorize_call_download", {
+        target_call_id: secondCallId,
+        target_artifact: "mp3",
+      });
+      if (error) limitedAt = attempt;
+    }
+    // Ten were already spent above, so the sixty-first overall is refused.
+    expect(limitedAt).toBeGreaterThan(0);
+    expect(limitedAt).toBeLessThanOrEqual(50);
+  });
+
+  it("holds work rather than spending against an unpriced model", async () => {
+    const { userId } = await createWorkspaceMember();
+    const { callId } = await createCall(userId, {
+      status: "queued",
+      duration_ms: ms("1h"),
+      stopped_at: new Date().toISOString(),
+    });
+    const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
+    await admin.from("processing_jobs").insert({
+      id: jobId,
+      workspace_id: workspaceId,
+      call_id: callId,
+      kind: "process_recording",
+      status: "queued",
+      idempotency_key: `budget-unpriced:${callId}`,
+    });
+
+    const { error: pricingError } = await admin
+      .from("provider_pricing")
+      .update({ is_active: false })
+      .neq("model", "");
+    if (pricingError) throw pricingError;
+    try {
+      const { error: assertError } = await admin.rpc(
+        "assert_transcription_models_priced",
+        { target_models: ["openai/whisper-large-v3-turbo"] }
+      );
+      expect(assertError?.message).toContain("No active provider pricing");
+
+      const { data: claimed } = await admin.rpc("claim_processing_job", {
+        worker_name: "unpriced-worker",
+      });
+      expect(claimed).toHaveLength(0);
+      const { data: heldJob } = await admin
+        .from("processing_jobs")
+        .select("status, attempts, budget_paused_reason")
+        .eq("id", jobId)
+        .single();
+      expect(heldJob).toEqual({
+        status: "budget_paused",
+        attempts: 0,
+        budget_paused_reason: "pricing_unconfigured",
+      });
+    } finally {
+      await admin
+        .from("provider_pricing")
+        .update({ is_active: true })
+        .neq("model", "");
+    }
   });
 });

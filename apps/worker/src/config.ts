@@ -1,3 +1,5 @@
+import { PILOT_WORKER_CONCURRENCY } from "./capacity.js";
+
 function required(name: string) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -19,11 +21,17 @@ export const config = {
   openRouterKey: required("OPENROUTER_API_KEY"),
   transcriptionModel:
     process.env.OPENROUTER_STT_MODEL?.trim() || "openai/whisper-large-v3-turbo",
+  // The worker can fall back mid-job, so this model has to be priced too.
+  transcriptionFallbackModel:
+    process.env.OPENROUTER_STT_FALLBACK_MODEL?.trim() ||
+    "openai/whisper-large-v3",
   transcriptionLanguage: process.env.TRANSCRIPTION_LANGUAGE?.trim() || "",
   ffmpegPath: process.env.FFMPEG_PATH?.trim() || "ffmpeg",
   ffprobePath: process.env.FFPROBE_PATH?.trim() || "ffprobe",
   pollMs: positiveInteger("WORKER_POLL_MS", 2_000),
-  concurrency: positiveInteger("WORKER_CONCURRENCY", 1),
+  budgetResumeMs: positiveInteger("WORKER_BUDGET_RESUME_MS", 60_000),
+  // Sized from the recorded five-Call burst, not chosen. See capacity.ts.
+  concurrency: positiveInteger("WORKER_CONCURRENCY", PILOT_WORKER_CONCURRENCY),
   port: positiveInteger("PORT", 8_080),
   workerName:
     process.env.RAILWAY_REPLICA_ID ||

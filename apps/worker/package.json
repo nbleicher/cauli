@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@calllog/shared": "2.0.0",
+    "@sentry/node": "^10.68.0",
     "@supabase/supabase-js": "^2.110.8"
   },
   "devDependencies": {

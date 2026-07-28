@@ -1,4 +1,9 @@
-import type { CallStatus, ReviewStatus, SourceMode } from "@calllog/shared";
+import {
+  ACTIVE_CALL_STATUSES,
+  type CallStatus,
+  type ReviewStatus,
+  type SourceMode,
+} from "@calllog/shared";
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -291,9 +296,7 @@ export default async function CallDetailPage({
       />
       <ProcessingPoller
         active={
-          ["recording", "uploading", "queued", "processing"].includes(
-            rawCall.status
-          ) || Boolean(activeExport)
+          ACTIVE_CALL_STATUSES.includes(rawCall.status) || Boolean(activeExport)
         }
       />
       <CallDetailClient

@@ -1,6 +1,10 @@
 import type { Role } from "@calllog/shared";
 import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/PageHeader";
+import {
+  ProcessingBudgetPanel,
+  type ProcessingBudgetStatus,
+} from "@/components/ProcessingBudgetPanel";
 import { WorkspaceAdmin } from "@/components/WorkspaceAdmin";
 import { requirePageAuth } from "@/lib/server/auth";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
@@ -27,6 +31,7 @@ export default async function WorkspaceAdminPage() {
     { data: mfaStatusResult },
     { data: recoveryLockouts },
     { data: workspace },
+    { data: budgetStatus },
   ] = await Promise.all([
     supabase
       .from("workspace_members")
@@ -54,6 +59,7 @@ export default async function WorkspaceAdminPage() {
       .select("retention_days")
       .eq("id", member.workspaceId)
       .single(),
+    supabase.rpc("workspace_processing_budget_status"),
   ]);
   const mfaStatuses = new Map(
     (
@@ -71,6 +77,11 @@ export default async function WorkspaceAdminPage() {
         title="Workspace Admin"
         description="Invite Workspace Members and control access."
       />
+      {budgetStatus && (
+        <ProcessingBudgetPanel
+          status={budgetStatus as unknown as ProcessingBudgetStatus}
+        />
+      )}
       <WorkspaceAdmin
         currentUserId={user.id}
         retentionDays={workspace?.retention_days ?? 90}
