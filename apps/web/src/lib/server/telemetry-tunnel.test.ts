@@ -1,4 +1,5 @@
 import { findForbiddenTelemetry } from "@calllog/shared";
+import { createEventEnvelope, serializeEnvelope } from "@sentry/core";
 import { describe, expect, it } from "vitest";
 import { parseDsn, prepareTelemetryEnvelope } from "./telemetry-tunnel";
 
@@ -53,7 +54,7 @@ describe("telemetry tunnel", () => {
     });
   });
 
-  it("drops events from routes that are never sampled", () => {
+  it("drops trace transactions from routes that are never sampled", () => {
     const polling = envelope({ event_id: "1" }, [
       [{ type: "transaction" }, { transaction: "/api/health" }],
       [
@@ -70,6 +71,77 @@ describe("telemetry tunnel", () => {
       body: null,
       droppedItems: 2,
     });
+  });
+
+  it("forwards scrubbed errors even when they happen on an excluded trace route", () => {
+    const pollingError = envelope({ event_id: "1" }, [
+      [
+        { type: "event" },
+        {
+          transaction: "/api/health",
+          level: "error",
+          message: "health failed for dana@example.com",
+          request: {
+            url: "https://app.cauli.pro/api/health?token=abc",
+          },
+        },
+      ],
+    ]);
+
+    const prepared = prepareTelemetryEnvelope(pollingError, dsn);
+    expect(prepared).toMatchObject({
+      droppedItems: 0,
+      reason: "forwarded",
+    });
+    expect(prepared.body).not.toBeNull();
+    expect(prepared.body).not.toContain("dana@example.com");
+    expect(prepared.body).not.toContain("token=abc");
+    expect(
+      findForbiddenTelemetry(prepared.body!.split("\n").slice(1).join("\n"))
+    ).toEqual([]);
+  });
+
+  it("preserves validated protocol fields from an actual Sentry SDK envelope", () => {
+    const sdkEnvelope = createEventEnvelope(
+      {
+        event_id: "0123456789abcdef0123456789abcdef",
+        level: "error",
+        message: "failed for dana@example.com",
+      },
+      {
+        protocol: "https",
+        publicKey: dsn.publicKey,
+        host: dsn.host,
+        path: "",
+        projectId: dsn.projectId,
+      },
+      {
+        sdk: {
+          name: "sentry.javascript.nextjs",
+          version: "10.68.0",
+        },
+      },
+      "/monitor"
+    );
+    const raw = serializeEnvelope(sdkEnvelope);
+    expect(typeof raw).toBe("string");
+
+    const prepared = prepareTelemetryEnvelope(raw as string, dsn);
+    expect(prepared.reason).toBe("forwarded");
+    const [headerLine] = prepared.body!.split("\n");
+    const header = JSON.parse(headerLine!) as Record<string, unknown>;
+    expect(header).toMatchObject({
+      event_id: "0123456789abcdef0123456789abcdef",
+      sdk: {
+        name: "sentry.javascript.nextjs",
+        version: "10.68.0",
+      },
+      dsn: "https://publickey@o4507.ingest.us.sentry.io/6001",
+    });
+    expect(new Date(header.sent_at as string).toISOString()).toBe(
+      header.sent_at
+    );
+    expect(prepared.body).not.toContain("dana@example.com");
   });
 
   it("scrubs the canary out of a real-shaped event before forwarding", () => {

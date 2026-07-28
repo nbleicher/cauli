@@ -77,6 +77,48 @@ export interface PreparedEnvelope {
   reason: string;
 }
 
+const EVENT_ID = /^[a-f0-9]{32}$/i;
+const SDK_NAME = /^sentry\.javascript\.[a-z0-9._-]{1,64}$/;
+const SDK_VERSION = /^\d+\.\d+\.\d+(?:[-+][a-z0-9.-]{1,64})?$/i;
+
+/**
+ * Envelope headers are transport protocol, not event data. Rebuild the small
+ * subset Relay needs instead of passing protocol values through the content
+ * scrubber (which correctly rejects arbitrary timestamps and SDK prose).
+ */
+function prepareEnvelopeHeader(
+  header: Record<string, unknown>,
+  configuredDsn: ParsedDsn
+) {
+  const prepared: Record<string, unknown> = {};
+
+  if (typeof header.event_id === "string" && EVENT_ID.test(header.event_id)) {
+    prepared.event_id = header.event_id;
+  }
+
+  if (typeof header.sent_at === "string") {
+    const timestamp = new Date(header.sent_at);
+    if (Number.isFinite(timestamp.valueOf())) {
+      prepared.sent_at = timestamp.toISOString();
+    }
+  }
+
+  if (typeof header.sdk === "object" && header.sdk !== null) {
+    const sdk = header.sdk as Record<string, unknown>;
+    if (
+      typeof sdk.name === "string" &&
+      SDK_NAME.test(sdk.name) &&
+      typeof sdk.version === "string" &&
+      SDK_VERSION.test(sdk.version)
+    ) {
+      prepared.sdk = { name: sdk.name, version: sdk.version };
+    }
+  }
+
+  prepared.dsn = `https://${configuredDsn.publicKey}@${configuredDsn.host}/${configuredDsn.projectId}`;
+  return prepared;
+}
+
 /**
  * Rebuilds an envelope from only the parts that are allowed to leave. Returns
  * a null body when there is nothing left to send, which the caller reports as
@@ -109,12 +151,9 @@ export function prepareTelemetryEnvelope(
       return { body: null, droppedItems: 0, reason: "foreign_dsn" };
     }
   }
-  // The DSN is restored after scrubbing, because scrubbing correctly treats it
-  // as a URL and the provider cannot route an envelope without it.
-  const scrubbedHeader = scrubTelemetryValue(header) as Record<string, unknown>;
-  scrubbedHeader.dsn = `https://${configuredDsn.publicKey}@${configuredDsn.host}/${configuredDsn.projectId}`;
+  const preparedHeader = prepareEnvelopeHeader(header, configuredDsn);
 
-  const output = [JSON.stringify(scrubbedHeader)];
+  const output = [JSON.stringify(preparedHeader)];
   let droppedItems = 0;
 
   while (lines.length) {
@@ -140,6 +179,7 @@ export function prepareTelemetryEnvelope(
     }
 
     if (
+      type === "transaction" &&
       routesOf(payload).some(
         (route) => classifyTelemetryRoute(route) === "excluded"
       )
