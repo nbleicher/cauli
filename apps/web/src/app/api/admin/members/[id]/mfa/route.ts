@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { isAuthError, requireApiAuth } from "@/lib/server/auth";
+import {
+  isAuthError,
+  requireApiAuth,
+  requireFreshMfa,
+} from "@/lib/server/auth";
 import { sanitizeError } from "@/lib/server/http";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
@@ -14,6 +18,8 @@ export async function DELETE(
 ) {
   const auth = await requireApiAuth(["admin"]);
   if (isAuthError(auth)) return auth;
+  const stale = await requireFreshMfa();
+  if (stale) return stale;
   const { id } = await params;
   // The identity endpoint refuses this too; answering here keeps the denial a
   // 403 instead of a failed Edge Function invocation.

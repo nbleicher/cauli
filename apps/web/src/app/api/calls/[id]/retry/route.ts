@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { authorizeCall } from "@/lib/server/calls";
 import { isAuthError, requireApiAuth } from "@/lib/server/auth";
-import { sanitizeError } from "@/lib/server/http";
+import { rateLimitResponse, sanitizeError } from "@/lib/server/http";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export async function POST(
@@ -27,6 +27,8 @@ export async function POST(
   });
 
   if (error) {
+    const limited = await rateLimitResponse(error, supabase, "call.reprocess");
+    if (limited) return limited;
     return NextResponse.json(
       {
         error: sanitizeError(error),

@@ -125,6 +125,12 @@ function constantTimeEquals(left: string, right: string) {
   return difference === 0;
 }
 
+/** The address the request arrived from, as the proxy reported it. */
+function callerAddress(request: Request) {
+  const forwarded = request.headers.get("x-forwarded-for") ?? "";
+  return forwarded.split(",")[0]?.trim() || "unknown";
+}
+
 function safeMessage(error: unknown) {
   console.error(
     "identity.operation_failed",
@@ -170,6 +176,22 @@ Deno.serve(async (request) => {
         return jsonResponse({ accepted: true }, 202);
       }
       const email = body.email.trim().toLowerCase();
+      const admin = createClient(supabaseUrl, serviceRoleKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+
+      // Throttled per address and origin together, and answered exactly like an
+      // accepted request: revealing the limit would reveal the address.
+      const { data: allowance } = await admin.rpc("consume_rate_limit", {
+        target_bucket: "auth.password_reset",
+        target_subject: `${email}|${callerAddress(request)}`,
+        max_attempts: 5,
+        target_window: "1 hour",
+      });
+      if (allowance !== "allowed") {
+        return jsonResponse({ accepted: true }, 202);
+      }
+
       const anonymous = createClient(supabaseUrl, anonKey, {
         auth: { persistSession: false },
       });
@@ -177,9 +199,6 @@ Deno.serve(async (request) => {
         redirectTo: redirect.toString(),
       });
 
-      const admin = createClient(supabaseUrl, serviceRoleKey, {
-        auth: { autoRefreshToken: false, persistSession: false },
-      });
       const { data: profile } = await admin
         .from("profiles")
         .select("id")
@@ -248,6 +267,17 @@ Deno.serve(async (request) => {
     }
 
     if (body.action === "redeem_recovery_code") {
+      // Repeated failures close recovery for an hour. Checked before the
+      // password so a lockout cannot be used to test passwords either.
+      const { data: locked, error: lockedError } = await admin.rpc(
+        "mfa_recovery_locked",
+        { target_user_id: user.id }
+      );
+      if (lockedError) throw lockedError;
+      if (locked) {
+        return jsonResponse({ error: "Recovery could not be verified" }, 401);
+      }
+
       // The session alone is not enough: a Recovery Code only authorizes a
       // factor replacement once the password has been proven again.
       const anonymous = createClient(supabaseUrl, anonKey, {
@@ -285,7 +315,7 @@ Deno.serve(async (request) => {
 
       if (!matchedId) {
         const { error: failureError } = await admin.rpc(
-          "record_mfa_recovery_failure",
+          "register_mfa_recovery_failure",
           { target_user_id: user.id }
         );
         if (failureError) throw failureError;

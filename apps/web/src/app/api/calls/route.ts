@@ -1,7 +1,7 @@
 import { createCallSchema } from "@calllog/shared";
 import { NextResponse } from "next/server";
 import { isAuthError, requireApiAuth } from "@/lib/server/auth";
-import { parseJson, sanitizeError } from "@/lib/server/http";
+import { parseJson, rateLimitResponse, sanitizeError } from "@/lib/server/http";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export async function POST(request: Request) {
@@ -21,6 +21,8 @@ export async function POST(request: Request) {
   });
 
   if (error) {
+    const limited = await rateLimitResponse(error, supabase, "call.create");
+    if (limited) return limited;
     return NextResponse.json({ error: sanitizeError(error) }, { status: 500 });
   }
   const call = Array.isArray(data) ? data[0] : data;

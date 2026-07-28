@@ -31,6 +31,24 @@ export async function GET(
   }
 
   const supabase = await createServerSupabaseClient();
+  // Signed delivery writes no row of its own, so this is the one limit the
+  // application has to ask the database for.
+  const { data: allowance, error: allowanceError } = await supabase.rpc(
+    "consume_signed_download_allowance"
+  );
+  if (allowanceError) {
+    return NextResponse.json(
+      { error: sanitizeError(allowanceError) },
+      { status: 500 }
+    );
+  }
+  if (allowance !== "allowed") {
+    return NextResponse.json(
+      { error: "Too many downloads this hour." },
+      { status: 429 }
+    );
+  }
+
   const { data, error } = await supabase.storage
     .from("recordings")
     .createSignedUrl(path, 600, {

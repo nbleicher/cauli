@@ -30,7 +30,12 @@ function MfaGate() {
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
   const factorId = useRef("");
   const enrollmentStarted = useRef(false);
-  const destination = useRef("/record");
+  // Only same-site paths are honoured, so a re-assertion link cannot be used to
+  // bounce a verified session somewhere else.
+  const requestedNext = searchParams.get("next") ?? "";
+  const destination = useRef(
+    /^\/[^/\\]/.test(requestedNext) ? requestedNext : "/record"
+  );
 
   const audit = useCallback(
     async (action: string) => {

@@ -17,6 +17,19 @@ export interface AuthContext {
   mfaRecoveryPending: boolean;
 }
 
+export type SessionLockReason = "inactivity" | "absolute";
+
+/**
+ * Reads why the current session is locked without recording activity. Only the
+ * failure path needs this, so the ordinary request pays nothing for it.
+ */
+export async function getSessionLockReason(): Promise<SessionLockReason | null> {
+  if (!isSupabaseConfigured()) return null;
+  const supabase = await createServerSupabaseClient();
+  const { data } = await supabase.rpc("session_lock_reason");
+  return data === "inactivity" || data === "absolute" ? data : null;
+}
+
 export async function getAuthContext(): Promise<AuthContext | null> {
   if (!isSupabaseConfigured()) return null;
   const supabase = await createServerSupabaseClient();
@@ -24,6 +37,12 @@ export async function getAuthContext(): Promise<AuthContext | null> {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return null;
+
+  // Marks the session in use and reports if it has aged out. The database
+  // applies the same verdict to every policy, so a locked session cannot get
+  // further by talking to PostgREST instead of to this application.
+  const { data: lockReason } = await supabase.rpc("touch_session_activity");
+  if (lockReason) return null;
 
   const { data: membership } = await supabase
     .from("workspace_members")
@@ -77,7 +96,11 @@ export async function requirePageSecondFactor(context: AuthContext) {
 
 export async function requirePageAuth() {
   const context = await getAuthContext();
-  if (!context) redirect(isSupabaseConfigured() ? "/login" : "/setup");
+  if (!context) {
+    if (!isSupabaseConfigured()) redirect("/setup");
+    const lockReason = await getSessionLockReason();
+    redirect(lockReason ? `/login?locked=${lockReason}` : "/login");
+  }
   await requirePageSecondFactor(context);
   const supabase = await createServerSupabaseClient();
   const { data: legalReady, error: legalError } = await supabase.rpc(
@@ -111,12 +134,43 @@ export async function secondFactorApiError(context: AuthContext) {
   return null;
 }
 
+// How recently a second factor must have been presented for an action that
+// changes who holds authority. Short enough that a walked-away session cannot
+// be used to grant access, long enough not to interrupt one sitting of work.
+const freshMfaWindow = "15 minutes";
+
+/**
+ * Guards an action that alters authority. Returns a response to send when the
+ * caller's second factor is too old to stand behind it, telling the client to
+ * re-assert rather than leaving it to guess.
+ */
+export async function requireFreshMfa() {
+  const supabase = await createServerSupabaseClient();
+  const { data } = await supabase.rpc("recent_mfa_assertion", {
+    max_age: freshMfaWindow,
+  });
+  if (data === true) return null;
+  return NextResponse.json(
+    {
+      error: "Confirm your authenticator to continue",
+      reassert: true,
+    },
+    { status: 401 }
+  );
+}
+
 export async function requireApiAuth(
   allowedRoles?: Role[]
 ): Promise<AuthContext | NextResponse> {
   const context = await getAuthContext();
   if (!context) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const lockReason = await getSessionLockReason();
+    return NextResponse.json(
+      {
+        error: lockReason ? "Session locked. Sign in again." : "Unauthorized",
+      },
+      { status: 401 }
+    );
   }
   const secondFactorError = await secondFactorApiError(context);
   if (secondFactorError) return secondFactorError;

@@ -69,6 +69,9 @@ afterEach(async () => {
     .from("workspaces")
     .update({ legal_gate_required: false })
     .eq("id", workspaceId);
+  // Rate-limit counters are Workspace- and Call-scoped, so one test's spending
+  // would otherwise be charged to the next.
+  await admin.from("rate_limit_state").delete().neq("bucket", "");
 });
 
 async function createWorkspaceMember(
@@ -147,6 +150,15 @@ function totpCode(secret: string) {
     ((digest[offset + 2]! & 0xff) << 8) |
     (digest[offset + 3]! & 0xff);
   return (binary % 1_000_000).toString().padStart(6, "0");
+}
+
+function ms(span: string) {
+  const units: Record<string, number> = {
+    m: 60_000,
+    h: 3_600_000,
+  };
+  const amount = Number.parseInt(span, 10);
+  return amount * units[span.slice(-1)]!;
 }
 
 async function createCall(
@@ -800,6 +812,201 @@ describe.skipIf(
     for (const hash of [...firstHashes, ...secondHashes]) {
       expect(serializedAudit).not.toContain(hash);
     }
+  });
+
+  it("locks an idle session, spares an active Recording, and expires at twelve hours", async () => {
+    const member = await createWorkspaceMember("member");
+    const sessionOf = async () => {
+      const { data } = await member.client.rpc("touch_session_activity");
+      return data;
+    };
+    const reasonOf = async () => {
+      const { data } = await member.client.rpc("session_lock_reason");
+      return data;
+    };
+    const backdate = async (column: string, ago: string) => {
+      const { error } = await admin
+        .from("session_activity")
+        .update({ [column]: new Date(Date.now() - ms(ago)).toISOString() })
+        .eq("user_id", member.userId);
+      if (error) throw error;
+    };
+
+    expect(await sessionOf()).toBeNull();
+    expect(await reasonOf()).toBeNull();
+
+    // An active Recording suspends the threshold instead of resetting it.
+    const { callId } = await createCall(member.userId, { status: "recording" });
+    await backdate("last_seen_at", "31m");
+    expect(await reasonOf()).toBeNull();
+    expect(await sessionOf()).toBeNull();
+    const { data: roleWhileRecording } = await member.client.rpc(
+      "current_user_role",
+      { target_workspace_id: workspaceId }
+    );
+    expect(roleWhileRecording).toBe("member");
+
+    // Stop & Save ends the exception, and the elapsed threshold applies at once.
+    const { error: finalizeError } = await admin
+      .from("calls")
+      .update({ status: "ready" })
+      .eq("id", callId);
+    if (finalizeError) throw finalizeError;
+    expect(await reasonOf()).toBe("inactivity");
+    expect(await sessionOf()).toBe("inactivity");
+
+    // The lock is written down, so a later request cannot revive the session.
+    const { error: reviveError } = await admin
+      .from("session_activity")
+      .update({ last_seen_at: new Date().toISOString() })
+      .eq("user_id", member.userId);
+    if (reviveError) throw reviveError;
+    expect(await reasonOf()).toBe("inactivity");
+    const { data: roleWhileLocked } = await member.client.rpc(
+      "current_user_role",
+      { target_workspace_id: workspaceId }
+    );
+    expect(roleWhileLocked).toBeNull();
+
+    const { error: clearError } = await admin
+      .from("session_activity")
+      .update({ locked_at: null, lock_reason: null })
+      .eq("user_id", member.userId);
+    if (clearError) throw clearError;
+    await backdate("started_at", "13h");
+    expect(await reasonOf()).toBe("absolute");
+  });
+
+  it("applies each documented abuse limit at the database boundary", async () => {
+    const member = await createWorkspaceMember("member");
+    const workspaceAdmin = await createWorkspaceMember("admin");
+
+    // Bucket semantics: the allowance is spent, then the window resets it.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const { data } = await admin.rpc("consume_rate_limit", {
+        target_bucket: "test.bucket",
+        target_subject: member.userId,
+        max_attempts: 3,
+        target_window: "1 hour",
+      });
+      expect(data).toBe("allowed");
+    }
+    const { data: spent } = await admin.rpc("consume_rate_limit", {
+      target_bucket: "test.bucket",
+      target_subject: member.userId,
+      max_attempts: 3,
+      target_window: "1 hour",
+    });
+    expect(spent).toBe("limited");
+    const { error: rewindError } = await admin
+      .from("rate_limit_state")
+      .update({
+        window_started_at: new Date(Date.now() - ms("2h")).toISOString(),
+      })
+      .eq("bucket", "test.bucket");
+    if (rewindError) throw rewindError;
+    const { data: renewed } = await admin.rpc("consume_rate_limit", {
+      target_bucket: "test.bucket",
+      target_subject: member.userId,
+      max_attempts: 3,
+      target_window: "1 hour",
+    });
+    expect(renewed).toBe("allowed");
+
+    // Invitations: twenty an hour per Workspace, enforced on the table itself.
+    for (let issued = 1; issued <= 20; issued += 1) {
+      const { error } = await workspaceAdmin.client.rpc(
+        "create_workspace_invite",
+        {
+          target_email: `limit-${crypto.randomUUID()}@example.com`,
+          target_role: "member",
+        }
+      );
+      expect(error).toBeNull();
+    }
+    const { error: throttledInvite } = await workspaceAdmin.client.rpc(
+      "create_workspace_invite",
+      {
+        target_email: `limit-${crypto.randomUUID()}@example.com`,
+        target_role: "member",
+      }
+    );
+    expect(throttledInvite?.message).toMatch(/too many workspace invitations/i);
+
+    // Signed delivery: sixty an hour per Workspace Member.
+    for (let issued = 1; issued <= 60; issued += 1) {
+      const { data } = await member.client.rpc(
+        "consume_signed_download_allowance"
+      );
+      expect(data).toBe("allowed");
+    }
+    const { data: throttledDownload } = await member.client.rpc(
+      "consume_signed_download_allowance"
+    );
+    expect(throttledDownload).toBe("limited");
+
+    // Recording chunk upload is deliberately outside every counter.
+    const { data: buckets } = await admin
+      .from("rate_limit_state")
+      .select("bucket");
+    expect(
+      (buckets ?? []).map((row: { bucket: string }) => row.bucket)
+    ).not.toContain("recording.chunk");
+
+    const { data: exceeded } = await admin
+      .from("audit_events")
+      .select("action, metadata")
+      .eq("action", "security.rate_limit.exceeded");
+    expect((exceeded ?? []).length).toBeGreaterThan(0);
+    expect(JSON.stringify(exceeded)).not.toContain(member.userId);
+  });
+
+  it("locks Recovery Code attempts after five failures and alerts an Admin", async () => {
+    const member = await createWorkspaceMember("member");
+
+    for (let failure = 1; failure <= 5; failure += 1) {
+      const { data } = await admin.rpc("register_mfa_recovery_failure", {
+        target_user_id: member.userId,
+      });
+      expect(data).toBe("allowed");
+    }
+    const { data: locked } = await admin.rpc("register_mfa_recovery_failure", {
+      target_user_id: member.userId,
+    });
+    expect(locked).toBe("locked");
+
+    const { data: isLocked } = await admin.rpc("mfa_recovery_locked", {
+      target_user_id: member.userId,
+    });
+    expect(isLocked).toBe(true);
+
+    const { data: audit, error: auditError } = await admin
+      .from("audit_events")
+      .select("action, metadata")
+      .eq("entity_id", member.userId);
+    if (auditError) throw auditError;
+    const actions = audit.map((event) => event.action);
+    expect(actions).toEqual(
+      expect.arrayContaining([
+        "auth.mfa.recovery_failed",
+        "auth.mfa.recovery_locked",
+      ])
+    );
+    expect(
+      actions.filter((action) => action === "auth.mfa.recovery_locked")
+    ).toHaveLength(1);
+
+    const { error: expireError } = await admin
+      .from("rate_limit_state")
+      .update({
+        locked_until: new Date(Date.now() - ms("1m")).toISOString(),
+      })
+      .eq("bucket", "auth.recovery");
+    if (expireError) throw expireError;
+    const { data: reopened } = await admin.rpc("mfa_recovery_locked", {
+      target_user_id: member.userId,
+    });
+    expect(reopened).toBe(false);
   });
 
   it("requires immutable current Legal Document acceptance before gated access", async () => {

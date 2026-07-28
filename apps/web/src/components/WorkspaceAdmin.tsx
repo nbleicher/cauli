@@ -29,14 +29,29 @@ interface Invite {
   expiresAt: string;
 }
 
+/**
+ * Authority-changing actions need a second factor presented recently, not just
+ * a session that once had one. When the server says the assertion is stale,
+ * send the Admin to re-present it and come straight back.
+ */
+function reassertIfRequired(result: { reassert?: boolean }) {
+  if (!result?.reassert) return false;
+  window.location.assign(
+    `/auth/mfa?next=${encodeURIComponent(window.location.pathname)}`
+  );
+  return true;
+}
+
 export function WorkspaceAdmin({
   members,
   invites,
   currentUserId,
+  recoveryLockouts = [],
 }: {
   members: Member[];
   invites: Invite[];
   currentUserId: string;
+  recoveryLockouts?: string[];
 }) {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -56,7 +71,10 @@ export function WorkspaceAdmin({
         body: JSON.stringify({ email, role }),
       });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || "Invitation failed");
+      if (!response.ok) {
+        if (reassertIfRequired(result)) return;
+        throw new Error(result.error || "Invitation failed");
+      }
       setEmail("");
       router.refresh();
     } catch (inviteError) {
@@ -83,6 +101,7 @@ export function WorkspaceAdmin({
       });
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
+        if (reassertIfRequired(result)) return;
         throw new Error(result.error || "Member update failed");
       }
       router.refresh();
@@ -106,6 +125,7 @@ export function WorkspaceAdmin({
       });
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
+        if (reassertIfRequired(result)) return;
         throw new Error(result.error || "Member removal failed");
       }
       router.refresh();
@@ -128,8 +148,10 @@ export function WorkspaceAdmin({
         method: "DELETE",
       });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok)
+      if (!response.ok) {
+        if (reassertIfRequired(result)) return;
         throw new Error(result.error || "Could not reset two-factor");
+      }
       setNotice(
         result.removed
           ? `Two-factor reset for ${email}. They can sign in with their password and enroll a new device.`
@@ -156,6 +178,7 @@ export function WorkspaceAdmin({
       });
       if (!response.ok) {
         const result = await response.json().catch(() => ({}));
+        if (reassertIfRequired(result)) return;
         throw new Error(result.error || "Invitation could not be revoked");
       }
       router.refresh();
@@ -172,6 +195,19 @@ export function WorkspaceAdmin({
 
   return (
     <>
+      {recoveryLockouts.length > 0 && (
+        <p className="error-banner" role="alert">
+          Recovery Code attempts are locked for{" "}
+          {recoveryLockouts
+            .map(
+              (userId) =>
+                members.find((member) => member.userId === userId)?.email ??
+                "a Workspace Member"
+            )
+            .join(", ")}
+          . Repeated failures locked recovery for one hour.
+        </p>
+      )}
       {error && <p className="error-banner">{error}</p>}
       {notice && <p className="notice-banner">{notice}</p>}
       <section className="admin-section">

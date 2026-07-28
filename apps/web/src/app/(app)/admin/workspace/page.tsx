@@ -21,29 +21,34 @@ export default async function WorkspaceAdminPage() {
   if (member.role !== "admin") redirect("/record");
   const supabase = await createServerSupabaseClient();
 
-  const [{ data: memberships }, { data: invites }, { data: mfaStatusResult }] =
-    await Promise.all([
-      supabase
-        .from("workspace_members")
-        .select(
-          `
+  const [
+    { data: memberships },
+    { data: invites },
+    { data: mfaStatusResult },
+    { data: recoveryLockouts },
+  ] = await Promise.all([
+    supabase
+      .from("workspace_members")
+      .select(
+        `
         user_id, role, status, joined_at,
         profile:profiles!workspace_members_user_id_fkey(email, display_name)
       `
-        )
-        .eq("workspace_id", member.workspaceId)
-        .order("joined_at"),
-      supabase
-        .from("workspace_invites")
-        .select("id, email, role, expires_at")
-        .eq("workspace_id", member.workspaceId)
-        .is("accepted_at", null)
-        .gt("expires_at", new Date().toISOString())
-        .order("created_at", { ascending: false }),
-      supabase.functions.invoke("identity-admin", {
-        body: { action: "list_mfa_status" },
-      }),
-    ]);
+      )
+      .eq("workspace_id", member.workspaceId)
+      .order("joined_at"),
+    supabase
+      .from("workspace_invites")
+      .select("id, email, role, expires_at")
+      .eq("workspace_id", member.workspaceId)
+      .is("accepted_at", null)
+      .gt("expires_at", new Date().toISOString())
+      .order("created_at", { ascending: false }),
+    supabase.functions.invoke("identity-admin", {
+      body: { action: "list_mfa_status" },
+    }),
+    supabase.rpc("workspace_recovery_lockouts"),
+  ]);
   const mfaStatuses = new Map(
     (
       (
@@ -74,6 +79,9 @@ export default async function WorkspaceAdminPage() {
             mfaEnabled: mfaStatuses.get(membership.user_id) ?? false,
           };
         })}
+        recoveryLockouts={(
+          (recoveryLockouts ?? []) as { user_id: string }[]
+        ).map((lockout) => lockout.user_id)}
         invites={(invites ?? []).map((invite) => ({
           id: invite.id,
           email: invite.email,
