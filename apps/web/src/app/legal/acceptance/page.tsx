@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 export default async function LegalAcceptancePage() {
   const auth = await getAuthContext();
   if (!auth) redirect("/login");
-  await requirePageSecondFactor(auth.member.role);
+  await requirePageSecondFactor(auth);
 
   const supabase = await createServerSupabaseClient();
   const { data: documents, error } = await supabase.rpc(

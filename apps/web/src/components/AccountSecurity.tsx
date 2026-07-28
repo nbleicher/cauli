@@ -10,6 +10,7 @@ import {
   ShieldOff,
   Smartphone,
 } from "lucide-react";
+import { RecoveryCodes } from "@/components/RecoveryCodes";
 import { createBrowserSupabaseClient } from "@/lib/supabase/browser";
 
 const MIN_PASSWORD_LENGTH = 12;
@@ -39,6 +40,7 @@ export function AccountSecurity({
   const [code, setCode] = useState("");
   const [mfaBusy, setMfaBusy] = useState(false);
   const [mfaError, setMfaError] = useState("");
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
 
   const refreshFactors = useCallback(async () => {
     const supabase = createBrowserSupabaseClient();
@@ -136,6 +138,27 @@ export function AccountSecurity({
     setEnrolling(null);
     setCode("");
     await refreshFactors();
+    await issueRecoveryCodes();
+  }
+
+  // Every verified enrollment issues a fresh set and retires the previous one,
+  // so the codes on paper always belong to the factor in use.
+  async function issueRecoveryCodes() {
+    setMfaBusy(true);
+    setMfaError("");
+    const response = await fetch("/api/auth/recovery-codes", {
+      method: "POST",
+    });
+    const result = (await response.json().catch(() => ({}))) as {
+      codes?: string[];
+      error?: string;
+    };
+    setMfaBusy(false);
+    if (!response.ok || !result.codes) {
+      setMfaError(result.error ?? "Could not issue Recovery Codes.");
+      return;
+    }
+    setRecoveryCodes(result.codes);
   }
 
   async function removeFactor() {
@@ -232,12 +255,33 @@ export function AccountSecurity({
           )}
         </div>
 
-        {factorId && !enrolling && (
+        {recoveryCodes && (
+          <RecoveryCodes
+            codes={recoveryCodes}
+            onContinue={() => setRecoveryCodes(null)}
+            continueLabel="Done"
+          />
+        )}
+
+        {factorId && !enrolling && !recoveryCodes && (
           <div className="mfa-enabled">
             <p className="muted">
               Two-factor authentication is on. You will be asked for a code each
               time you sign in.
             </p>
+            <button
+              type="button"
+              className="button button-secondary"
+              onClick={() => void issueRecoveryCodes()}
+              disabled={mfaBusy}
+            >
+              {mfaBusy ? (
+                <LoaderCircle className="spin" size={16} />
+              ) : (
+                <ShieldCheck size={16} />
+              )}
+              Generate new Recovery Codes
+            </button>
             {role === "member" ? (
               <button
                 className="button button-danger"

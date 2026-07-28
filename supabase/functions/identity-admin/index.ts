@@ -21,8 +21,28 @@ interface ListMfaStatusRequest {
   action: "list_mfa_status";
 }
 
+interface IssueRecoveryCodesRequest {
+  action: "issue_recovery_codes";
+}
+
+interface RedeemRecoveryCodeRequest {
+  action: "redeem_recovery_code";
+  password: string;
+  code: string;
+}
+
 type IdentityAdminRequest =
-  InviteRequest | ResetMfaRequest | PasswordResetRequest | ListMfaStatusRequest;
+  | InviteRequest
+  | ResetMfaRequest
+  | PasswordResetRequest
+  | ListMfaStatusRequest
+  | IssueRecoveryCodesRequest
+  | RedeemRecoveryCodeRequest;
+
+const recoveryCodeCount = 10;
+// Ambiguous glyphs are omitted so a code read off paper cannot be mistyped
+// into a different valid-looking code.
+const recoveryCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 const jsonHeaders = {
   "Content-Type": "application/json; charset=utf-8",
@@ -55,6 +75,56 @@ function bearerAssuranceLevel(authorization: string) {
   }
 }
 
+/** 32 divides 256, so masking a random byte picks a character without bias. */
+function generateRecoveryCode() {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  const characters = Array.from(
+    bytes,
+    (byte) => recoveryCodeAlphabet[byte & 31]
+  ).join("");
+  return [
+    characters.slice(0, 4),
+    characters.slice(4, 8),
+    characters.slice(8, 12),
+  ].join("-");
+}
+
+/** Accepts the code however it was transcribed: spaced, unspaced, lower case. */
+function normalizeRecoveryCode(code: string) {
+  return code.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+async function keyedRecoveryHash(code: string, key: string) {
+  const encoder = new TextEncoder();
+  const material = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    material,
+    encoder.encode(normalizeRecoveryCode(code))
+  );
+  return Array.from(new Uint8Array(signature))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Compares two hex digests without letting the position of the first
+ * mismatching character show up in the response time. */
+function constantTimeEquals(left: string, right: string) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
 function safeMessage(error: unknown) {
   console.error(
     "identity.operation_failed",
@@ -71,8 +141,9 @@ Deno.serve(async (request) => {
   const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+  const recoveryCodeKey = Deno.env.get("MFA_RECOVERY_CODE_KEY") ?? "";
   const authorization = request.headers.get("Authorization") ?? "";
-  if (!supabaseUrl || !anonKey || !serviceRoleKey) {
+  if (!supabaseUrl || !anonKey || !serviceRoleKey || !recoveryCodeKey) {
     return jsonResponse({ error: "Identity service is not configured" }, 503);
   }
   if (!authorization) return jsonResponse({ error: "Unauthorized" }, 401);
@@ -83,7 +154,9 @@ Deno.serve(async (request) => {
       candidate.action !== "invite" &&
       candidate.action !== "reset_mfa" &&
       candidate.action !== "request_password_reset" &&
-      candidate.action !== "list_mfa_status"
+      candidate.action !== "list_mfa_status" &&
+      candidate.action !== "issue_recovery_codes" &&
+      candidate.action !== "redeem_recovery_code"
     ) {
       return jsonResponse({ error: "Unsupported identity action" }, 400);
     }
@@ -143,6 +216,106 @@ Deno.serve(async (request) => {
     } = await caller.auth.getUser();
     if (userError || !user) return jsonResponse({ error: "Unauthorized" }, 401);
 
+    const admin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    });
+
+    // Recovery Codes belong to the Workspace Member, not to Workspace Admin
+    // authority, so both actions are settled before the Admin gate below.
+    if (body.action === "issue_recovery_codes") {
+      if (bearerAssuranceLevel(authorization) !== "aal2") {
+        return jsonResponse(
+          { error: "A verified second factor is required" },
+          401
+        );
+      }
+      const codes = Array.from({ length: recoveryCodeCount }, () =>
+        generateRecoveryCode()
+      );
+      const hashes = await Promise.all(
+        codes.map((code) => keyedRecoveryHash(code, recoveryCodeKey))
+      );
+      const { error: replaceError } = await admin.rpc(
+        "replace_mfa_recovery_codes",
+        { target_user_id: user.id, target_code_hashes: hashes }
+      );
+      if (replaceError) throw replaceError;
+      // The only time these values leave the service.
+      return jsonResponse({ codes }, 201);
+    }
+
+    if (body.action === "redeem_recovery_code") {
+      // The session alone is not enough: a Recovery Code only authorizes a
+      // factor replacement once the password has been proven again.
+      const anonymous = createClient(supabaseUrl, anonKey, {
+        auth: { persistSession: false },
+      });
+      const { error: passwordError } = await anonymous.auth.signInWithPassword({
+        email: user.email ?? "",
+        password: body.password ?? "",
+      });
+      if (passwordError) {
+        return jsonResponse({ error: "Recovery could not be verified" }, 401);
+      }
+
+      const presented = await keyedRecoveryHash(
+        body.code ?? "",
+        recoveryCodeKey
+      );
+      const { data: candidates, error: candidatesError } = await admin.rpc(
+        "active_mfa_recovery_codes",
+        { target_user_id: user.id }
+      );
+      if (candidatesError) throw candidatesError;
+
+      // Every candidate is compared, so neither the matching position nor the
+      // number of remaining codes is observable in the response time.
+      let matchedId: string | null = null;
+      for (const candidate of (candidates ?? []) as {
+        id: string;
+        code_hash: string;
+      }[]) {
+        if (constantTimeEquals(candidate.code_hash, presented)) {
+          matchedId = candidate.id;
+        }
+      }
+
+      if (!matchedId) {
+        const { error: failureError } = await admin.rpc(
+          "record_mfa_recovery_failure",
+          { target_user_id: user.id }
+        );
+        if (failureError) throw failureError;
+        return jsonResponse({ error: "Recovery could not be verified" }, 401);
+      }
+
+      const { data: remaining, error: consumeError } = await admin.rpc(
+        "consume_mfa_recovery_code",
+        { target_code_id: matchedId }
+      );
+      if (consumeError) throw consumeError;
+      if (remaining === null) {
+        // Another request consumed the same code first.
+        return jsonResponse({ error: "Recovery could not be verified" }, 401);
+      }
+
+      const { data: factors, error: factorsError } =
+        await admin.auth.admin.mfa.listFactors({ userId: user.id });
+      if (factorsError) throw factorsError;
+      for (const factor of factors?.factors ?? []) {
+        const { error: deleteError } = await admin.auth.admin.mfa.deleteFactor({
+          userId: user.id,
+          id: factor.id,
+        });
+        if (deleteError) throw deleteError;
+      }
+
+      return jsonResponse({ recovered: true, codesRemaining: remaining });
+    }
+
     const { data: membership, error: membershipError } = await caller
       .from("workspace_members")
       .select("workspace_id, role, status")
@@ -163,13 +336,6 @@ Deno.serve(async (request) => {
         401
       );
     }
-
-    const admin = createClient(supabaseUrl, serviceRoleKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-      },
-    });
 
     if (body.action === "list_mfa_status") {
       const { data: members, error: membersError } = await admin

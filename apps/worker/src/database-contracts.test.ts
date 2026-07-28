@@ -678,6 +678,130 @@ describe.skipIf(
     expect(unchanged.role).toBe("member");
   });
 
+  it("issues Recovery Codes that are single-use, replaceable, and unreadable", async () => {
+    const member = await createWorkspaceMember("member");
+    const hashSet = () =>
+      Array.from({ length: 10 }, () =>
+        createHash("sha256").update(crypto.randomUUID()).digest("hex")
+      );
+    const firstHashes = hashSet();
+
+    const { error: issueError } = await admin.rpc(
+      "replace_mfa_recovery_codes",
+      { target_user_id: member.userId, target_code_hashes: firstHashes }
+    );
+    if (issueError) throw issueError;
+
+    const { data: firstActive, error: firstActiveError } = await admin.rpc(
+      "active_mfa_recovery_codes",
+      { target_user_id: member.userId }
+    );
+    if (firstActiveError) throw firstActiveError;
+    expect(firstActive).toHaveLength(10);
+    expect(
+      firstActive.map((code: { code_hash: string }) => code.code_hash).sort()
+    ).toEqual([...firstHashes].sort());
+
+    const { error: sizeError } = await admin.rpc("replace_mfa_recovery_codes", {
+      target_user_id: member.userId,
+      target_code_hashes: firstHashes.slice(0, 9),
+    });
+    expect(sizeError?.message).toMatch(/exactly ten codes/i);
+
+    // One code, one use: a replay of the same row finds nothing to consume.
+    const { data: remaining, error: consumeError } = await admin.rpc(
+      "consume_mfa_recovery_code",
+      { target_code_id: firstActive[0].id }
+    );
+    if (consumeError) throw consumeError;
+    expect(remaining).toBe(9);
+    const { data: replayed } = await admin.rpc("consume_mfa_recovery_code", {
+      target_code_id: firstActive[0].id,
+    });
+    expect(replayed).toBeNull();
+
+    // Two requests presenting the same code race for one row.
+    const contested = await Promise.all([
+      admin.rpc("consume_mfa_recovery_code", {
+        target_code_id: firstActive[1].id,
+      }),
+      admin.rpc("consume_mfa_recovery_code", {
+        target_code_id: firstActive[1].id,
+      }),
+    ]);
+    expect(contested.filter((outcome) => outcome.data !== null)).toHaveLength(
+      1
+    );
+
+    // Redemption withdraws authority until a replacement factor is verified.
+    const { data: pending, error: pendingError } = await admin
+      .from("workspace_members")
+      .select("mfa_recovery_pending_at")
+      .eq("user_id", member.userId)
+      .single();
+    if (pendingError) throw pendingError;
+    expect(pending.mfa_recovery_pending_at).not.toBeNull();
+    const { data: roleWhilePending } = await member.client.rpc(
+      "current_user_role",
+      { target_workspace_id: workspaceId }
+    );
+    expect(roleWhilePending).toBeNull();
+
+    // Hashes are never readable by the Workspace Member they belong to.
+    const { error: directReadError } = await member.client
+      .from("mfa_recovery_codes")
+      .select("code_hash");
+    expect(directReadError).not.toBeNull();
+
+    const secondHashes = hashSet();
+    const { error: regenerateError } = await admin.rpc(
+      "replace_mfa_recovery_codes",
+      { target_user_id: member.userId, target_code_hashes: secondHashes }
+    );
+    if (regenerateError) throw regenerateError;
+
+    const { data: secondActive } = await admin.rpc(
+      "active_mfa_recovery_codes",
+      { target_user_id: member.userId }
+    );
+    expect(
+      secondActive.map((code: { code_hash: string }) => code.code_hash).sort()
+    ).toEqual([...secondHashes].sort());
+    const { data: obsolete } = await admin.rpc("consume_mfa_recovery_code", {
+      target_code_id: firstActive[2].id,
+    });
+    expect(obsolete).toBeNull();
+
+    const { data: restored } = await admin
+      .from("workspace_members")
+      .select("mfa_recovery_pending_at")
+      .eq("user_id", member.userId)
+      .single();
+    expect(restored?.mfa_recovery_pending_at).toBeNull();
+    const { data: roleAfterReplacement } = await member.client.rpc(
+      "current_user_role",
+      { target_workspace_id: workspaceId }
+    );
+    expect(roleAfterReplacement).toBe("member");
+
+    const { data: audit, error: auditError } = await admin
+      .from("audit_events")
+      .select("action, metadata")
+      .eq("entity_id", member.userId);
+    if (auditError) throw auditError;
+    expect(audit.map((event) => event.action)).toEqual(
+      expect.arrayContaining([
+        "auth.mfa.recovery_codes_generated",
+        "auth.mfa.recovery_codes_regenerated",
+        "auth.mfa.recovery_used",
+      ])
+    );
+    const serializedAudit = JSON.stringify(audit);
+    for (const hash of [...firstHashes, ...secondHashes]) {
+      expect(serializedAudit).not.toContain(hash);
+    }
+  });
+
   it("requires immutable current Legal Document acceptance before gated access", async () => {
     const { client: initialAdmin, userId: initialAdminId } =
       await createWorkspaceMember("admin");

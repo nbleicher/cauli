@@ -15,7 +15,7 @@ export async function POST(request: Request) {
   }
   // This route cannot use requireApiAuth — that gate is exactly what acceptance
   // opens — but the assurance half of it still applies.
-  const secondFactorError = await secondFactorApiError(auth.member.role);
+  const secondFactorError = await secondFactorApiError(auth);
   if (secondFactorError) return secondFactorError;
   const parsed = await parseJson(request, acceptanceSchema);
   if (parsed.error) return parsed.error;

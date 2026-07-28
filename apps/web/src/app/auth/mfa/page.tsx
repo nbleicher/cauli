@@ -3,6 +3,7 @@
 import { LoaderCircle, ShieldCheck, Smartphone } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { RecoveryCodes } from "@/components/RecoveryCodes";
 import { createBrowserSupabaseClient } from "@/lib/supabase/browser";
 
 interface Enrollment {
@@ -26,8 +27,10 @@ function MfaGate() {
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
   const factorId = useRef("");
   const enrollmentStarted = useRef(false);
+  const destination = useRef("/record");
 
   const audit = useCallback(
     async (action: string) => {
@@ -126,7 +129,8 @@ function MfaGate() {
         return;
       }
 
-      await audit(enrollment ? "auth.mfa.enrolled" : "auth.mfa.verified");
+      const wasEnrollment = Boolean(enrollment);
+      await audit(wasEnrollment ? "auth.mfa.enrolled" : "auth.mfa.verified");
       setEnrollment(null);
       setCode("");
 
@@ -144,13 +148,42 @@ function MfaGate() {
           setBusy(false);
           return;
         }
-        window.location.replace("/legal/acceptance");
-        return;
+        destination.current = "/legal/acceptance";
       }
-      window.location.replace("/record");
+
+      if (wasEnrollment) {
+        const response = await fetch("/api/auth/recovery-codes", {
+          method: "POST",
+        });
+        const result = (await response.json().catch(() => ({}))) as {
+          codes?: string[];
+        };
+        if (response.ok && result.codes) {
+          setBusy(false);
+          setRecoveryCodes(result.codes);
+          return;
+        }
+        // The factor is verified either way, so a failed issue does not strand
+        // the account here; Account settings can generate a set later.
+      }
+      window.location.replace(destination.current);
     },
     [audit, enrollment, inviteId]
   );
+
+  if (recoveryCodes) {
+    return (
+      <main className="auth-page">
+        <section className="auth-panel">
+          <RecoveryCodes
+            codes={recoveryCodes}
+            onContinue={() => window.location.replace(destination.current)}
+            continueLabel="I have saved these codes, continue"
+          />
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="auth-page">
@@ -225,6 +258,12 @@ function MfaGate() {
             {enrollment ? "Confirm and continue" : "Verify"}
           </button>
         </form>
+
+        {!enrollment && (
+          <a className="link-button" href="/auth/recovery">
+            Can&rsquo;t use your authenticator?
+          </a>
+        )}
 
         <form action="/api/auth/signout" method="post" className="mfa-escape">
           <button className="link-button" type="submit">

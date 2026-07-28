@@ -2,6 +2,7 @@ import { createClient, type User } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
 import { signInAsWorkspaceMember } from "./helpers/auth";
 import { passLegalAcceptanceGate } from "./helpers/legal";
+import { passRecoveryCodeHandover } from "./helpers/recovery";
 import { totpCode } from "./helpers/totp";
 
 const localUrl = "http://127.0.0.1:54321";
@@ -91,6 +92,7 @@ test("a role change to Manager enforces enrollment and retains the factor after 
 
     await page.getByLabel("Verification code").fill(totpCode(secret!));
     await page.getByRole("button", { name: "Confirm and continue" }).click();
+    await passRecoveryCodeHandover(page);
     await expect(page).toHaveURL(/\/record$/, { timeout: 15_000 });
     await expect(page.locator(".mfa-secret code")).toHaveCount(0);
 
@@ -200,6 +202,7 @@ test("an Admin Invitation remains pending until TOTP is verified", async ({
     expect(secret).toBeTruthy();
     await page.getByLabel("Verification code").fill(totpCode(secret!));
     await page.getByRole("button", { name: "Confirm and continue" }).click();
+    await passRecoveryCodeHandover(page);
     await passLegalAcceptanceGate(page);
 
     const [{ data: acceptedInvite }, { data: membership }] = await Promise.all([

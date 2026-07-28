@@ -2097,3 +2097,31 @@ textarea:focus {
     gap: 8px;
   }
 }
+
+.recovery-codes {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  text-align: center;
+}
+
+.recovery-code-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 14px;
+  width: 100%;
+  margin: 4px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  list-style: none;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+
+.recovery-entry {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}

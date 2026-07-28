@@ -65,6 +65,23 @@ holds neither OpenRouter access nor a Supabase service-role credential. The
 worker key must be the separately inventoried worker principal; do not reuse it
 for identity, backup, retention, migration, Platform Admin, Sentry, or web.
 
+Identity Edge Function (`identity-admin`):
+
+```text
+APP_URL
+MFA_RECOVERY_CODE_KEY
+```
+
+Set these with `supabase secrets set --project-ref <ref>` per environment;
+`SUPABASE_URL`, `SUPABASE_ANON_KEY` and the service-role credential are
+injected by the Supabase runtime. `MFA_RECOVERY_CODE_KEY` is the key that
+Recovery Code hashes are computed with, so it is the one value that makes those
+hashes verifiable. Generate at least 32 random bytes per environment, never
+share it between staging and production, and treat rotating it as invalidating
+every outstanding Recovery Code — every Workspace Member must generate a new
+set from Account afterwards. The function refuses to serve any request while it
+is unset.
+
 ## GitHub release environments
 
 Create `staging` and `production` GitHub environments. Use the same variable

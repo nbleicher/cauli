@@ -13,6 +13,8 @@ export interface AuthContext {
     email: string;
   };
   member: WorkspaceMember;
+  /** A Recovery Code was redeemed and no replacement factor is verified yet. */
+  mfaRecoveryPending: boolean;
 }
 
 export async function getAuthContext(): Promise<AuthContext | null> {
@@ -25,7 +27,7 @@ export async function getAuthContext(): Promise<AuthContext | null> {
 
   const { data: membership } = await supabase
     .from("workspace_members")
-    .select("workspace_id, user_id, role")
+    .select("workspace_id, user_id, role, mfa_recovery_pending_at")
     .eq("user_id", user.id)
     .eq("status", "active")
     .limit(1)
@@ -42,17 +44,19 @@ export async function getAuthContext(): Promise<AuthContext | null> {
       userId: membership.user_id,
       role: membership.role as Role,
     },
+    mfaRecoveryPending: Boolean(membership.mfa_recovery_pending_at),
   };
 }
 
 // True when the user has a verified second factor but has not presented it on
 // this session. Enforced on the server: a client-side check would be trivially
 // bypassed by calling the API directly.
-async function getSecondFactorRequirement(role: Role) {
+async function getSecondFactorRequirement(context: AuthContext) {
   const supabase = await createServerSupabaseClient();
   return secondFactorRequirement(
-    role,
-    await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
+    context.member.role,
+    await supabase.auth.mfa.getAuthenticatorAssuranceLevel(),
+    context.mfaRecoveryPending
   );
 }
 
@@ -60,8 +64,8 @@ async function getSecondFactorRequirement(role: Role) {
 // Legal Document acceptance: accepting current versions is a record bound to
 // the account, so a password alone must not be able to produce one for a Role
 // that requires a second factor.
-export async function requirePageSecondFactor(role: Role) {
-  const secondFactor = await getSecondFactorRequirement(role);
+export async function requirePageSecondFactor(context: AuthContext) {
+  const secondFactor = await getSecondFactorRequirement(context);
   if (secondFactor === "enrollment_required") {
     redirect("/auth/mfa?enroll=required");
   }
@@ -74,7 +78,7 @@ export async function requirePageSecondFactor(role: Role) {
 export async function requirePageAuth() {
   const context = await getAuthContext();
   if (!context) redirect(isSupabaseConfigured() ? "/login" : "/setup");
-  await requirePageSecondFactor(context.member.role);
+  await requirePageSecondFactor(context);
   const supabase = await createServerSupabaseClient();
   const { data: legalReady, error: legalError } = await supabase.rpc(
     "legal_gate_satisfied_for_current_user"
@@ -84,8 +88,8 @@ export async function requirePageAuth() {
 }
 
 /** The request-shaped counterpart to requirePageSecondFactor. */
-export async function secondFactorApiError(role: Role) {
-  const secondFactor = await getSecondFactorRequirement(role);
+export async function secondFactorApiError(context: AuthContext) {
+  const secondFactor = await getSecondFactorRequirement(context);
   if (secondFactor === "enrollment_required") {
     return NextResponse.json(
       { error: "Verified TOTP enrollment required" },
@@ -114,7 +118,7 @@ export async function requireApiAuth(
   if (!context) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const secondFactorError = await secondFactorApiError(context.member.role);
+  const secondFactorError = await secondFactorApiError(context);
   if (secondFactorError) return secondFactorError;
   const supabase = await createServerSupabaseClient();
   const { data: legalReady, error: legalError } = await supabase.rpc(
