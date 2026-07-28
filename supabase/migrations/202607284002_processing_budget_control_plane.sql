@@ -156,9 +156,9 @@ begin
 end;
 $$;
 
--- Threshold evidence names the affected Workspace and contains only bounded
--- numbers. It therefore belongs in that Workspace's Audit Log even when the
--- threshold crossed was the platform-wide ceiling.
+-- Threshold evidence is operator-facing, so it is written once into each
+-- active Platform Admin environment. The payload contains only bounded
+-- numbers; the affected Workspace is the entity identifier, never content.
 create or replace function private.warn_on_budget_threshold(
   charge_date date,
   target_workspace_id uuid,
@@ -174,6 +174,7 @@ as $$
 declare
   ratio numeric := public.processing_budget_warning_ratio();
   claimed integer;
+  warning_environment public.platform_environment;
 begin
   if workspace_limit > 0 and workspace_spent >= ratio * workspace_limit then
     insert into public.processing_budget_warnings (spend_date, scope_key)
@@ -181,19 +182,25 @@ begin
     on conflict do nothing;
     get diagnostics claimed = row_count;
     if claimed > 0 then
-      perform public.record_audit_event(
-        target_workspace_id,
-        null,
-        'processing.budget.warned',
-        'workspace_budget',
-        target_workspace_id::text,
-        jsonb_build_object(
-          'scope', 'workspace',
-          'threshold_ratio', ratio,
-          'limit_usd', workspace_limit,
-          'spent_usd', round(workspace_spent, 6)
-        )
-      );
+      for warning_environment in
+        select distinct environment
+        from public.platform_admins
+        where status = 'active'
+      loop
+        perform public.record_platform_audit_event(
+          warning_environment,
+          null,
+          'platform.budget.warned',
+          'workspace_budget',
+          target_workspace_id::text,
+          jsonb_build_object(
+            'scope', 'workspace',
+            'threshold_ratio', ratio,
+            'limit_usd', workspace_limit,
+            'spent_usd', round(workspace_spent, 6)
+          )
+        );
+      end loop;
     end if;
   end if;
 
@@ -203,19 +210,25 @@ begin
     on conflict do nothing;
     get diagnostics claimed = row_count;
     if claimed > 0 then
-      perform public.record_audit_event(
-        target_workspace_id,
-        null,
-        'processing.budget.warned',
-        'platform_budget',
-        charge_date::text,
-        jsonb_build_object(
-          'scope', 'platform',
-          'threshold_ratio', ratio,
-          'limit_usd', platform_limit,
-          'spent_usd', round(platform_spent, 6)
-        )
-      );
+      for warning_environment in
+        select distinct environment
+        from public.platform_admins
+        where status = 'active'
+      loop
+        perform public.record_platform_audit_event(
+          warning_environment,
+          null,
+          'platform.budget.warned',
+          'platform_budget',
+          charge_date::text,
+          jsonb_build_object(
+            'scope', 'platform',
+            'threshold_ratio', ratio,
+            'limit_usd', platform_limit,
+            'spent_usd', round(platform_spent, 6)
+          )
+        );
+      end loop;
     end if;
   end if;
 end;
