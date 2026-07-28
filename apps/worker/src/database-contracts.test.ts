@@ -961,6 +961,33 @@ describe.skipIf(
     expect(JSON.stringify(exceeded)).not.toContain(member.userId);
   });
 
+  it("measures how recently the second factor was actually presented", async () => {
+    const workspaceAdmin = await createWorkspaceMember("admin");
+
+    // The window is the control: the same session is fresh against an hour and
+    // stale against an instant, which is only true if the assertion's own
+    // timestamp is being read rather than the session's assurance level.
+    const { data: fresh, error: freshError } = await workspaceAdmin.client.rpc(
+      "recent_mfa_assertion",
+      { max_age: "1 hour" }
+    );
+    if (freshError) throw freshError;
+    expect(fresh).toBe(true);
+
+    const { data: stale } = await workspaceAdmin.client.rpc(
+      "recent_mfa_assertion",
+      { max_age: "0 seconds" }
+    );
+    expect(stale).toBe(false);
+
+    // A session that never presented a factor is never fresh.
+    const member = await createWorkspaceMember("member");
+    const { data: never } = await member.client.rpc("recent_mfa_assertion", {
+      max_age: "1 hour",
+    });
+    expect(never).toBe(false);
+  });
+
   it("locks Recovery Code attempts after five failures and alerts an Admin", async () => {
     const member = await createWorkspaceMember("member");
 

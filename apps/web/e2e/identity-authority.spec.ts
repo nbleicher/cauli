@@ -250,3 +250,36 @@ test("an Admin factor reset is audited without the factor secret", async () => {
     await removeUsers(users);
   }
 });
+
+test("password reset allows five requests an hour and stays neutral past it", async () => {
+  const users: User[] = [];
+
+  try {
+    const member = await createUser(primaryWorkspaceId, "member");
+    users.push(member.user);
+    const email = member.user.email!;
+
+    // Every answer is identical, so the limit cannot be used to learn whether
+    // the address exists or how many attempts remain.
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      const response = await invoke({
+        action: "request_password_reset",
+        email,
+        redirectTo: "http://127.0.0.1:3102/auth/password-reset",
+      });
+      expect(response.status).toBe(202);
+      expect(await response.json()).toEqual({ accepted: true });
+    }
+
+    // The evidence that the sixth was refused is that it produced no request.
+    const { data: audit, error: auditError } = await admin
+      .from("audit_events")
+      .select("action")
+      .eq("actor_id", member.user.id)
+      .eq("action", "auth.password_reset.requested");
+    if (auditError) throw auditError;
+    expect(audit).toHaveLength(5);
+  } finally {
+    await removeUsers(users);
+  }
+});
