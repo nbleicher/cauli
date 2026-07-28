@@ -67,6 +67,7 @@ export async function POST(
     target_call_id: id,
     target_scorecard_version_id: scorecardVersionId,
     expected_version: parsed.data.expectedVersion,
+    expected_assignment_version: parsed.data.expectedAssignmentVersion,
     target_status: parsed.data.status,
     target_summary: parsed.data.summary,
     target_follow_up: parsed.data.followUp,
@@ -77,10 +78,13 @@ export async function POST(
     const limited = await rateLimitResponse(error, supabase, "review.submit");
     if (limited) return limited;
     const conflict = /version conflict/i.test(error.message);
+    const forbidden = /only the Review Assignee|not authorized/i.test(
+      error.message
+    );
     return NextResponse.json(
       { error: sanitizeError(error) },
       {
-        status: conflict ? 409 : 500,
+        status: conflict ? 409 : forbidden ? 403 : 500,
       }
     );
   }

@@ -81,6 +81,17 @@ export default async function CallDetailPage({
     .eq("call_id", id)
     .maybeSingle();
 
+  const { data: assignment } = await supabase
+    .from("call_review_assignments")
+    .select(
+      `
+      assignee_id, version,
+      assignee:profiles!call_review_assignments_assignee_id_fkey(display_name, email)
+    `
+    )
+    .eq("call_id", id)
+    .maybeSingle();
+
   let template: ScorecardTemplate | null = null;
   let scorecardVersionId = existingReview?.scorecard_version_id ?? "";
   if (scorecardVersionId) {
@@ -187,6 +198,22 @@ export default async function CallDetailPage({
               value: answer.value as 1 | 2 | 3 | 4 | 5 | null,
               comment: answer.comment,
             })),
+          }
+        : null,
+      assignment: assignment
+        ? {
+            assigneeId: assignment.assignee_id,
+            assigneeName:
+              firstRelation(
+                assignment.assignee as unknown as
+                  ProfileRelation | ProfileRelation[] | null
+              )?.display_name ||
+              firstRelation(
+                assignment.assignee as unknown as
+                  ProfileRelation | ProfileRelation[] | null
+              )?.email ||
+              "Unknown",
+            version: assignment.version,
           }
         : null,
       revisions: (revisions ?? []).map((revision) => {

@@ -50,6 +50,11 @@ export interface ReviewEditorProps {
     followUp: string;
     answers: ReviewAnswer[];
   } | null;
+  assignment: {
+    assigneeId: string;
+    assigneeName: string;
+    version: number;
+  } | null;
   revisions: Revision[];
   readOnly?: boolean;
 }
@@ -60,6 +65,7 @@ export function ReviewEditor({
   scorecardName,
   categories,
   initialReview,
+  assignment,
   revisions,
   readOnly = false,
 }: ReviewEditorProps) {
@@ -143,6 +149,7 @@ export function ReviewEditor({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             expectedVersion: initialReview?.version ?? 0,
+            expectedAssignmentVersion: assignment?.version ?? 0,
             status,
             summary,
             followUp,
@@ -189,6 +196,9 @@ export function ReviewEditor({
           </select>
         )}
       </div>
+      <p className="review-assignee">
+        Review Assignee: {assignment?.assigneeName ?? "Unassigned"}
+      </p>
 
       {categories.map((category) => (
         <div className="score-category" key={category.id}>

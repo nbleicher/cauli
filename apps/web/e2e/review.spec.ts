@@ -159,6 +159,7 @@ test("review API enforces completion and optimistic concurrency", async ({
     const incomplete = await page.request.post(endpoint, {
       data: {
         expectedVersion: 0,
+        expectedAssignmentVersion: 0,
         status: "reviewed",
         summary: "",
         followUp: "",
@@ -170,6 +171,7 @@ test("review API enforces completion and optimistic concurrency", async ({
     const submitted = await page.request.post(endpoint, {
       data: {
         expectedVersion: 0,
+        expectedAssignmentVersion: 0,
         status: "reviewed",
         summary: "Completed review.",
         followUp: "",
@@ -192,6 +194,7 @@ test("review API enforces completion and optimistic concurrency", async ({
     const stale = await page.request.post(endpoint, {
       data: {
         expectedVersion: 0,
+        expectedAssignmentVersion: 0,
         status: "reviewed",
         summary: "Stale overwrite.",
         followUp: "",

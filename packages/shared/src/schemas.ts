@@ -55,6 +55,7 @@ export const reviewAnswerSchema = z.object({
 
 export const submitReviewSchema = z.object({
   expectedVersion: z.number().int().min(0),
+  expectedAssignmentVersion: z.number().int().min(0),
   status: reviewStatusSchema.exclude(["unreviewed"]),
   summary: z.string().trim().max(10_000).default(""),
   followUp: z.string().trim().max(10_000).default(""),

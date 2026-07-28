@@ -261,11 +261,17 @@ describe.skipIf(
     }
 
     const firstCall = await createCall(owner.userId, { status: "ready" });
+    const { error: firstClaimError } = await manager.client.rpc(
+      "claim_review",
+      { target_call_id: firstCall.callId }
+    );
+    expect(firstClaimError).toBeNull();
     const { data: firstReview, error: firstReviewError } =
       await manager.client.rpc("submit_call_review", {
         target_call_id: firstCall.callId,
         target_scorecard_version_id: firstVersion.id,
         expected_version: 0,
+        expected_assignment_version: 1,
         target_status: "reviewed",
         target_summary: "Optional criterion is not applicable.",
         target_follow_up: "",
@@ -286,12 +292,18 @@ describe.skipIf(
     expect(firstReview.score).toBe(100);
 
     const secondCall = await createCall(owner.userId, { status: "ready" });
+    const { error: secondClaimError } = await manager.client.rpc(
+      "claim_review",
+      { target_call_id: secondCall.callId }
+    );
+    expect(secondClaimError).toBeNull();
     const { error: requiredNaError } = await manager.client.rpc(
       "submit_call_review",
       {
         target_call_id: secondCall.callId,
         target_scorecard_version_id: firstVersion.id,
         expected_version: 0,
+        expected_assignment_version: 1,
         target_status: "reviewed",
         target_summary: "Required criterion cannot be N/A.",
         target_follow_up: "",
@@ -364,12 +376,18 @@ describe.skipIf(
       )
       .order("position");
     const thirdCall = await createCall(owner.userId, { status: "ready" });
+    const { error: thirdClaimError } = await manager.client.rpc(
+      "claim_review",
+      { target_call_id: thirdCall.callId }
+    );
+    expect(thirdClaimError).toBeNull();
     const { error: thirdReviewError } = await manager.client.rpc(
       "submit_call_review",
       {
         target_call_id: thirdCall.callId,
         target_scorecard_version_id: secondVersionId,
         expected_version: 0,
+        expected_assignment_version: 1,
         target_status: "reviewed",
         target_summary: "Second version review.",
         target_follow_up: "",
@@ -446,6 +464,296 @@ describe.skipIf(
         "scorecard.versions.comparability_revoked",
       ])
     );
+  });
+
+  it("claims and assigns Reviews atomically within one Workspace", async () => {
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const firstManager = await createWorkspaceMember("manager");
+    const secondManager = await createWorkspaceMember("manager");
+    const owner = await createWorkspaceMember("member");
+
+    const { data: scorecardVersionId, error: publishError } =
+      await workspaceAdmin.client.rpc("publish_scorecard_for_current_admin", {
+        target_template_id: null,
+        target_name: "Assignment contract Scorecard",
+        target_categories: [
+          {
+            name: "Quality",
+            criteria: [
+              {
+                label: "Clear outcome",
+                description: "",
+                weight: 1,
+                required: true,
+              },
+            ],
+          },
+        ],
+      });
+    expect(publishError).toBeNull();
+    const { data: scorecardVersion } = await admin
+      .from("scorecard_versions")
+      .select("template_id")
+      .eq("id", scorecardVersionId)
+      .single();
+    createdScorecardTemplateIds.push(scorecardVersion!.template_id);
+    const { data: scorecardCategory } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", scorecardVersionId)
+      .single();
+    const { data: scorecardCriterion } = await admin
+      .from("scorecard_criteria")
+      .select("id")
+      .eq("category_id", scorecardCategory!.id)
+      .single();
+
+    const claimedCall = await createCall(owner.userId, { status: "ready" });
+    const concurrentClaims = await Promise.all([
+      firstManager.client.rpc("claim_review", {
+        target_call_id: claimedCall.callId,
+      }),
+      secondManager.client.rpc("claim_review", {
+        target_call_id: claimedCall.callId,
+      }),
+    ]);
+    expect(concurrentClaims.filter((claim) => !claim.error)).toHaveLength(1);
+    expect(concurrentClaims.filter((claim) => claim.error)).toHaveLength(1);
+    expect(
+      concurrentClaims.find((claim) => claim.error)?.error?.message
+    ).toMatch(/already assigned/i);
+
+    const { data: claimedAssignment } = await admin
+      .from("call_review_assignments")
+      .select("assignee_id, version")
+      .eq("call_id", claimedCall.callId)
+      .single();
+    expect(claimedAssignment?.version).toBe(1);
+
+    const firstCanEdit = await firstManager.client.rpc("can_review_call", {
+      target_call_id: claimedCall.callId,
+    });
+    const secondCanEdit = await secondManager.client.rpc("can_review_call", {
+      target_call_id: claimedCall.callId,
+    });
+    expect(
+      [firstCanEdit.data === true, secondCanEdit.data === true].filter(Boolean)
+    ).toHaveLength(1);
+
+    const assignedCall = await createCall(owner.userId, { status: "ready" });
+    const { data: initialAssignment, error: assignmentError } =
+      await workspaceAdmin.client.rpc("assign_review", {
+        target_call_id: assignedCall.callId,
+        target_assignee_id: firstManager.userId,
+        expected_assignment_version: 0,
+      });
+    expect(assignmentError).toBeNull();
+    expect(initialAssignment).toMatchObject({
+      assignee_id: firstManager.userId,
+      version: 1,
+    });
+
+    const { error: staleReassignmentError } = await workspaceAdmin.client.rpc(
+      "assign_review",
+      {
+        target_call_id: assignedCall.callId,
+        target_assignee_id: secondManager.userId,
+        expected_assignment_version: 0,
+      }
+    );
+    expect(staleReassignmentError?.message).toMatch(/version conflict/i);
+
+    const { data: reassigned, error: reassignmentError } =
+      await workspaceAdmin.client.rpc("assign_review", {
+        target_call_id: assignedCall.callId,
+        target_assignee_id: secondManager.userId,
+        expected_assignment_version: 1,
+      });
+    expect(reassignmentError).toBeNull();
+    expect(reassigned).toMatchObject({
+      assignee_id: secondManager.userId,
+      version: 2,
+    });
+
+    const { error: legacySubmissionBypassError } =
+      await firstManager.client.rpc("submit_call_review", {
+        target_call_id: assignedCall.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 0,
+        target_status: "reviewed",
+        target_summary: "Legacy overload must not bypass assignment.",
+        target_follow_up: "",
+        target_answers: [],
+      });
+    expect(legacySubmissionBypassError?.message).toMatch(
+      /permission denied|could not find/i
+    );
+
+    const reviewPayload = {
+      target_call_id: assignedCall.callId,
+      target_scorecard_version_id: scorecardVersionId,
+      expected_version: 0,
+      target_status: "reviewed",
+      target_summary: "Assignment concurrency is preserved.",
+      target_follow_up: "",
+      target_answers: [
+        {
+          criterionId: scorecardCriterion!.id,
+          value: 5,
+          comment: "",
+        },
+      ],
+    };
+    const { error: staleEditorError } = await firstManager.client.rpc(
+      "submit_call_review",
+      {
+        ...reviewPayload,
+        expected_assignment_version: 1,
+      }
+    );
+    expect(staleEditorError?.message).toMatch(/assignment version conflict/i);
+    const { error: formerAssigneeError } = await firstManager.client.rpc(
+      "submit_call_review",
+      {
+        ...reviewPayload,
+        expected_assignment_version: 2,
+      }
+    );
+    expect(formerAssigneeError?.message).toMatch(/only the Review Assignee/i);
+    const { data: submittedReview, error: submitError } =
+      await secondManager.client.rpc("submit_call_review", {
+        ...reviewPayload,
+        expected_assignment_version: 2,
+      });
+    expect(submitError).toBeNull();
+    expect(submittedReview).toMatchObject({
+      call_id: assignedCall.callId,
+      version: 1,
+      status: "reviewed",
+    });
+
+    const firstBulkCall = await createCall(owner.userId, { status: "ready" });
+    const secondBulkCall = await createCall(owner.userId, { status: "ready" });
+    const preclaimedCall = await createCall(owner.userId, { status: "ready" });
+    const stillUnassignedCall = await createCall(owner.userId, {
+      status: "ready",
+    });
+    const { error: preclaimError } = await secondManager.client.rpc(
+      "claim_review",
+      { target_call_id: preclaimedCall.callId }
+    );
+    expect(preclaimError).toBeNull();
+
+    const { data: bulkAssignments, error: bulkError } =
+      await workspaceAdmin.client.rpc("bulk_assign_unassigned_reviews", {
+        target_call_ids: [firstBulkCall.callId, secondBulkCall.callId],
+        target_assignee_id: firstManager.userId,
+      });
+    expect(bulkError).toBeNull();
+    expect(bulkAssignments).toHaveLength(2);
+
+    const { data: staleFilteredBulk, error: staleFilteredBulkError } =
+      await workspaceAdmin.client.rpc("bulk_assign_unassigned_reviews", {
+        target_call_ids: [preclaimedCall.callId, stillUnassignedCall.callId],
+        target_assignee_id: firstManager.userId,
+      });
+    expect(staleFilteredBulkError).toBeNull();
+    expect(staleFilteredBulk).toHaveLength(1);
+    expect(staleFilteredBulk?.[0]?.call_id).toBe(stillUnassignedCall.callId);
+    const { data: preservedClaim } = await admin
+      .from("call_review_assignments")
+      .select("assignee_id")
+      .eq("call_id", preclaimedCall.callId)
+      .single();
+    expect(preservedClaim?.assignee_id).toBe(secondManager.userId);
+
+    const otherWorkspaceId = crypto.randomUUID();
+    createdWorkspaceIds.push(otherWorkspaceId);
+    const { error: otherWorkspaceError } = await admin
+      .from("workspaces")
+      .insert({
+        id: otherWorkspaceId,
+        name: "Other assignment Workspace",
+        slug: `other-assignment-${otherWorkspaceId.slice(0, 8)}`,
+      });
+    if (otherWorkspaceError) throw otherWorkspaceError;
+    const otherOwner = await createWorkspaceMember("member", otherWorkspaceId);
+    const otherCall = await createCall(otherOwner.userId, {
+      workspace_id: otherWorkspaceId,
+      status: "ready",
+      chunk_prefix: `${otherWorkspaceId}/${crypto.randomUUID()}/chunks`,
+    });
+    const rollbackCall = await createCall(owner.userId, { status: "ready" });
+    const { error: crossWorkspaceBulkError } = await workspaceAdmin.client.rpc(
+      "bulk_assign_unassigned_reviews",
+      {
+        target_call_ids: [rollbackCall.callId, otherCall.callId],
+        target_assignee_id: firstManager.userId,
+      }
+    );
+    expect(crossWorkspaceBulkError?.message).toMatch(/Admin Workspace/i);
+    const { count: rollbackAssignmentCount } = await admin
+      .from("call_review_assignments")
+      .select("call_id", { count: "exact", head: true })
+      .eq("call_id", rollbackCall.callId);
+    expect(rollbackAssignmentCount).toBe(0);
+
+    const { error: directCrossWorkspaceWrite } = await firstManager.client
+      .from("call_review_assignments")
+      .insert({
+        call_id: otherCall.callId,
+        workspace_id: otherWorkspaceId,
+        assignee_id: firstManager.userId,
+        assigned_by: firstManager.userId,
+      });
+    expect(directCrossWorkspaceWrite).not.toBeNull();
+
+    const affectedBulkCallIds = [
+      firstBulkCall.callId,
+      secondBulkCall.callId,
+      stillUnassignedCall.callId,
+    ];
+    const { data: auditEvents } = await admin
+      .from("audit_events")
+      .select("action, entity_id, metadata")
+      .eq("workspace_id", workspaceId)
+      .in("entity_id", [
+        claimedCall.callId,
+        assignedCall.callId,
+        preclaimedCall.callId,
+        ...affectedBulkCallIds,
+      ]);
+    expect(
+      auditEvents?.some(
+        (event) =>
+          event.action === "review.claimed" &&
+          event.entity_id === claimedCall.callId
+      )
+    ).toBe(true);
+    expect(
+      auditEvents?.some(
+        (event) =>
+          event.action === "review.assigned" &&
+          event.entity_id === assignedCall.callId
+      )
+    ).toBe(true);
+    expect(
+      auditEvents?.some(
+        (event) =>
+          event.action === "review.reassigned" &&
+          event.entity_id === assignedCall.callId
+      )
+    ).toBe(true);
+    for (const callId of affectedBulkCallIds) {
+      expect(
+        auditEvents?.some(
+          (event) =>
+            event.action === "review.bulk_assigned" &&
+            event.entity_id === callId &&
+            typeof event.metadata.bulk_operation_id === "string"
+        )
+      ).toBe(true);
+    }
   });
 
   it("enforces one Workspace per person and the ten-active-member pilot cap", async () => {

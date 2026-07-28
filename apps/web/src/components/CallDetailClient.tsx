@@ -158,7 +158,9 @@ export function CallDetailClient({
     currentUserId === call.ownerId &&
     call.status !== "recording" &&
     call.status !== "uploading";
-  const canReview = role === "manager" || role === "admin";
+  const canReview =
+    role === "admin" ||
+    (role === "manager" && review?.assignment?.assigneeId === currentUserId);
 
   async function renameCall(event: FormEvent) {
     event.preventDefault();
