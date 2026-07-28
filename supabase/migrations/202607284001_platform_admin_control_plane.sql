@@ -1,5 +1,21 @@
 create type public.platform_environment as enum ('staging', 'production');
 
+-- Platform-wide evidence has its own environment scope. It must not be
+-- attributed to an arbitrary customer Workspace, while Workspace-specific
+-- break-glass actions remain scoped to the affected Workspace.
+alter table public.audit_events
+  alter column workspace_id drop not null,
+  add column platform_environment public.platform_environment,
+  add constraint audit_events_exactly_one_scope
+    check (
+      (workspace_id is not null)::integer
+      + (platform_environment is not null)::integer = 1
+    );
+
+create index audit_events_platform_cursor
+  on public.audit_events (platform_environment, id desc)
+  where platform_environment is not null;
+
 create table public.platform_admins (
   user_id uuid primary key references public.profiles(id) on delete cascade,
   environment public.platform_environment not null,
@@ -177,14 +193,54 @@ begin
 end;
 $$;
 
-create or replace function public.platform_audit_workspace()
-returns uuid
-language sql
-stable
+create or replace function public.record_platform_audit_event(
+  target_environment public.platform_environment,
+  target_actor_id uuid,
+  target_action text,
+  target_entity_type text,
+  target_entity_id text,
+  target_metadata jsonb default '{}'::jsonb
+)
+returns bigint
+language plpgsql
 security definer
 set search_path = public
 as $$
-  select id from public.workspaces order by created_at, id limit 1;
+declare
+  event_id bigint;
+begin
+  perform public.assert_safe_audit_metadata(target_metadata);
+
+  if target_environment is null then
+    raise exception 'Platform Audit Environment is required';
+  end if;
+  if target_actor_id is not null and not exists (
+    select 1 from public.profiles where id = target_actor_id
+  ) then
+    raise exception 'Audit actor does not exist';
+  end if;
+
+  insert into public.audit_events (
+    workspace_id,
+    platform_environment,
+    actor_id,
+    action,
+    entity_type,
+    entity_id,
+    metadata
+  ) values (
+    null,
+    target_environment,
+    target_actor_id,
+    target_action,
+    target_entity_type,
+    target_entity_id,
+    target_metadata
+  )
+  returning id into event_id;
+
+  return event_id;
+end;
 $$;
 
 create or replace function public.touch_platform_admin_session()
@@ -197,7 +253,7 @@ declare
   session uuid := public.current_session_id();
   reason text;
   inserted_count integer;
-  audit_workspace uuid;
+  target_environment public.platform_environment;
 begin
   if session is null
     or auth.uid() is null
@@ -226,19 +282,15 @@ begin
   where session_id = session;
 
   if inserted_count = 1 then
-    audit_workspace := public.platform_audit_workspace();
-    if audit_workspace is not null then
-      perform public.record_audit_event(
-        audit_workspace,
-        auth.uid(),
-        'platform_admin.session.started',
-        'platform_admin',
-        auth.uid()::text,
-        jsonb_build_object(
-          'environment', public.platform_admin_identity()
-        )
-      );
-    end if;
+    target_environment := public.platform_admin_identity();
+    perform public.record_platform_audit_event(
+      target_environment,
+      auth.uid(),
+      'platform_admin.session.started',
+      'platform_admin',
+      auth.uid()::text,
+      '{}'::jsonb
+    );
   end if;
   return null;
 end;
@@ -296,7 +348,6 @@ security definer
 set search_path = public
 as $$
 declare
-  audit_workspace uuid;
   target_environment public.platform_environment;
 begin
   if target_action not in (
@@ -319,17 +370,13 @@ begin
     raise exception 'AAL2 is required for successful MFA Audit Events';
   end if;
 
-  audit_workspace := public.platform_audit_workspace();
-  if audit_workspace is null then
-    raise exception 'An Audit Workspace is required';
-  end if;
-  return public.record_audit_event(
-    audit_workspace,
+  return public.record_platform_audit_event(
+    target_environment,
     auth.uid(),
     target_action,
     'platform_admin',
     auth.uid()::text,
-    jsonb_build_object('environment', target_environment)
+    '{}'::jsonb
   );
 end;
 $$;
@@ -349,20 +396,16 @@ set search_path = public
 as $$
 declare
   target_environment public.platform_environment;
-  audit_workspace uuid;
 begin
   target_environment := public.assert_current_platform_admin(false);
-  audit_workspace := public.platform_audit_workspace();
-  if audit_workspace is not null then
-    perform public.record_audit_event(
-      audit_workspace,
-      auth.uid(),
-      'platform_admin.health.inspected',
-      'platform_environment',
-      target_environment::text,
-      '{}'::jsonb
-    );
-  end if;
+  perform public.record_platform_audit_event(
+    target_environment,
+    auth.uid(),
+    'platform_admin.health.inspected',
+    'platform_environment',
+    target_environment::text,
+    '{}'::jsonb
+  );
 
   return query
   select
@@ -601,6 +644,9 @@ $$;
 
 revoke all on function public.platform_admin_identity()
   from public, anon;
+revoke all on function public.record_platform_audit_event(
+  public.platform_environment, uuid, text, text, text, jsonb
+) from public, anon, authenticated;
 revoke all on function public.platform_admin_session_lock_reason()
   from public, anon;
 revoke all on function public.touch_platform_admin_session()
@@ -623,6 +669,9 @@ revoke all on function public.platform_read_call_content(uuid)
 
 grant execute on function public.platform_admin_identity()
   to authenticated;
+grant execute on function public.record_platform_audit_event(
+  public.platform_environment, uuid, text, text, text, jsonb
+) to service_role;
 grant execute on function public.platform_admin_session_lock_reason()
   to authenticated;
 grant execute on function public.touch_platform_admin_session()

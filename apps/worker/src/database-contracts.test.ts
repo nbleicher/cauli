@@ -1009,7 +1009,7 @@ describe.skipIf(
 
     const { data: audit, error: auditError } = await admin
       .from("audit_events")
-      .select("action, entity_id, metadata")
+      .select("workspace_id, platform_environment, action, entity_id, metadata")
       .eq("actor_id", platformAdmin.userId);
     if (auditError) throw auditError;
     expect(audit.map((event) => event.action)).toEqual(
@@ -1025,6 +1025,23 @@ describe.skipIf(
     expect(JSON.stringify(audit)).not.toContain(transcriptText);
     expect(JSON.stringify(audit)).not.toContain(reviewSummary);
     expect(JSON.stringify(audit)).not.toContain("Customer escalation");
+    const platformScopedActions = new Set([
+      "platform_admin.session.started",
+      "platform_admin.health.inspected",
+      "platform_admin.mfa.enrollment_started",
+      "platform_admin.mfa.enrolled",
+      "platform_admin.mfa.verified",
+      "platform_admin.mfa.verification_failed",
+    ]);
+    for (const event of audit) {
+      if (platformScopedActions.has(event.action)) {
+        expect(event.workspace_id).toBeNull();
+        expect(event.platform_environment).toBe("staging");
+      } else {
+        expect(event.workspace_id).toBe(workspaceId);
+        expect(event.platform_environment).toBeNull();
+      }
+    }
 
     const { error: ageSessionError } = await admin
       .from("platform_admin_sessions")
