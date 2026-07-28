@@ -1,4 +1,5 @@
 import { expect, type Page, type Response } from "@playwright/test";
+import { totpCode } from "./totp";
 
 const authResponseTimeout = 15_000;
 const protectedNavigationTimeout = 15_000;
@@ -24,6 +25,14 @@ function isProtectedRecordResponse(response: Response) {
     response.request().resourceType() === "document" &&
     url.pathname === "/record"
   );
+}
+
+export async function submitBrowserTotp(page: Page, secret: string) {
+  await expect(page).toHaveURL(/\/auth\/mfa(?:\?|$)/, {
+    timeout: protectedNavigationTimeout,
+  });
+  await page.getByLabel("Verification code").fill(totpCode(secret));
+  await page.getByRole("button", { name: "Verify" }).click();
 }
 
 async function readPasswordAuthResponse(response: Response) {
@@ -76,7 +85,8 @@ export async function signInAsWorkspaceMember(
   page: Page,
   email: string,
   password: string,
-  transientRetries = 2
+  transientRetries = 2,
+  totpSecret?: string
 ) {
   await page.goto("/login");
   await page.getByLabel("Work email").fill(email);
@@ -108,10 +118,33 @@ export async function signInAsWorkspaceMember(
         page,
         email,
         password,
-        transientRetries - 1
+        transientRetries - 1,
+        totpSecret
       );
     }
     throw new Error(describeAuthFailure(authResponse, authBody));
+  }
+
+  if (totpSecret) {
+    await protectedResponsePromise;
+    const verifiedRecordResponse = page.waitForResponse(
+      isProtectedRecordResponse,
+      { timeout: protectedNavigationTimeout }
+    );
+    await submitBrowserTotp(page, totpSecret);
+    const recordResponse = await verifiedRecordResponse;
+    if (!recordResponse.ok()) {
+      throw new Error(
+        await describeProtectedNavigationFailure(
+          page,
+          `/record responded with ${recordResponse.status()} after TOTP verification.`
+        )
+      );
+    }
+    await expect(page).toHaveURL(/\/record$/, {
+      timeout: protectedNavigationTimeout,
+    });
+    return;
   }
 
   const protectedResult = await protectedResponsePromise;

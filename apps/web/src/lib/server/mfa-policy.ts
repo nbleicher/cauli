@@ -1,3 +1,5 @@
+import type { Role } from "@calllog/shared";
+
 type AssuranceLevel = string | null;
 
 interface AssuranceLevelResult {
@@ -8,14 +10,15 @@ interface AssuranceLevelResult {
   error: unknown;
 }
 
-export type SecondFactorRequirement = "satisfied" | "required" | "unavailable";
+export type SecondFactorRequirement =
+  "satisfied" | "enrollment_required" | "verification_required" | "unavailable";
 
-export function secondFactorRequirement({
-  data,
-  error,
-}: AssuranceLevelResult): SecondFactorRequirement {
+export function secondFactorRequirement(
+  role: Role,
+  { data, error }: AssuranceLevelResult
+): SecondFactorRequirement {
   if (error || !data) return "unavailable";
-  return data.nextLevel === "aal2" && data.currentLevel !== "aal2"
-    ? "required"
-    : "satisfied";
+  if (data.currentLevel === "aal2") return "satisfied";
+  if (data.nextLevel === "aal2") return "verification_required";
+  return role === "member" ? "satisfied" : "enrollment_required";
 }

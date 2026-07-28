@@ -54,7 +54,23 @@ jobs:
             value="${value%\"}"
             echo "::add-mask::$value"
             echo "$name=$value" >> "$GITHUB_ENV"
+            export "$name=$value"
           done < <(supabase status -o env)
+          for attempt in $(seq 1 30); do
+            status="$(
+              curl --silent --output /dev/null --write-out '%{http_code}' \
+                "$API_URL/auth/v1/health" ||
+                true
+            )"
+            if [ "$status" = "200" ]; then
+              break
+            fi
+            if [ "$attempt" = "30" ]; then
+              echo "Supabase Auth did not become ready after database reset"
+              exit 1
+            fi
+            sleep 1
+          done
 
       - name: Install Chrome
         run: npx playwright install --with-deps chromium

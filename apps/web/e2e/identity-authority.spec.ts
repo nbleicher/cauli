@@ -1,5 +1,6 @@
 import { createClient, type User } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
+import { enrollVerifiedTotp } from "./helpers/totp";
 
 const localUrl =
   process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54321";
@@ -43,7 +44,11 @@ async function createUser(
   const { data: signIn, error: signInError } =
     await client.auth.signInWithPassword({ email, password });
   if (signInError) throw signInError;
-  return { user: data.user, token: signIn.session.access_token };
+  const token =
+    role === "admin"
+      ? (await enrollVerifiedTotp(client)).token
+      : signIn.session.access_token;
+  return { user: data.user, token, client };
 }
 
 async function invoke(body: Record<string, unknown>, token: string = anonKey) {
@@ -153,6 +158,43 @@ test("identity endpoint denies neighboring and cross-Workspace authority", async
         )
       ).status
     ).toBe(404);
+    // Resetting your own factor is Recovery Code work, not Admin authority
+    // over yourself: one stolen AAL2 session must not be able to replace the
+    // authenticator it signed in with.
+    expect(
+      (
+        await invoke(
+          { action: "reset_mfa", userId: primaryAdmin.user.id },
+          primaryAdmin.token
+        )
+      ).status
+    ).toBe(403);
+
+    const statusResponse = await invoke(
+      { action: "list_mfa_status" },
+      primaryAdmin.token
+    );
+    expect(statusResponse.status).toBe(200);
+    const statusBody = (await statusResponse.json()) as {
+      statuses: { userId: string; enabled: boolean }[];
+    };
+    expect(
+      statusBody.statuses.find(
+        (status) => status.userId === primaryAdmin.user.id
+      )
+    ).toEqual({ userId: primaryAdmin.user.id, enabled: true });
+    expect(
+      statusBody.statuses.find(
+        (status) => status.userId === primaryMember.user.id
+      )
+    ).toEqual({ userId: primaryMember.user.id, enabled: false });
+    // Enrollment state is the only detail an Admin needs; factor identifiers
+    // and secrets stay inside Auth.
+    expect(
+      statusBody.statuses.every(
+        (status) => Object.keys(status).sort().join(",") === "enabled,userId"
+      )
+    ).toBe(true);
     expect(
       (
         await invoke({
@@ -168,5 +210,43 @@ test("identity endpoint denies neighboring and cross-Workspace authority", async
     }
     await removeUsers(users);
     await admin.from("workspaces").delete().eq("id", otherWorkspaceId);
+  }
+});
+
+test("an Admin factor reset is audited without the factor secret", async () => {
+  const users: User[] = [];
+
+  try {
+    const workspaceAdmin = await createUser(primaryWorkspaceId, "admin");
+    const member = await createUser(primaryWorkspaceId, "member");
+    users.push(workspaceAdmin.user, member.user);
+    const { secret } = await enrollVerifiedTotp(member.client);
+
+    const response = await invoke(
+      { action: "reset_mfa", userId: member.user.id },
+      workspaceAdmin.token
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ removed: 1 });
+
+    const { data: factors, error: factorsError } =
+      await admin.auth.admin.mfa.listFactors({ userId: member.user.id });
+    if (factorsError) throw factorsError;
+    expect(factors.factors).toHaveLength(0);
+
+    const { data: audit, error: auditError } = await admin
+      .from("audit_events")
+      .select("action, metadata")
+      .eq("entity_id", member.user.id);
+    if (auditError) throw auditError;
+    expect(audit.map((event) => event.action)).toEqual(
+      expect.arrayContaining([
+        "workspace.member.mfa_reset_initiated",
+        "workspace.member.mfa_reset_completed",
+      ])
+    );
+    expect(JSON.stringify(audit)).not.toContain(secret);
+  } finally {
+    await removeUsers(users);
   }
 });

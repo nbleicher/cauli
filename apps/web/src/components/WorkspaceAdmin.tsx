@@ -244,7 +244,7 @@ export function WorkspaceAdmin({
                 <strong>{member.displayName || member.email}</strong>
                 <span>{member.email}</span>
               </div>
-              {member.mfaEnabled ? (
+              {member.mfaEnabled && member.userId !== currentUserId ? (
                 <button
                   className="mfa-reset on"
                   title={`Reset two-factor for ${member.email}`}
@@ -252,7 +252,11 @@ export function WorkspaceAdmin({
                   onClick={() => {
                     if (
                       window.confirm(
-                        `Reset two-factor for ${member.email}?\n\nThey will be able to sign in with just their password until they enroll a new device.`
+                        `Reset two-factor for ${member.email}?\n\n${
+                          member.role === "member"
+                            ? "They will be able to sign in with just their password until they enroll a new device."
+                            : "Their role requires two-factor, so they cannot sign in again until they enroll a new device."
+                        }`
                       )
                     )
                       void resetMfa(member.userId, member.email);
@@ -265,6 +269,16 @@ export function WorkspaceAdmin({
                   )}
                   <span>2FA on</span>
                 </button>
+              ) : member.mfaEnabled ? (
+                // Replacing your own factor is Recovery Code work; another
+                // Workspace Admin has to reset it for you.
+                <span
+                  className="mfa-reset on"
+                  title="Another Workspace Admin must reset your second factor"
+                >
+                  <ShieldCheck size={13} />
+                  <span>2FA on</span>
+                </span>
               ) : (
                 <span
                   className="mfa-reset off"

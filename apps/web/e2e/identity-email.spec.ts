@@ -1,7 +1,12 @@
 import { createClient } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
 import { signInAsWorkspaceMember } from "./helpers/auth";
+import {
+  acceptCurrentLegalDocuments,
+  publishCurrentLegalVersions,
+} from "./helpers/legal";
 import { emailLinks, waitForEmail } from "./helpers/mailpit";
+import { enrollVerifiedTotp } from "./helpers/totp";
 
 const localUrl = "http://127.0.0.1:54321";
 const anonKey =
@@ -51,10 +56,27 @@ test("delivered invitation proves email ownership and creates the password", asy
   const invitedEmail = `mail-invite-${crypto.randomUUID()}@example.com`;
   const invitedPassword = `Permanent-${crypto.randomUUID()}!`;
   const workspaceAdmin = await createMember(adminEmail, adminPassword, "admin");
+  const adminClient = createClient(localUrl, anonKey, {
+    auth: { persistSession: false },
+  });
+  const { error: adminSignInError } = await adminClient.auth.signInWithPassword(
+    {
+      email: adminEmail,
+      password: adminPassword,
+    }
+  );
+  if (adminSignInError) throw adminSignInError;
+  const { secret: adminTotpSecret } = await enrollVerifiedTotp(adminClient);
   let invitedUserId: string | undefined;
 
   try {
-    await signInAsWorkspaceMember(page, adminEmail, adminPassword);
+    await signInAsWorkspaceMember(
+      page,
+      adminEmail,
+      adminPassword,
+      2,
+      adminTotpSecret
+    );
     const invitation = await page.evaluate(async (email) => {
       const response = await fetch("/api/admin/invites", {
         method: "POST",
@@ -93,6 +115,15 @@ test("delivered invitation proves email ownership and creates the password", asy
           ).status
       )
     ).toBe(401);
+    // Publishing current versions and arming the gate makes acceptance binding,
+    // so activation proves the gate rather than depending on whichever Legal
+    // Document state the surrounding suite happened to leave behind.
+    await publishCurrentLegalVersions(admin);
+    const { error: gateError } = await admin
+      .from("workspaces")
+      .update({ legal_gate_required: true })
+      .eq("id", workspaceId);
+    if (gateError) throw gateError;
     await page.getByLabel("New password").fill(invitedPassword);
     await page.getByLabel("Confirm password").fill(invitedPassword);
     const activationResponsePromise = page.waitForResponse(
@@ -105,6 +136,21 @@ test("delivered invitation proves email ownership and creates the password", asy
       .click();
     const activationResponse = await activationResponsePromise;
     expect(activationResponse.status()).toBe(200);
+    await expect(page).toHaveURL(/\/legal\/acceptance$/, { timeout: 15_000 });
+    // Membership alone does not open the application while acceptance is due.
+    expect(
+      await page.evaluate(
+        async () =>
+          (
+            await fetch("/api/calls", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: "{}",
+            })
+          ).status
+      )
+    ).toBe(403);
+    await acceptCurrentLegalDocuments(page);
     await expect(page).toHaveURL(/\/record$/, { timeout: 15_000 });
 
     const { data: profile, error: profileError } = await admin
@@ -135,6 +181,10 @@ test("delivered invitation proves email ownership and creates the password", asy
       ])
     );
   } finally {
+    await admin
+      .from("workspaces")
+      .update({ legal_gate_required: false })
+      .eq("id", workspaceId);
     await admin
       .from("workspace_invites")
       .delete()

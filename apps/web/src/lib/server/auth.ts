@@ -48,48 +48,51 @@ export async function getAuthContext(): Promise<AuthContext | null> {
 // True when the user has a verified second factor but has not presented it on
 // this session. Enforced on the server: a client-side check would be trivially
 // bypassed by calling the API directly.
-async function getSecondFactorRequirement() {
+async function getSecondFactorRequirement(role: Role) {
   const supabase = await createServerSupabaseClient();
   return secondFactorRequirement(
+    role,
     await supabase.auth.mfa.getAuthenticatorAssuranceLevel()
   );
+}
+
+// Assurance is settled before anything else a signed-in page offers, including
+// Legal Document acceptance: accepting current versions is a record bound to
+// the account, so a password alone must not be able to produce one for a Role
+// that requires a second factor.
+export async function requirePageSecondFactor(role: Role) {
+  const secondFactor = await getSecondFactorRequirement(role);
+  if (secondFactor === "enrollment_required") {
+    redirect("/auth/mfa?enroll=required");
+  }
+  if (secondFactor === "verification_required") redirect("/auth/mfa");
+  if (secondFactor === "unavailable") {
+    redirect("/auth/mfa?verification=unavailable");
+  }
 }
 
 export async function requirePageAuth() {
   const context = await getAuthContext();
   if (!context) redirect(isSupabaseConfigured() ? "/login" : "/setup");
+  await requirePageSecondFactor(context.member.role);
   const supabase = await createServerSupabaseClient();
   const { data: legalReady, error: legalError } = await supabase.rpc(
     "legal_gate_satisfied_for_current_user"
   );
   if (legalError || !legalReady) redirect("/legal/acceptance");
-  const secondFactor = await getSecondFactorRequirement();
-  if (secondFactor === "required") redirect("/auth/mfa");
-  if (secondFactor === "unavailable") {
-    redirect("/auth/mfa?verification=unavailable");
-  }
   return context;
 }
 
-export async function requireApiAuth(
-  allowedRoles?: Role[]
-): Promise<AuthContext | NextResponse> {
-  const context = await getAuthContext();
-  if (!context) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  const supabase = await createServerSupabaseClient();
-  const { data: legalReady, error: legalError } = await supabase.rpc(
-    "legal_gate_satisfied_for_current_user"
-  );
-  if (legalError || !legalReady) {
+/** The request-shaped counterpart to requirePageSecondFactor. */
+export async function secondFactorApiError(role: Role) {
+  const secondFactor = await getSecondFactorRequirement(role);
+  if (secondFactor === "enrollment_required") {
     return NextResponse.json(
-      { error: "Current Legal Document acceptance is required" },
-      { status: 403 }
+      { error: "Verified TOTP enrollment required" },
+      { status: 401 }
     );
   }
-  const secondFactor = await getSecondFactorRequirement();
-  if (secondFactor === "required") {
+  if (secondFactor === "verification_required") {
     return NextResponse.json(
       { error: "Second factor required" },
       { status: 401 }
@@ -99,6 +102,28 @@ export async function requireApiAuth(
     return NextResponse.json(
       { error: "Unable to verify second-factor assurance" },
       { status: 503 }
+    );
+  }
+  return null;
+}
+
+export async function requireApiAuth(
+  allowedRoles?: Role[]
+): Promise<AuthContext | NextResponse> {
+  const context = await getAuthContext();
+  if (!context) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const secondFactorError = await secondFactorApiError(context.member.role);
+  if (secondFactorError) return secondFactorError;
+  const supabase = await createServerSupabaseClient();
+  const { data: legalReady, error: legalError } = await supabase.rpc(
+    "legal_gate_satisfied_for_current_user"
+  );
+  if (legalError || !legalReady) {
+    return NextResponse.json(
+      { error: "Current Legal Document acceptance is required" },
+      { status: 403 }
     );
   }
   if (allowedRoles && !allowedRoles.includes(context.member.role)) {

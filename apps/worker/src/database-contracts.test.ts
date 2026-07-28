@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 const localUrl = "http://127.0.0.1:54321";
@@ -73,7 +73,8 @@ afterEach(async () => {
 
 async function createWorkspaceMember(
   role: "member" | "manager" | "admin" = "member",
-  targetWorkspaceId = workspaceId
+  targetWorkspaceId = workspaceId,
+  verifyPrivilegedMfa = true
 ) {
   const password = `Test-${crypto.randomUUID()}!`;
   const { data: created, error: createError } =
@@ -102,7 +103,50 @@ async function createWorkspaceMember(
     password,
   });
   if (signInError) throw signInError;
+  if (role !== "member" && verifyPrivilegedMfa) {
+    const { data: enrollment, error: enrollmentError } =
+      await client.auth.mfa.enroll({
+        factorType: "totp",
+        friendlyName: `database-contract-${crypto.randomUUID()}`,
+      });
+    if (enrollmentError) throw enrollmentError;
+    const { data: challenge, error: challengeError } =
+      await client.auth.mfa.challenge({ factorId: enrollment.id });
+    if (challengeError) throw challengeError;
+    const { error: verificationError } = await client.auth.mfa.verify({
+      factorId: enrollment.id,
+      challengeId: challenge.id,
+      code: totpCode(enrollment.totp.secret),
+    });
+    if (verificationError) throw verificationError;
+  }
   return { client, userId: created.user.id };
+}
+
+function totpCode(secret: string) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = "";
+  for (const character of secret.toUpperCase().replaceAll("=", "")) {
+    const index = alphabet.indexOf(character);
+    if (index < 0) throw new Error("Invalid base32 TOTP secret");
+    bits += index.toString(2).padStart(5, "0");
+  }
+  const bytes: number[] = [];
+  for (let index = 0; index + 8 <= bits.length; index += 8) {
+    bytes.push(Number.parseInt(bits.slice(index, index + 8), 2));
+  }
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30_000)));
+  const digest = createHmac("sha1", Buffer.from(bytes))
+    .update(counter)
+    .digest();
+  const offset = digest[digest.length - 1]! & 0x0f;
+  const binary =
+    ((digest[offset]! & 0x7f) << 24) |
+    ((digest[offset + 1]! & 0xff) << 16) |
+    ((digest[offset + 2]! & 0xff) << 8) |
+    (digest[offset + 3]! & 0xff);
+  return (binary % 1_000_000).toString().padStart(6, "0");
 }
 
 async function createCall(
@@ -577,6 +621,63 @@ describe.skipIf(
     expect(privilegedFinalizeError).not.toBeNull();
   });
 
+  it("denies privileged database authority until the session reaches AAL2", async () => {
+    const manager = await createWorkspaceMember("manager", workspaceId, false);
+    const workspaceAdmin = await createWorkspaceMember(
+      "admin",
+      workspaceId,
+      false
+    );
+    const owner = await createWorkspaceMember("member");
+    const { callId } = await createCall(owner.userId, { status: "ready" });
+
+    const { data: visibleCalls, error: visibilityError } = await manager.client
+      .from("calls")
+      .select("id")
+      .eq("id", callId);
+    expect(visibilityError).toBeNull();
+    expect(visibleCalls).toEqual([]);
+
+    const { data: canView } = await manager.client.rpc("can_view_call", {
+      target_call_id: callId,
+    });
+    expect(canView).toBe(false);
+
+    const { error: inviteError } = await workspaceAdmin.client.rpc(
+      "create_workspace_invite",
+      {
+        target_email: `blocked-invite-${crypto.randomUUID()}@example.com`,
+        target_role: "member",
+      }
+    );
+    expect(inviteError?.message).toMatch(/Verified TOTP MFA is required/i);
+
+    // Reaching past the RPCs at the table changes nothing either.
+    const { error: directInviteError } = await workspaceAdmin.client
+      .from("workspace_invites")
+      .insert({
+        workspace_id: workspaceId,
+        email: `direct-invite-${crypto.randomUUID()}@example.com`,
+        role: "admin",
+        invited_by: workspaceAdmin.userId,
+      });
+    expect(directInviteError).not.toBeNull();
+
+    await workspaceAdmin.client
+      .from("workspace_members")
+      .update({ role: "admin" })
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", owner.userId);
+    const { data: unchanged, error: unchangedError } = await admin
+      .from("workspace_members")
+      .select("role")
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", owner.userId)
+      .single();
+    if (unchangedError) throw unchangedError;
+    expect(unchanged.role).toBe("member");
+  });
+
   it("requires immutable current Legal Document acceptance before gated access", async () => {
     const { client: initialAdmin, userId: initialAdminId } =
       await createWorkspaceMember("admin");
@@ -714,7 +815,9 @@ describe.skipIf(
       (document) => document.document_type === "terms"
     )!;
     const nextTerms = "Materially updated pilot terms.";
-    const materialTimestamp = new Date().toISOString();
+    // Backdated like the first publication so the version is already effective
+    // when the gate evaluates it, whatever the database clock reads.
+    const materialTimestamp = new Date(Date.now() - 1_000).toISOString();
     const { error: nextTermsError } = await admin
       .from("legal_document_versions")
       .insert({

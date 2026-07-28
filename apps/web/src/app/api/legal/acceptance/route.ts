@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { getAuthContext } from "@/lib/server/auth";
+import { getAuthContext, secondFactorApiError } from "@/lib/server/auth";
 import { parseJson, sanitizeError } from "@/lib/server/http";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
@@ -13,6 +13,10 @@ export async function POST(request: Request) {
   if (!auth) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // This route cannot use requireApiAuth — that gate is exactly what acceptance
+  // opens — but the assurance half of it still applies.
+  const secondFactorError = await secondFactorApiError(auth.member.role);
+  if (secondFactorError) return secondFactorError;
   const parsed = await parseJson(request, acceptanceSchema);
   if (parsed.error) return parsed.error;
 

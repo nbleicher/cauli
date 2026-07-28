@@ -21,25 +21,38 @@ export default async function WorkspaceAdminPage() {
   if (member.role !== "admin") redirect("/record");
   const supabase = await createServerSupabaseClient();
 
-  const [{ data: memberships }, { data: invites }] = await Promise.all([
-    supabase
-      .from("workspace_members")
-      .select(
-        `
+  const [{ data: memberships }, { data: invites }, { data: mfaStatusResult }] =
+    await Promise.all([
+      supabase
+        .from("workspace_members")
+        .select(
+          `
         user_id, role, status, joined_at,
         profile:profiles!workspace_members_user_id_fkey(email, display_name)
       `
-      )
-      .eq("workspace_id", member.workspaceId)
-      .order("joined_at"),
-    supabase
-      .from("workspace_invites")
-      .select("id, email, role, expires_at")
-      .eq("workspace_id", member.workspaceId)
-      .is("accepted_at", null)
-      .gt("expires_at", new Date().toISOString())
-      .order("created_at", { ascending: false }),
-  ]);
+        )
+        .eq("workspace_id", member.workspaceId)
+        .order("joined_at"),
+      supabase
+        .from("workspace_invites")
+        .select("id, email, role, expires_at")
+        .eq("workspace_id", member.workspaceId)
+        .is("accepted_at", null)
+        .gt("expires_at", new Date().toISOString())
+        .order("created_at", { ascending: false }),
+      supabase.functions.invoke("identity-admin", {
+        body: { action: "list_mfa_status" },
+      }),
+    ]);
+  const mfaStatuses = new Map(
+    (
+      (
+        mfaStatusResult as {
+          statuses?: { userId: string; enabled: boolean }[];
+        } | null
+      )?.statuses ?? []
+    ).map((status) => [status.userId, status.enabled])
+  );
 
   return (
     <main className="page page-narrow">
@@ -58,9 +71,7 @@ export default async function WorkspaceAdminPage() {
             role: membership.role as Role,
             status: membership.status as "active" | "suspended" | "former",
             joinedAt: membership.joined_at,
-            // Role-aware MFA state becomes application-owned in ticket #14;
-            // the normal web runtime deliberately has no Auth-admin secret.
-            mfaEnabled: false,
+            mfaEnabled: mfaStatuses.get(membership.user_id) ?? false,
           };
         })}
         invites={(invites ?? []).map((invite) => ({

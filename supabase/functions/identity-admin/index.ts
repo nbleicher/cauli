@@ -17,8 +17,12 @@ interface PasswordResetRequest {
   redirectTo: string;
 }
 
+interface ListMfaStatusRequest {
+  action: "list_mfa_status";
+}
+
 type IdentityAdminRequest =
-  InviteRequest | ResetMfaRequest | PasswordResetRequest;
+  InviteRequest | ResetMfaRequest | PasswordResetRequest | ListMfaStatusRequest;
 
 const jsonHeaders = {
   "Content-Type": "application/json; charset=utf-8",
@@ -29,6 +33,26 @@ function jsonResponse(body: unknown, status = 200) {
     status,
     headers: jsonHeaders,
   });
+}
+
+/**
+ * Reads the assurance level the caller actually presented. The SDK's
+ * getAuthenticatorAssuranceLevel() reads a stored session, and this function
+ * is handed a bearer token instead of one, so it would always report "no
+ * session" here. The token itself is authenticated separately by getUser()
+ * before this claim is trusted.
+ */
+function bearerAssuranceLevel(authorization: string) {
+  const payload = authorization.replace(/^Bearer\s+/i, "").split(".")[1];
+  if (!payload) return null;
+  try {
+    const base64 = payload.replaceAll("-", "+").replaceAll("_", "/");
+    const decoded = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "="));
+    const claims = JSON.parse(decoded) as { aal?: unknown };
+    return typeof claims.aal === "string" ? claims.aal : null;
+  } catch {
+    return null;
+  }
 }
 
 function safeMessage(error: unknown) {
@@ -58,7 +82,8 @@ Deno.serve(async (request) => {
     if (
       candidate.action !== "invite" &&
       candidate.action !== "reset_mfa" &&
-      candidate.action !== "request_password_reset"
+      candidate.action !== "request_password_reset" &&
+      candidate.action !== "list_mfa_status"
     ) {
       return jsonResponse({ error: "Unsupported identity action" }, 400);
     }
@@ -132,6 +157,12 @@ Deno.serve(async (request) => {
         403
       );
     }
+    if (bearerAssuranceLevel(authorization) !== "aal2") {
+      return jsonResponse(
+        { error: "Verified TOTP MFA is required for Workspace Admin actions" },
+        401
+      );
+    }
 
     const admin = createClient(supabaseUrl, serviceRoleKey, {
       auth: {
@@ -139,6 +170,29 @@ Deno.serve(async (request) => {
         persistSession: false,
       },
     });
+
+    if (body.action === "list_mfa_status") {
+      const { data: members, error: membersError } = await admin
+        .from("workspace_members")
+        .select("user_id")
+        .eq("workspace_id", membership.workspace_id);
+      if (membersError) throw membersError;
+      const statuses = [];
+      for (const member of members ?? []) {
+        const { data: factors, error: factorsError } =
+          await admin.auth.admin.mfa.listFactors({
+            userId: member.user_id,
+          });
+        if (factorsError) throw factorsError;
+        statuses.push({
+          userId: member.user_id,
+          enabled: (factors?.factors ?? []).some(
+            (factor) => factor.status === "verified"
+          ),
+        });
+      }
+      return jsonResponse({ statuses });
+    }
 
     if (body.action === "invite") {
       const configuredOrigin = new URL(
@@ -175,6 +229,16 @@ Deno.serve(async (request) => {
     }
 
     if (body.action === "reset_mfa") {
+      // A reset removes every factor, so self-service would let one compromised
+      // AAL2 session drop the Workspace Admin back to a single factor and
+      // re-enroll an attacker's authenticator. Replacing your own inaccessible
+      // factor is Recovery Code work, not an Admin action against yourself.
+      if (body.userId === user.id) {
+        return jsonResponse(
+          { error: "Another Workspace Admin must reset your authenticator" },
+          403
+        );
+      }
       const { data: targetMembership, error: targetError } = await admin
         .from("workspace_members")
         .select("user_id")
@@ -185,6 +249,19 @@ Deno.serve(async (request) => {
       if (!targetMembership) {
         return jsonResponse({ error: "Not a member of this Workspace" }, 404);
       }
+
+      const { error: initiationAuditError } = await admin.rpc(
+        "record_audit_event",
+        {
+          target_workspace_id: membership.workspace_id,
+          target_actor_id: user.id,
+          target_action: "workspace.member.mfa_reset_initiated",
+          target_entity_type: "workspace_member",
+          target_entity_id: body.userId,
+          target_metadata: {},
+        }
+      );
+      if (initiationAuditError) throw initiationAuditError;
 
       const { data: factors, error: listError } =
         await admin.auth.admin.mfa.listFactors({ userId: body.userId });
@@ -203,7 +280,7 @@ Deno.serve(async (request) => {
       const { error: auditError } = await admin.rpc("record_audit_event", {
         target_workspace_id: membership.workspace_id,
         target_actor_id: user.id,
-        target_action: "workspace.member.mfa_reset",
+        target_action: "workspace.member.mfa_reset_completed",
         target_entity_type: "workspace_member",
         target_entity_id: body.userId,
         target_metadata: { factors_removed: removed },

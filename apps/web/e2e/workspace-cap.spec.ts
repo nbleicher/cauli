@@ -1,8 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
 import { signInAsWorkspaceMember } from "./helpers/auth";
+import { enrollVerifiedTotp } from "./helpers/totp";
 
 const localUrl = "http://127.0.0.1:54321";
+const anonKey =
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "integration-test-anon-key";
 const localServiceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const workspaceId = "00000000-0000-0000-0000-000000000001";
@@ -48,7 +51,16 @@ test("the Workspace Admin admits the tenth active member and rejects the elevent
       if (membershipError) throw membershipError;
     }
 
-    await signInAsWorkspaceMember(page, emails[0], password);
+    const adminClient = createClient(localUrl, anonKey, {
+      auth: { persistSession: false },
+    });
+    const { error: signInError } = await adminClient.auth.signInWithPassword({
+      email: emails[0],
+      password,
+    });
+    if (signInError) throw signInError;
+    const { secret } = await enrollVerifiedTotp(adminClient);
+    await signInAsWorkspaceMember(page, emails[0], password, 2, secret);
     await page.goto("/admin/workspace");
     await expect(page.getByText("9 active members · 11 total")).toBeVisible();
 
