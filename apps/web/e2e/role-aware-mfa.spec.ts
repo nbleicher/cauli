@@ -168,6 +168,7 @@ test("an Admin Invitation remains pending until TOTP is verified", async ({
           response.url().includes("grant_type=password") &&
           response.ok()
       ),
+      page.waitForURL((url) => url.pathname !== "/login"),
       page.getByRole("button", { name: "Sign in" }).click(),
     ]);
     await page.goto(`/activate/password?invite=${inviteId}`);
