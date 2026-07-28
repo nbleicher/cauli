@@ -3,6 +3,7 @@ import {
   ClipboardCheck,
   FileClock,
   Headphones,
+  ListTodo,
   LogOut,
   Mic2,
   TriangleAlert,
@@ -24,6 +25,7 @@ interface AppShellProps {
 const memberNav = [
   { href: "/record", label: "Record", icon: Mic2 },
   { href: "/calls", label: "My Calls", icon: Headphones },
+  { href: "/follow-ups", label: "Follow-ups", icon: ListTodo },
 ];
 
 const accountNav = [{ href: "/account", label: "Account", icon: ShieldCheck }];

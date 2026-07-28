@@ -32,15 +32,27 @@ interface ReviewAnswer {
 interface Revision {
   id: string;
   revision: number;
+  scorecardVersionId: string;
   status: ReviewStatus;
   score: number | null;
+  summary: string;
+  followUp: string;
+  followUpState: string;
+  answers: ReviewAnswer[];
   submittedAt: string;
   submittedBy: string;
+}
+
+function sevenDaysFromToday() {
+  const dueDate = new Date();
+  dueDate.setUTCDate(dueDate.getUTCDate() + 7);
+  return dueDate.toISOString().slice(0, 10);
 }
 
 export interface ReviewEditorProps {
   callId: string;
   scorecardVersionId: string;
+  scorecardVersionNumber: number;
   scorecardName: string;
   categories: Category[];
   initialReview: {
@@ -48,7 +60,13 @@ export interface ReviewEditorProps {
     status: ReviewStatus;
     summary: string;
     followUp: string;
+    followUpDueDate: string | null;
     answers: ReviewAnswer[];
+  } | null;
+  assignment: {
+    assigneeId: string;
+    assigneeName: string;
+    version: number;
   } | null;
   revisions: Revision[];
   readOnly?: boolean;
@@ -57,9 +75,11 @@ export interface ReviewEditorProps {
 export function ReviewEditor({
   callId,
   scorecardVersionId,
+  scorecardVersionNumber,
   scorecardName,
   categories,
   initialReview,
+  assignment,
   revisions,
   readOnly = false,
 }: ReviewEditorProps) {
@@ -84,6 +104,9 @@ export function ReviewEditor({
   });
   const [summary, setSummary] = useState(initialReview?.summary ?? "");
   const [followUp, setFollowUp] = useState(initialReview?.followUp ?? "");
+  const [followUpDueDate, setFollowUpDueDate] = useState(
+    initialReview?.followUpDueDate ?? ""
+  );
   const [status, setStatus] = useState<Exclude<ReviewStatus, "unreviewed">>(
     initialReview?.status === "unreviewed" || !initialReview
       ? "in_progress"
@@ -125,6 +148,7 @@ export function ReviewEditor({
         status,
         summary,
         followUp,
+        followUpDueDate: status === "needs_follow_up" ? followUpDueDate : null,
         answers: reviewAnswers,
       },
       categories.flatMap((category) => category.criteria)
@@ -143,9 +167,12 @@ export function ReviewEditor({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             expectedVersion: initialReview?.version ?? 0,
+            expectedAssignmentVersion: assignment?.version ?? 0,
             status,
             summary,
             followUp,
+            followUpDueDate:
+              status === "needs_follow_up" ? followUpDueDate : null,
             answers: reviewAnswers,
           }),
         }
@@ -181,7 +208,13 @@ export function ReviewEditor({
         {!readOnly && (
           <select
             value={status}
-            onChange={(event) => setStatus(event.target.value as typeof status)}
+            onChange={(event) => {
+              const nextStatus = event.target.value as typeof status;
+              setStatus(nextStatus);
+              if (nextStatus === "needs_follow_up" && !followUpDueDate) {
+                setFollowUpDueDate(sevenDaysFromToday());
+              }
+            }}
           >
             <option value="in_progress">In progress</option>
             <option value="reviewed">Reviewed</option>
@@ -189,6 +222,9 @@ export function ReviewEditor({
           </select>
         )}
       </div>
+      <p className="review-assignee">
+        Review Assignee: {assignment?.assigneeName ?? "Unassigned"}
+      </p>
 
       {categories.map((category) => (
         <div className="score-category" key={category.id}>
@@ -286,6 +322,15 @@ export function ReviewEditor({
               maxLength={10_000}
             />
           )}
+          {!readOnly && (
+            <input
+              type="date"
+              aria-label="Follow-up due date"
+              value={followUpDueDate}
+              onChange={(event) => setFollowUpDueDate(event.target.value)}
+              required
+            />
+          )}
         </div>
       )}
 
@@ -308,16 +353,51 @@ export function ReviewEditor({
       {revisions.length > 0 && (
         <details className="review-history">
           <summary>
-            <History size={14} /> {revisions.length} submitted revision
+            <History size={14} /> {revisions.length} visible revision
             {revisions.length === 1 ? "" : "s"}
           </summary>
-          <div>
+          <div className="revision-list">
             {revisions.map((revision) => (
-              <p key={revision.id}>
-                <Check size={13} />v{revision.revision} ·{" "}
-                {revision.status.replaceAll("_", " ")} · {revision.score ?? "—"}{" "}
-                · {revision.submittedBy}
-              </p>
+              <details className="revision-card" key={revision.id}>
+                <summary>
+                  <Check size={13} />
+                  Revision {revision.revision} ·{" "}
+                  {revision.status.replaceAll("_", " ")} ·{" "}
+                  {revision.score ?? "—"} · {revision.submittedBy}
+                </summary>
+                <div>
+                  <p>
+                    Scorecard Version {scorecardVersionNumber} ·{" "}
+                    {new Date(revision.submittedAt).toLocaleString()}
+                  </p>
+                  <p>
+                    <strong>Summary:</strong>{" "}
+                    {revision.summary || "No summary provided."}
+                  </p>
+                  {revision.followUpState !== "not_required" && (
+                    <p>
+                      <strong>Follow-up:</strong>{" "}
+                      {revision.followUp || revision.followUpState}
+                    </p>
+                  )}
+                  <div className="revision-answers">
+                    {revision.answers.map((answer) => {
+                      const criterion = categories
+                        .flatMap((category) => category.criteria)
+                        .find((item) => item.id === answer.criterionId);
+                      return (
+                        <p key={answer.criterionId}>
+                          <strong>
+                            {criterion?.label ?? "Historical criterion"}:
+                          </strong>{" "}
+                          {answer.value ?? "N/A"}
+                          {answer.comment ? ` · ${answer.comment}` : ""}
+                        </p>
+                      );
+                    })}
+                  </div>
+                </div>
+              </details>
             ))}
           </div>
         </details>

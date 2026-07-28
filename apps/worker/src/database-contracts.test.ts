@@ -24,6 +24,7 @@ const createdScorecardTemplateIds: string[] = [];
 const createdStoragePaths: string[] = [];
 const createdUserIds: string[] = [];
 const createdWorkspaceIds: string[] = [];
+const createdScorecardTemplateIds: string[] = [];
 
 async function deleteAuthUser(userId: string) {
   let lastError: { message: string; status?: number } | null = null;
@@ -270,6 +271,1197 @@ describe.skipIf(
     !process.env.SUPABASE_SERVICE_ROLE_KEY ||
     !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 )("database authorization and durability contracts", () => {
+  it("keeps optional scoring and Scorecard Version comparability explicit", async () => {
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const manager = await createWorkspaceMember("manager");
+    const owner = await createWorkspaceMember("member");
+
+    const categories = [
+      {
+        name: "Discovery",
+        criteria: [
+          {
+            label: "Required discovery",
+            description: "",
+            weight: 1,
+            required: true,
+          },
+          {
+            label: "Optional next step",
+            description: "",
+            weight: 100,
+            required: false,
+          },
+        ],
+      },
+    ];
+    const { data: firstVersionId, error: firstPublishError } =
+      await workspaceAdmin.client.rpc("publish_scorecard_for_current_admin", {
+        target_template_id: null,
+        target_name: "Database contract Scorecard",
+        target_categories: categories,
+      });
+    expect(firstPublishError).toBeNull();
+
+    const { data: firstVersion, error: firstVersionError } = await admin
+      .from("scorecard_versions")
+      .select("id, template_id, name")
+      .eq("id", firstVersionId)
+      .single();
+    if (firstVersionError) throw firstVersionError;
+    createdScorecardTemplateIds.push(firstVersion.template_id);
+    expect(firstVersion.name).toBe("Database contract Scorecard");
+
+    const { data: firstCategories, error: firstCategoriesError } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", firstVersion.id);
+    if (firstCategoriesError) throw firstCategoriesError;
+    const { data: firstCriteria, error: firstCriteriaError } = await admin
+      .from("scorecard_criteria")
+      .select("id, label, required, weight")
+      .in(
+        "category_id",
+        (firstCategories ?? []).map((category) => category.id)
+      )
+      .order("position");
+    if (firstCriteriaError) throw firstCriteriaError;
+    const requiredCriterion = firstCriteria?.find(
+      (criterion) => criterion.required
+    );
+    const optionalCriterion = firstCriteria?.find(
+      (criterion) => !criterion.required
+    );
+    if (!requiredCriterion || !optionalCriterion) {
+      throw new Error("Expected required and optional criteria");
+    }
+
+    const firstCall = await createCall(owner.userId, { status: "ready" });
+    const { error: firstClaimError } = await manager.client.rpc(
+      "claim_review",
+      { target_call_id: firstCall.callId }
+    );
+    expect(firstClaimError).toBeNull();
+    const { data: firstReview, error: firstReviewError } =
+      await manager.client.rpc("submit_call_review_with_follow_up", {
+        target_call_id: firstCall.callId,
+        target_scorecard_version_id: firstVersion.id,
+        expected_version: 0,
+        expected_assignment_version: 1,
+        target_status: "reviewed",
+        target_summary: "Optional criterion is not applicable.",
+        target_follow_up: "",
+        target_follow_up_due_date: null,
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: 5,
+            comment: "Complete",
+          },
+          {
+            criterionId: optionalCriterion.id,
+            value: null,
+            comment: "Not applicable",
+          },
+        ],
+      });
+    expect(firstReviewError).toBeNull();
+    expect(firstReview.score).toBe(100);
+
+    const secondCall = await createCall(owner.userId, { status: "ready" });
+    const { error: secondClaimError } = await manager.client.rpc(
+      "claim_review",
+      { target_call_id: secondCall.callId }
+    );
+    expect(secondClaimError).toBeNull();
+    const { error: requiredNaError } = await manager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        target_call_id: secondCall.callId,
+        target_scorecard_version_id: firstVersion.id,
+        expected_version: 0,
+        expected_assignment_version: 1,
+        target_status: "reviewed",
+        target_summary: "Required criterion cannot be N/A.",
+        target_follow_up: "",
+        target_follow_up_due_date: null,
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: null,
+            comment: "",
+          },
+        ],
+      }
+    );
+    expect(requiredNaError?.message).toMatch(/required criteria/i);
+
+    const { error: immutableCriterionError } = await admin
+      .from("scorecard_criteria")
+      .update({ label: "Mutated publication" })
+      .eq("id", requiredCriterion.id);
+    expect(immutableCriterionError?.message).toMatch(/immutable/i);
+    const { error: immutableVersionError } = await admin
+      .from("scorecard_versions")
+      .delete()
+      .eq("id", firstVersion.id);
+    expect(immutableVersionError?.message).toMatch(/immutable/i);
+
+    const { data: secondVersionId, error: secondPublishError } =
+      await workspaceAdmin.client.rpc("publish_scorecard_for_current_admin", {
+        target_template_id: firstVersion.template_id,
+        target_name: "Database contract Scorecard",
+        target_categories: [
+          {
+            ...categories[0],
+            criteria: [
+              ...categories[0]!.criteria,
+              {
+                label: "Optional wrap-up",
+                description: "",
+                weight: 3,
+                required: false,
+              },
+            ],
+          },
+        ],
+      });
+    expect(secondPublishError).toBeNull();
+
+    const { data: boundReview } = await admin
+      .from("call_reviews")
+      .select("scorecard_version_id")
+      .eq("id", firstReview.id)
+      .single();
+    expect(boundReview?.scorecard_version_id).toBe(firstVersion.id);
+    const { data: preservedCriterion } = await admin
+      .from("scorecard_criteria")
+      .select("label")
+      .eq("id", requiredCriterion.id)
+      .single();
+    expect(preservedCriterion?.label).toBe("Required discovery");
+
+    const { data: secondVersionCategories } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", secondVersionId);
+    const { data: secondVersionCriteria } = await admin
+      .from("scorecard_criteria")
+      .select("id")
+      .in(
+        "category_id",
+        (secondVersionCategories ?? []).map((category) => category.id)
+      )
+      .order("position");
+    const thirdCall = await createCall(owner.userId, { status: "ready" });
+    const { error: thirdClaimError } = await manager.client.rpc(
+      "claim_review",
+      { target_call_id: thirdCall.callId }
+    );
+    expect(thirdClaimError).toBeNull();
+    const { error: thirdReviewError } = await manager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        target_call_id: thirdCall.callId,
+        target_scorecard_version_id: secondVersionId,
+        expected_version: 0,
+        expected_assignment_version: 1,
+        target_status: "reviewed",
+        target_summary: "Second version review.",
+        target_follow_up: "",
+        target_follow_up_due_date: null,
+        target_answers: (secondVersionCriteria ?? []).map((criterion) => ({
+          criterionId: criterion.id,
+          value: 4,
+          comment: "",
+        })),
+      }
+    );
+    expect(thirdReviewError).toBeNull();
+
+    const { data: defaultSegments } = await workspaceAdmin.client
+      .from("review_score_segments")
+      .select("scorecard_version_id, analytics_segment_id")
+      .in("call_id", [firstCall.callId, thirdCall.callId])
+      .order("scorecard_version_id");
+    expect(
+      new Set(
+        (defaultSegments ?? []).map((segment) => segment.analytics_segment_id)
+      ).size
+    ).toBe(2);
+
+    const { error: managerComparisonError } = await manager.client.rpc(
+      "mark_scorecard_versions_comparable",
+      { target_version_ids: [firstVersion.id, secondVersionId] }
+    );
+    expect(managerComparisonError?.message).toMatch(/admin access/i);
+
+    const { data: comparisonSetId, error: comparisonError } =
+      await workspaceAdmin.client.rpc("mark_scorecard_versions_comparable", {
+        target_version_ids: [firstVersion.id, secondVersionId],
+      });
+    expect(comparisonError).toBeNull();
+
+    const { data: combinedSegments } = await workspaceAdmin.client
+      .from("review_score_segments")
+      .select("analytics_segment_id")
+      .in("call_id", [firstCall.callId, thirdCall.callId]);
+    expect(
+      new Set(
+        (combinedSegments ?? []).map((segment) => segment.analytics_segment_id)
+      )
+    ).toEqual(new Set([comparisonSetId]));
+
+    const { error: revokeError } = await workspaceAdmin.client.rpc(
+      "revoke_scorecard_version_comparability",
+      { target_comparison_set_id: comparisonSetId }
+    );
+    expect(revokeError).toBeNull();
+    const { data: segmentedAgain } = await workspaceAdmin.client
+      .from("review_score_segments")
+      .select("analytics_segment_id")
+      .in("call_id", [firstCall.callId, thirdCall.callId]);
+    expect(
+      new Set(
+        (segmentedAgain ?? []).map((segment) => segment.analytics_segment_id)
+      )
+    ).toEqual(new Set([firstVersion.id, secondVersionId]));
+
+    const { data: auditEvents } = await admin
+      .from("audit_events")
+      .select("action")
+      .eq("workspace_id", workspaceId)
+      .in("action", [
+        "scorecard.version.published",
+        "scorecard.versions.comparable",
+        "scorecard.versions.comparability_revoked",
+      ]);
+    expect(new Set((auditEvents ?? []).map((event) => event.action))).toEqual(
+      new Set([
+        "scorecard.version.published",
+        "scorecard.versions.comparable",
+        "scorecard.versions.comparability_revoked",
+      ])
+    );
+  });
+
+  it("claims and assigns Reviews atomically within one Workspace", async () => {
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const firstManager = await createWorkspaceMember("manager");
+    const secondManager = await createWorkspaceMember("manager");
+    const owner = await createWorkspaceMember("member");
+
+    const { data: scorecardVersionId, error: publishError } =
+      await workspaceAdmin.client.rpc("publish_scorecard_for_current_admin", {
+        target_template_id: null,
+        target_name: "Assignment contract Scorecard",
+        target_categories: [
+          {
+            name: "Quality",
+            criteria: [
+              {
+                label: "Clear outcome",
+                description: "",
+                weight: 1,
+                required: true,
+              },
+            ],
+          },
+        ],
+      });
+    expect(publishError).toBeNull();
+    const { data: scorecardVersion } = await admin
+      .from("scorecard_versions")
+      .select("template_id")
+      .eq("id", scorecardVersionId)
+      .single();
+    createdScorecardTemplateIds.push(scorecardVersion!.template_id);
+    const { data: scorecardCategory } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", scorecardVersionId)
+      .single();
+    const { data: scorecardCriterion } = await admin
+      .from("scorecard_criteria")
+      .select("id")
+      .eq("category_id", scorecardCategory!.id)
+      .single();
+
+    const claimedCall = await createCall(owner.userId, { status: "ready" });
+    const concurrentClaims = await Promise.all([
+      firstManager.client.rpc("claim_review", {
+        target_call_id: claimedCall.callId,
+      }),
+      secondManager.client.rpc("claim_review", {
+        target_call_id: claimedCall.callId,
+      }),
+    ]);
+    expect(concurrentClaims.filter((claim) => !claim.error)).toHaveLength(1);
+    expect(concurrentClaims.filter((claim) => claim.error)).toHaveLength(1);
+    expect(
+      concurrentClaims.find((claim) => claim.error)?.error?.message
+    ).toMatch(/already assigned/i);
+
+    const { data: claimedAssignment } = await admin
+      .from("call_review_assignments")
+      .select("assignee_id, version")
+      .eq("call_id", claimedCall.callId)
+      .single();
+    expect(claimedAssignment?.version).toBe(1);
+
+    const firstCanEdit = await firstManager.client.rpc("can_review_call", {
+      target_call_id: claimedCall.callId,
+    });
+    const secondCanEdit = await secondManager.client.rpc("can_review_call", {
+      target_call_id: claimedCall.callId,
+    });
+    expect(
+      [firstCanEdit.data === true, secondCanEdit.data === true].filter(Boolean)
+    ).toHaveLength(1);
+
+    const assignedCall = await createCall(owner.userId, { status: "ready" });
+    const { data: initialAssignment, error: assignmentError } =
+      await workspaceAdmin.client.rpc("assign_review", {
+        target_call_id: assignedCall.callId,
+        target_assignee_id: firstManager.userId,
+        expected_assignment_version: 0,
+      });
+    expect(assignmentError).toBeNull();
+    expect(initialAssignment).toMatchObject({
+      assignee_id: firstManager.userId,
+      version: 1,
+    });
+
+    const { error: staleReassignmentError } = await workspaceAdmin.client.rpc(
+      "assign_review",
+      {
+        target_call_id: assignedCall.callId,
+        target_assignee_id: secondManager.userId,
+        expected_assignment_version: 0,
+      }
+    );
+    expect(staleReassignmentError?.message).toMatch(/version conflict/i);
+
+    const { data: reassigned, error: reassignmentError } =
+      await workspaceAdmin.client.rpc("assign_review", {
+        target_call_id: assignedCall.callId,
+        target_assignee_id: secondManager.userId,
+        expected_assignment_version: 1,
+      });
+    expect(reassignmentError).toBeNull();
+    expect(reassigned).toMatchObject({
+      assignee_id: secondManager.userId,
+      version: 2,
+    });
+
+    const { error: legacySubmissionBypassError } =
+      await firstManager.client.rpc("submit_call_review", {
+        target_call_id: assignedCall.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 0,
+        target_status: "reviewed",
+        target_summary: "Legacy overload must not bypass assignment.",
+        target_follow_up: "",
+        target_answers: [],
+      });
+    expect(legacySubmissionBypassError?.message).toMatch(
+      /permission denied|could not find/i
+    );
+
+    const reviewPayload = {
+      target_call_id: assignedCall.callId,
+      target_scorecard_version_id: scorecardVersionId,
+      expected_version: 0,
+      target_status: "reviewed",
+      target_summary: "Assignment concurrency is preserved.",
+      target_follow_up: "",
+      target_follow_up_due_date: null,
+      target_answers: [
+        {
+          criterionId: scorecardCriterion!.id,
+          value: 5,
+          comment: "",
+        },
+      ],
+    };
+    const { error: staleEditorError } = await firstManager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        ...reviewPayload,
+        expected_assignment_version: 1,
+      }
+    );
+    expect(staleEditorError?.message).toMatch(/assignment version conflict/i);
+    const { error: formerAssigneeError } = await firstManager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        ...reviewPayload,
+        expected_assignment_version: 2,
+      }
+    );
+    expect(formerAssigneeError?.message).toMatch(/only the Review Assignee/i);
+    const { data: submittedReview, error: submitError } =
+      await secondManager.client.rpc("submit_call_review_with_follow_up", {
+        ...reviewPayload,
+        expected_assignment_version: 2,
+      });
+    expect(submitError).toBeNull();
+    expect(submittedReview).toMatchObject({
+      call_id: assignedCall.callId,
+      version: 1,
+      status: "reviewed",
+    });
+
+    const firstBulkCall = await createCall(owner.userId, { status: "ready" });
+    const secondBulkCall = await createCall(owner.userId, { status: "ready" });
+    const preclaimedCall = await createCall(owner.userId, { status: "ready" });
+    const stillUnassignedCall = await createCall(owner.userId, {
+      status: "ready",
+    });
+    const { error: preclaimError } = await secondManager.client.rpc(
+      "claim_review",
+      { target_call_id: preclaimedCall.callId }
+    );
+    expect(preclaimError).toBeNull();
+
+    const { data: bulkAssignments, error: bulkError } =
+      await workspaceAdmin.client.rpc("bulk_assign_unassigned_reviews", {
+        target_call_ids: [firstBulkCall.callId, secondBulkCall.callId],
+        target_assignee_id: firstManager.userId,
+      });
+    expect(bulkError).toBeNull();
+    expect(bulkAssignments).toHaveLength(2);
+
+    const { data: staleFilteredBulk, error: staleFilteredBulkError } =
+      await workspaceAdmin.client.rpc("bulk_assign_unassigned_reviews", {
+        target_call_ids: [preclaimedCall.callId, stillUnassignedCall.callId],
+        target_assignee_id: firstManager.userId,
+      });
+    expect(staleFilteredBulkError).toBeNull();
+    expect(staleFilteredBulk).toHaveLength(1);
+    expect(staleFilteredBulk?.[0]?.call_id).toBe(stillUnassignedCall.callId);
+    const { data: preservedClaim } = await admin
+      .from("call_review_assignments")
+      .select("assignee_id")
+      .eq("call_id", preclaimedCall.callId)
+      .single();
+    expect(preservedClaim?.assignee_id).toBe(secondManager.userId);
+
+    const otherWorkspaceId = crypto.randomUUID();
+    createdWorkspaceIds.push(otherWorkspaceId);
+    const { error: otherWorkspaceError } = await admin
+      .from("workspaces")
+      .insert({
+        id: otherWorkspaceId,
+        name: "Other assignment Workspace",
+        slug: `other-assignment-${otherWorkspaceId.slice(0, 8)}`,
+      });
+    if (otherWorkspaceError) throw otherWorkspaceError;
+    const otherOwner = await createWorkspaceMember("member", otherWorkspaceId);
+    const otherCall = await createCall(otherOwner.userId, {
+      workspace_id: otherWorkspaceId,
+      status: "ready",
+      chunk_prefix: `${otherWorkspaceId}/${crypto.randomUUID()}/chunks`,
+    });
+    const rollbackCall = await createCall(owner.userId, { status: "ready" });
+    const { error: crossWorkspaceBulkError } = await workspaceAdmin.client.rpc(
+      "bulk_assign_unassigned_reviews",
+      {
+        target_call_ids: [rollbackCall.callId, otherCall.callId],
+        target_assignee_id: firstManager.userId,
+      }
+    );
+    expect(crossWorkspaceBulkError?.message).toMatch(/Admin Workspace/i);
+    const { count: rollbackAssignmentCount } = await admin
+      .from("call_review_assignments")
+      .select("call_id", { count: "exact", head: true })
+      .eq("call_id", rollbackCall.callId);
+    expect(rollbackAssignmentCount).toBe(0);
+
+    const { error: directCrossWorkspaceWrite } = await firstManager.client
+      .from("call_review_assignments")
+      .insert({
+        call_id: otherCall.callId,
+        workspace_id: otherWorkspaceId,
+        assignee_id: firstManager.userId,
+        assigned_by: firstManager.userId,
+      });
+    expect(directCrossWorkspaceWrite).not.toBeNull();
+
+    const affectedBulkCallIds = [
+      firstBulkCall.callId,
+      secondBulkCall.callId,
+      stillUnassignedCall.callId,
+    ];
+    const { data: auditEvents } = await admin
+      .from("audit_events")
+      .select("action, entity_id, metadata")
+      .eq("workspace_id", workspaceId)
+      .in("entity_id", [
+        claimedCall.callId,
+        assignedCall.callId,
+        preclaimedCall.callId,
+        ...affectedBulkCallIds,
+      ]);
+    expect(
+      auditEvents?.some(
+        (event) =>
+          event.action === "review.claimed" &&
+          event.entity_id === claimedCall.callId
+      )
+    ).toBe(true);
+    expect(
+      auditEvents?.some(
+        (event) =>
+          event.action === "review.assigned" &&
+          event.entity_id === assignedCall.callId
+      )
+    ).toBe(true);
+    expect(
+      auditEvents?.some(
+        (event) =>
+          event.action === "review.reassigned" &&
+          event.entity_id === assignedCall.callId
+      )
+    ).toBe(true);
+    for (const callId of affectedBulkCallIds) {
+      expect(
+        auditEvents?.some(
+          (event) =>
+            event.action === "review.bulk_assigned" &&
+            event.entity_id === callId &&
+            typeof event.metadata.bulk_operation_id === "string"
+        )
+      ).toBe(true);
+    }
+  });
+
+  it("preserves complete immutable Review Revision history with In Progress privacy", async () => {
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const manager = await createWorkspaceMember("manager");
+    const owner = await createWorkspaceMember("member");
+    const sameWorkspaceNonOwner = await createWorkspaceMember("member");
+
+    const { data: scorecardVersionId, error: publishError } =
+      await workspaceAdmin.client.rpc("publish_scorecard_for_current_admin", {
+        target_template_id: null,
+        target_name: "Revision history Scorecard",
+        target_categories: [
+          {
+            name: "Quality",
+            criteria: [
+              {
+                label: "Required outcome",
+                description: "",
+                weight: 3,
+                required: true,
+              },
+              {
+                label: "Optional detail",
+                description: "",
+                weight: 1,
+                required: false,
+              },
+            ],
+          },
+        ],
+      });
+    expect(publishError).toBeNull();
+    const { data: version } = await admin
+      .from("scorecard_versions")
+      .select("template_id")
+      .eq("id", scorecardVersionId)
+      .single();
+    createdScorecardTemplateIds.push(version!.template_id);
+    const { data: categories } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", scorecardVersionId);
+    const { data: criteria } = await admin
+      .from("scorecard_criteria")
+      .select("id, required")
+      .in(
+        "category_id",
+        (categories ?? []).map((category) => category.id)
+      )
+      .order("position");
+    const requiredCriterion = criteria?.find((criterion) => criterion.required);
+    const optionalCriterion = criteria?.find(
+      (criterion) => !criterion.required
+    );
+    if (!requiredCriterion || !optionalCriterion) {
+      throw new Error("Expected both revision-history criteria");
+    }
+
+    const call = await createCall(owner.userId, { status: "ready" });
+    const { error: claimError } = await manager.client.rpc("claim_review", {
+      target_call_id: call.callId,
+    });
+    expect(claimError).toBeNull();
+
+    const { data: firstReview, error: firstSubmitError } =
+      await manager.client.rpc("submit_call_review_with_follow_up", {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 0,
+        expected_assignment_version: 1,
+        target_status: "reviewed",
+        target_summary: "First submitted summary.",
+        target_follow_up: "",
+        target_follow_up_due_date: null,
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: 5,
+            comment: "First required comment.",
+          },
+          {
+            criterionId: optionalCriterion.id,
+            value: null,
+            comment: "First optional N/A comment.",
+          },
+        ],
+      });
+    expect(firstSubmitError).toBeNull();
+    expect(firstReview).toMatchObject({ version: 1, score: 100 });
+
+    const { error: inProgressSubmitError } = await manager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 1,
+        expected_assignment_version: 1,
+        target_status: "in_progress",
+        target_summary: "Private In Progress summary.",
+        target_follow_up: "",
+        target_follow_up_due_date: null,
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: 1,
+            comment: "Private In Progress comment.",
+          },
+        ],
+      }
+    );
+    expect(inProgressSubmitError).toBeNull();
+
+    const { data: ownerHistoryDuringInProgress, error: ownerHistoryError } =
+      await owner.client.rpc("review_revision_history", {
+        target_call_id: call.callId,
+      });
+    expect(ownerHistoryError).toBeNull();
+    expect(ownerHistoryDuringInProgress).toHaveLength(1);
+    expect(ownerHistoryDuringInProgress?.[0]).toMatchObject({
+      revision: 1,
+      scorecard_version_id: scorecardVersionId,
+      status: "reviewed",
+      score: 100,
+      summary: "First submitted summary.",
+      follow_up_state: "not_required",
+      submitted_by: manager.userId,
+    });
+    expect(JSON.stringify(ownerHistoryDuringInProgress)).not.toContain(
+      "Private In Progress"
+    );
+
+    const { data: thirdReview, error: thirdSubmitError } =
+      await manager.client.rpc("submit_call_review_with_follow_up", {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 2,
+        expected_assignment_version: 1,
+        target_status: "needs_follow_up",
+        target_summary: "Third submitted summary.",
+        target_follow_up: "Complete the documented action.",
+        target_follow_up_due_date: null,
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: 3,
+            comment: "Third required comment.",
+          },
+          {
+            criterionId: optionalCriterion.id,
+            value: 5,
+            comment: "Third optional comment.",
+          },
+        ],
+      });
+    expect(thirdSubmitError).toBeNull();
+    expect(thirdReview).toMatchObject({
+      version: 3,
+      status: "needs_follow_up",
+    });
+
+    const { data: managerHistory, error: managerHistoryError } =
+      await manager.client.rpc("review_revision_history", {
+        target_call_id: call.callId,
+      });
+    expect(managerHistoryError).toBeNull();
+    expect(
+      managerHistory?.map((revision: { revision: number }) => revision.revision)
+    ).toEqual([3, 2, 1]);
+    expect(managerHistory?.[0]).toMatchObject({
+      scorecard_version_id: scorecardVersionId,
+      status: "needs_follow_up",
+      summary: "Third submitted summary.",
+      follow_up: "Complete the documented action.",
+      follow_up_state: "open",
+      submitted_by: manager.userId,
+    });
+    expect(managerHistory?.[0]?.answers).toEqual([
+      {
+        criterionId: requiredCriterion.id,
+        value: 3,
+        comment: "Third required comment.",
+      },
+      {
+        criterionId: optionalCriterion.id,
+        value: 5,
+        comment: "Third optional comment.",
+      },
+    ]);
+    expect(Date.parse(managerHistory![0]!.submitted_at)).not.toBeNaN();
+
+    const { data: ownerHistoryAfterSubmission } = await owner.client.rpc(
+      "review_revision_history",
+      { target_call_id: call.callId }
+    );
+    expect(
+      ownerHistoryAfterSubmission?.map(
+        (revision: { revision: number }) => revision.revision
+      )
+    ).toEqual([3, 1]);
+    const { data: nonOwnerHistory } = await sameWorkspaceNonOwner.client.rpc(
+      "review_revision_history",
+      { target_call_id: call.callId }
+    );
+    expect(nonOwnerHistory).toEqual([]);
+
+    const { data: ownerDirectHistory, error: ownerDirectHistoryError } =
+      await owner.client
+        .from("review_revisions")
+        .select("revision, status")
+        .eq("review_id", firstReview.id)
+        .order("revision");
+    expect(ownerDirectHistoryError).toBeNull();
+    expect(ownerDirectHistory).toEqual([
+      { revision: 1, status: "reviewed" },
+      { revision: 3, status: "needs_follow_up" },
+    ]);
+
+    const { error: suspendOwnerError } = await workspaceAdmin.client.rpc(
+      "set_workspace_member_status",
+      {
+        target_user_id: owner.userId,
+        target_status: "suspended",
+      }
+    );
+    expect(suspendOwnerError).toBeNull();
+    const { data: suspendedOwnerDirectHistory } = await owner.client
+      .from("review_revisions")
+      .select("id")
+      .eq("review_id", firstReview.id);
+    expect(suspendedOwnerDirectHistory).toEqual([]);
+
+    const { error: staleReviewError } = await manager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 2,
+        expected_assignment_version: 1,
+        target_status: "reviewed",
+        target_summary: "Stale overwrite.",
+        target_follow_up: "",
+        target_follow_up_due_date: null,
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: 1,
+            comment: "",
+          },
+        ],
+      }
+    );
+    expect(staleReviewError?.message).toMatch(/Review version conflict/i);
+    const { count: unchangedRevisionCount } = await admin
+      .from("review_revisions")
+      .select("id", { count: "exact", head: true })
+      .eq("review_id", firstReview.id);
+    expect(unchangedRevisionCount).toBe(3);
+
+    const firstRevisionId = managerHistory?.find(
+      (revision: { revision: number }) => revision.revision === 1
+    )?.id;
+    if (!firstRevisionId) throw new Error("Expected the first Review Revision");
+    const { error: mutationError } = await admin
+      .from("review_revisions")
+      .update({ summary: "Mutated history" })
+      .eq("id", firstRevisionId);
+    expect(mutationError?.message).toMatch(/permission denied|immutable/i);
+    const { error: individualDeleteError } = await admin
+      .from("review_revisions")
+      .delete()
+      .eq("id", firstRevisionId);
+    expect(individualDeleteError?.message).toMatch(
+      /permission denied|whole-Call deletion/i
+    );
+
+    const otherWorkspaceId = crypto.randomUUID();
+    createdWorkspaceIds.push(otherWorkspaceId);
+    const { error: workspaceError } = await admin.from("workspaces").insert({
+      id: otherWorkspaceId,
+      name: "Other revision Workspace",
+      slug: `other-revision-${otherWorkspaceId.slice(0, 8)}`,
+    });
+    if (workspaceError) throw workspaceError;
+    const otherWorkspaceMember = await createWorkspaceMember(
+      "member",
+      otherWorkspaceId
+    );
+    const { data: crossWorkspaceHistory } =
+      await otherWorkspaceMember.client.rpc("review_revision_history", {
+        target_call_id: call.callId,
+      });
+    expect(crossWorkspaceHistory).toEqual([]);
+
+    const { error: wholeCallDeleteError } = await admin
+      .from("calls")
+      .delete()
+      .eq("id", call.callId);
+    expect(wholeCallDeleteError).toBeNull();
+    const { count: retainedAfterCallDelete } = await admin
+      .from("review_revisions")
+      .select("id", { count: "exact", head: true })
+      .eq("review_id", firstReview.id);
+    expect(retainedAfterCallDelete).toBe(0);
+  });
+
+  it("tracks dated Follow-ups through overdue, resolution, reassignment, and verification", async () => {
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const firstManager = await createWorkspaceMember("manager");
+    const secondManager = await createWorkspaceMember("manager");
+    const owner = await createWorkspaceMember("member");
+    const nonOwner = await createWorkspaceMember("member");
+
+    const { data: scorecardVersionId, error: publishError } =
+      await workspaceAdmin.client.rpc("publish_scorecard_for_current_admin", {
+        target_template_id: null,
+        target_name: "Follow-up contract Scorecard",
+        target_categories: [
+          {
+            name: "Quality",
+            criteria: [
+              {
+                label: "Required outcome",
+                description: "",
+                weight: 1,
+                required: true,
+              },
+            ],
+          },
+        ],
+      });
+    expect(publishError).toBeNull();
+    const { data: version } = await admin
+      .from("scorecard_versions")
+      .select("template_id")
+      .eq("id", scorecardVersionId)
+      .single();
+    createdScorecardTemplateIds.push(version!.template_id);
+    const { data: category } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", scorecardVersionId)
+      .single();
+    const { data: criterion } = await admin
+      .from("scorecard_criteria")
+      .select("id")
+      .eq("category_id", category!.id)
+      .single();
+
+    const call = await createCall(owner.userId, { status: "ready" });
+    const { error: claimError } = await firstManager.client.rpc(
+      "claim_review",
+      { target_call_id: call.callId }
+    );
+    expect(claimError).toBeNull();
+    const { data: review, error: submitError } = await firstManager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 0,
+        expected_assignment_version: 1,
+        target_status: "needs_follow_up",
+        target_summary: "A dated action is required.",
+        target_follow_up: "Complete the agreed coaching action.",
+        target_follow_up_due_date: null,
+        target_answers: [
+          {
+            criterionId: criterion!.id,
+            value: 3,
+            comment: "",
+          },
+        ],
+      }
+    );
+    expect(submitError).toBeNull();
+
+    const { data: followUp, error: followUpError } = await admin
+      .from("follow_ups")
+      .select(
+        "id, review_id, call_id, owner_id, due_date, status, version, created_from_revision"
+      )
+      .eq("call_id", call.callId)
+      .single();
+    if (followUpError) throw followUpError;
+    expect(followUp).toMatchObject({
+      review_id: review.id,
+      call_id: call.callId,
+      owner_id: owner.userId,
+      status: "open",
+      version: 1,
+      created_from_revision: 1,
+    });
+    const defaultDueDate = new Date();
+    defaultDueDate.setUTCDate(defaultDueDate.getUTCDate() + 7);
+    expect(followUp.due_date).toBe(defaultDueDate.toISOString().slice(0, 10));
+
+    const dueDate = new Date(`${followUp.due_date}T00:00:00Z`);
+    const overdueDate = new Date(dueDate);
+    overdueDate.setUTCDate(overdueDate.getUTCDate() + 1);
+    const { data: ownerOpenQueue } = await owner.client.rpc("follow_up_queue", {
+      as_of_date: followUp.due_date,
+    });
+    expect(ownerOpenQueue).toHaveLength(1);
+    expect(ownerOpenQueue?.[0]).toMatchObject({
+      id: followUp.id,
+      display_status: "open",
+      can_resolve: true,
+      can_verify: false,
+    });
+    const { data: ownerOverdueQueue } = await owner.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(ownerOverdueQueue?.[0]?.display_status).toBe("overdue");
+    const { data: assigneeQueue } = await firstManager.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(assigneeQueue).toHaveLength(1);
+    expect(assigneeQueue?.[0]).toMatchObject({
+      review_assignee_id: firstManager.userId,
+      can_resolve: false,
+      can_verify: false,
+    });
+    const { data: adminQueue } = await workspaceAdmin.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(adminQueue).toHaveLength(1);
+    const { data: nonOwnerQueue } = await nonOwner.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(nonOwnerQueue).toEqual([]);
+
+    const { error: nonOwnerResolveError } = await nonOwner.client.rpc(
+      "resolve_follow_up",
+      {
+        target_follow_up_id: followUp.id,
+        expected_version: 1,
+      }
+    );
+    expect(nonOwnerResolveError?.message).toMatch(/only the Follow-up owner/i);
+
+    const concurrentResolutions = await Promise.all([
+      owner.client.rpc("resolve_follow_up", {
+        target_follow_up_id: followUp.id,
+        expected_version: 1,
+      }),
+      owner.client.rpc("resolve_follow_up", {
+        target_follow_up_id: followUp.id,
+        expected_version: 1,
+      }),
+    ]);
+    expect(
+      concurrentResolutions.filter((result) => !result.error)
+    ).toHaveLength(1);
+    expect(concurrentResolutions.filter((result) => result.error)).toHaveLength(
+      1
+    );
+    expect(
+      concurrentResolutions.find((result) => result.error)?.error?.message
+    ).toMatch(/version conflict/i);
+
+    const { data: reassigned, error: reassignmentError } =
+      await workspaceAdmin.client.rpc("assign_review", {
+        target_call_id: call.callId,
+        target_assignee_id: secondManager.userId,
+        expected_assignment_version: 1,
+      });
+    expect(reassignmentError).toBeNull();
+    expect(reassigned).toMatchObject({
+      assignee_id: secondManager.userId,
+      version: 2,
+    });
+
+    const { data: awaitingQueue } = await secondManager.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(awaitingQueue?.[0]).toMatchObject({
+      display_status: "awaiting_verification",
+      can_verify: true,
+      version: 2,
+    });
+    const { error: formerAssigneeVerifyError } = await firstManager.client.rpc(
+      "verify_follow_up",
+      {
+        target_follow_up_id: followUp.id,
+        expected_version: 2,
+      }
+    );
+    expect(formerAssigneeVerifyError?.message).toMatch(
+      /Review Assignee or an Admin/i
+    );
+    const { data: verified, error: verifyError } =
+      await secondManager.client.rpc("verify_follow_up", {
+        target_follow_up_id: followUp.id,
+        expected_version: 2,
+      });
+    expect(verifyError).toBeNull();
+    expect(verified).toMatchObject({ status: "verified", version: 3 });
+    const { data: closedOwnerQueue } = await owner.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(closedOwnerQueue).toEqual([]);
+
+    const reopenedDueDate = new Date(overdueDate);
+    reopenedDueDate.setUTCDate(reopenedDueDate.getUTCDate() + 14);
+    const { error: reopenError } = await secondManager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 1,
+        expected_assignment_version: 2,
+        target_status: "needs_follow_up",
+        target_summary: "A new submission reopens the tracked work.",
+        target_follow_up: "Complete the revised coaching action.",
+        target_follow_up_due_date: reopenedDueDate.toISOString().slice(0, 10),
+        target_answers: [
+          {
+            criterionId: criterion!.id,
+            value: 4,
+            comment: "",
+          },
+        ],
+      }
+    );
+    expect(reopenError).toBeNull();
+    const { data: reopened, count: followUpCount } = await admin
+      .from("follow_ups")
+      .select("id, status, version, created_from_revision", {
+        count: "exact",
+      })
+      .eq("review_id", review.id)
+      .single();
+    expect(followUpCount).toBe(1);
+    expect(reopened).toMatchObject({
+      id: followUp.id,
+      status: "open",
+      version: 4,
+      created_from_revision: 2,
+    });
+
+    const pastCall = await createCall(owner.userId, { status: "ready" });
+    const { error: pastClaimError } = await secondManager.client.rpc(
+      "claim_review",
+      { target_call_id: pastCall.callId }
+    );
+    expect(pastClaimError).toBeNull();
+    const pastDate = new Date();
+    pastDate.setUTCDate(pastDate.getUTCDate() - 1);
+    const { error: pastDueDateError } = await secondManager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        target_call_id: pastCall.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 0,
+        expected_assignment_version: 1,
+        target_status: "needs_follow_up",
+        target_summary: "Past due dates are invalid.",
+        target_follow_up: "This should roll back.",
+        target_follow_up_due_date: pastDate.toISOString().slice(0, 10),
+        target_answers: [
+          {
+            criterionId: criterion!.id,
+            value: 3,
+            comment: "",
+          },
+        ],
+      }
+    );
+    expect(pastDueDateError?.message).toMatch(/cannot be in the past/i);
+    const { count: pastCallFollowUps } = await admin
+      .from("follow_ups")
+      .select("id", { count: "exact", head: true })
+      .eq("call_id", pastCall.callId);
+    const { count: pastCallReviews } = await admin
+      .from("call_reviews")
+      .select("id", { count: "exact", head: true })
+      .eq("call_id", pastCall.callId);
+    expect(pastCallFollowUps).toBe(0);
+    expect(pastCallReviews).toBe(0);
+
+    const { error: directStateWriteError } = await owner.client
+      .from("follow_ups")
+      .update({ status: "verified" })
+      .eq("id", followUp.id);
+    expect(directStateWriteError).not.toBeNull();
+
+    const { data: auditEvents } = await admin
+      .from("audit_events")
+      .select("action, entity_id, metadata")
+      .eq("entity_id", followUp.id);
+    expect(auditEvents?.map((event) => event.action)).toEqual(
+      expect.arrayContaining([
+        "follow_up.created",
+        "follow_up.resolved",
+        "follow_up.verified",
+        "follow_up.reopened",
+      ])
+    );
+    expect(JSON.stringify(auditEvents)).not.toContain(
+      "Complete the agreed coaching action."
+    );
+
+    const { data: ownerDirectFollowUps, error: ownerDirectFollowUpsError } =
+      await owner.client.from("follow_ups").select("id").eq("id", followUp.id);
+    expect(ownerDirectFollowUpsError).toBeNull();
+    expect(ownerDirectFollowUps).toEqual([{ id: followUp.id }]);
+    const { error: suspendOwnerError } = await workspaceAdmin.client.rpc(
+      "set_workspace_member_status",
+      {
+        target_user_id: owner.userId,
+        target_status: "suspended",
+      }
+    );
+    expect(suspendOwnerError).toBeNull();
+    const { data: suspendedOwnerDirectFollowUps } = await owner.client
+      .from("follow_ups")
+      .select("id")
+      .eq("id", followUp.id);
+    expect(suspendedOwnerDirectFollowUps).toEqual([]);
+  });
+
   it("enforces one Workspace per person and the ten-active-member pilot cap", async () => {
     const members = [];
     for (let index = 0; index < 10; index += 1) {
