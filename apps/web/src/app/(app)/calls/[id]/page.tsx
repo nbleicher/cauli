@@ -112,6 +112,12 @@ export default async function CallDetailPage({
     .eq("call_id", id)
     .maybeSingle();
 
+  const { data: trackedFollowUp } = await supabase
+    .from("follow_ups")
+    .select("due_date")
+    .eq("call_id", id)
+    .maybeSingle();
+
   const { data: revisionHistoryData } = await supabase.rpc(
     "review_revision_history",
     { target_call_id: id }
@@ -222,6 +228,7 @@ export default async function CallDetailPage({
             status: existingReview.status as ReviewStatus,
             summary: existingReview.summary,
             followUp: existingReview.follow_up,
+            followUpDueDate: trackedFollowUp?.due_date ?? null,
             answers: (currentAnswers ?? []).map((answer) => ({
               criterionId: answer.criterion_id,
               value: answer.value as 1 | 2 | 3 | 4 | 5 | null,
@@ -234,6 +241,7 @@ export default async function CallDetailPage({
               status: latestVisibleRevision.status,
               summary: latestVisibleRevision.summary,
               followUp: latestVisibleRevision.follow_up,
+              followUpDueDate: trackedFollowUp?.due_date ?? null,
               answers: latestVisibleRevision.answers,
             }
           : null,

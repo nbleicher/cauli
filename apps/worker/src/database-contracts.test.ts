@@ -267,7 +267,7 @@ describe.skipIf(
     );
     expect(firstClaimError).toBeNull();
     const { data: firstReview, error: firstReviewError } =
-      await manager.client.rpc("submit_call_review", {
+      await manager.client.rpc("submit_call_review_with_follow_up", {
         target_call_id: firstCall.callId,
         target_scorecard_version_id: firstVersion.id,
         expected_version: 0,
@@ -275,6 +275,7 @@ describe.skipIf(
         target_status: "reviewed",
         target_summary: "Optional criterion is not applicable.",
         target_follow_up: "",
+        target_follow_up_due_date: null,
         target_answers: [
           {
             criterionId: requiredCriterion.id,
@@ -298,7 +299,7 @@ describe.skipIf(
     );
     expect(secondClaimError).toBeNull();
     const { error: requiredNaError } = await manager.client.rpc(
-      "submit_call_review",
+      "submit_call_review_with_follow_up",
       {
         target_call_id: secondCall.callId,
         target_scorecard_version_id: firstVersion.id,
@@ -307,6 +308,7 @@ describe.skipIf(
         target_status: "reviewed",
         target_summary: "Required criterion cannot be N/A.",
         target_follow_up: "",
+        target_follow_up_due_date: null,
         target_answers: [
           {
             criterionId: requiredCriterion.id,
@@ -382,7 +384,7 @@ describe.skipIf(
     );
     expect(thirdClaimError).toBeNull();
     const { error: thirdReviewError } = await manager.client.rpc(
-      "submit_call_review",
+      "submit_call_review_with_follow_up",
       {
         target_call_id: thirdCall.callId,
         target_scorecard_version_id: secondVersionId,
@@ -391,6 +393,7 @@ describe.skipIf(
         target_status: "reviewed",
         target_summary: "Second version review.",
         target_follow_up: "",
+        target_follow_up_due_date: null,
         target_answers: (secondVersionCriteria ?? []).map((criterion) => ({
           criterionId: criterion.id,
           value: 4,
@@ -596,6 +599,7 @@ describe.skipIf(
       target_status: "reviewed",
       target_summary: "Assignment concurrency is preserved.",
       target_follow_up: "",
+      target_follow_up_due_date: null,
       target_answers: [
         {
           criterionId: scorecardCriterion!.id,
@@ -605,7 +609,7 @@ describe.skipIf(
       ],
     };
     const { error: staleEditorError } = await firstManager.client.rpc(
-      "submit_call_review",
+      "submit_call_review_with_follow_up",
       {
         ...reviewPayload,
         expected_assignment_version: 1,
@@ -613,7 +617,7 @@ describe.skipIf(
     );
     expect(staleEditorError?.message).toMatch(/assignment version conflict/i);
     const { error: formerAssigneeError } = await firstManager.client.rpc(
-      "submit_call_review",
+      "submit_call_review_with_follow_up",
       {
         ...reviewPayload,
         expected_assignment_version: 2,
@@ -621,7 +625,7 @@ describe.skipIf(
     );
     expect(formerAssigneeError?.message).toMatch(/only the Review Assignee/i);
     const { data: submittedReview, error: submitError } =
-      await secondManager.client.rpc("submit_call_review", {
+      await secondManager.client.rpc("submit_call_review_with_follow_up", {
         ...reviewPayload,
         expected_assignment_version: 2,
       });
@@ -820,7 +824,7 @@ describe.skipIf(
     expect(claimError).toBeNull();
 
     const { data: firstReview, error: firstSubmitError } =
-      await manager.client.rpc("submit_call_review", {
+      await manager.client.rpc("submit_call_review_with_follow_up", {
         target_call_id: call.callId,
         target_scorecard_version_id: scorecardVersionId,
         expected_version: 0,
@@ -828,6 +832,7 @@ describe.skipIf(
         target_status: "reviewed",
         target_summary: "First submitted summary.",
         target_follow_up: "",
+        target_follow_up_due_date: null,
         target_answers: [
           {
             criterionId: requiredCriterion.id,
@@ -845,7 +850,7 @@ describe.skipIf(
     expect(firstReview).toMatchObject({ version: 1, score: 100 });
 
     const { error: draftSubmitError } = await manager.client.rpc(
-      "submit_call_review",
+      "submit_call_review_with_follow_up",
       {
         target_call_id: call.callId,
         target_scorecard_version_id: scorecardVersionId,
@@ -854,6 +859,7 @@ describe.skipIf(
         target_status: "in_progress",
         target_summary: "Private draft summary.",
         target_follow_up: "",
+        target_follow_up_due_date: null,
         target_answers: [
           {
             criterionId: requiredCriterion.id,
@@ -885,7 +891,7 @@ describe.skipIf(
     );
 
     const { data: thirdReview, error: thirdSubmitError } =
-      await manager.client.rpc("submit_call_review", {
+      await manager.client.rpc("submit_call_review_with_follow_up", {
         target_call_id: call.callId,
         target_scorecard_version_id: scorecardVersionId,
         expected_version: 2,
@@ -893,6 +899,7 @@ describe.skipIf(
         target_status: "needs_follow_up",
         target_summary: "Third submitted summary.",
         target_follow_up: "Complete the documented action.",
+        target_follow_up_due_date: null,
         target_answers: [
           {
             criterionId: requiredCriterion.id,
@@ -958,7 +965,7 @@ describe.skipIf(
     expect(nonOwnerHistory).toEqual([]);
 
     const { error: staleReviewError } = await manager.client.rpc(
-      "submit_call_review",
+      "submit_call_review_with_follow_up",
       {
         target_call_id: call.callId,
         target_scorecard_version_id: scorecardVersionId,
@@ -967,6 +974,7 @@ describe.skipIf(
         target_status: "reviewed",
         target_summary: "Stale overwrite.",
         target_follow_up: "",
+        target_follow_up_due_date: null,
         target_answers: [
           {
             criterionId: requiredCriterion.id,
@@ -1028,6 +1036,310 @@ describe.skipIf(
       .select("id", { count: "exact", head: true })
       .eq("review_id", firstReview.id);
     expect(retainedAfterCallDelete).toBe(0);
+  });
+
+  it("tracks dated Follow-ups through overdue, resolution, reassignment, and verification", async () => {
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const firstManager = await createWorkspaceMember("manager");
+    const secondManager = await createWorkspaceMember("manager");
+    const owner = await createWorkspaceMember("member");
+    const nonOwner = await createWorkspaceMember("member");
+
+    const { data: scorecardVersionId, error: publishError } =
+      await workspaceAdmin.client.rpc("publish_scorecard_for_current_admin", {
+        target_template_id: null,
+        target_name: "Follow-up contract Scorecard",
+        target_categories: [
+          {
+            name: "Quality",
+            criteria: [
+              {
+                label: "Required outcome",
+                description: "",
+                weight: 1,
+                required: true,
+              },
+            ],
+          },
+        ],
+      });
+    expect(publishError).toBeNull();
+    const { data: version } = await admin
+      .from("scorecard_versions")
+      .select("template_id")
+      .eq("id", scorecardVersionId)
+      .single();
+    createdScorecardTemplateIds.push(version!.template_id);
+    const { data: category } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", scorecardVersionId)
+      .single();
+    const { data: criterion } = await admin
+      .from("scorecard_criteria")
+      .select("id")
+      .eq("category_id", category!.id)
+      .single();
+
+    const call = await createCall(owner.userId, { status: "ready" });
+    const { error: claimError } = await firstManager.client.rpc(
+      "claim_review",
+      { target_call_id: call.callId }
+    );
+    expect(claimError).toBeNull();
+    const { data: review, error: submitError } = await firstManager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 0,
+        expected_assignment_version: 1,
+        target_status: "needs_follow_up",
+        target_summary: "A dated action is required.",
+        target_follow_up: "Complete the agreed coaching action.",
+        target_follow_up_due_date: null,
+        target_answers: [
+          {
+            criterionId: criterion!.id,
+            value: 3,
+            comment: "",
+          },
+        ],
+      }
+    );
+    expect(submitError).toBeNull();
+
+    const { data: followUp, error: followUpError } = await admin
+      .from("follow_ups")
+      .select(
+        "id, review_id, call_id, owner_id, due_date, status, version, created_from_revision"
+      )
+      .eq("call_id", call.callId)
+      .single();
+    if (followUpError) throw followUpError;
+    expect(followUp).toMatchObject({
+      review_id: review.id,
+      call_id: call.callId,
+      owner_id: owner.userId,
+      status: "open",
+      version: 1,
+      created_from_revision: 1,
+    });
+    const defaultDueDate = new Date();
+    defaultDueDate.setUTCDate(defaultDueDate.getUTCDate() + 7);
+    expect(followUp.due_date).toBe(defaultDueDate.toISOString().slice(0, 10));
+
+    const dueDate = new Date(`${followUp.due_date}T00:00:00Z`);
+    const overdueDate = new Date(dueDate);
+    overdueDate.setUTCDate(overdueDate.getUTCDate() + 1);
+    const { data: ownerOpenQueue } = await owner.client.rpc("follow_up_queue", {
+      as_of_date: followUp.due_date,
+    });
+    expect(ownerOpenQueue).toHaveLength(1);
+    expect(ownerOpenQueue?.[0]).toMatchObject({
+      id: followUp.id,
+      display_status: "open",
+      can_resolve: true,
+      can_verify: false,
+    });
+    const { data: ownerOverdueQueue } = await owner.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(ownerOverdueQueue?.[0]?.display_status).toBe("overdue");
+    const { data: assigneeQueue } = await firstManager.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(assigneeQueue).toHaveLength(1);
+    expect(assigneeQueue?.[0]).toMatchObject({
+      review_assignee_id: firstManager.userId,
+      can_resolve: false,
+      can_verify: false,
+    });
+    const { data: adminQueue } = await workspaceAdmin.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(adminQueue).toHaveLength(1);
+    const { data: nonOwnerQueue } = await nonOwner.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(nonOwnerQueue).toEqual([]);
+
+    const { error: nonOwnerResolveError } = await nonOwner.client.rpc(
+      "resolve_follow_up",
+      {
+        target_follow_up_id: followUp.id,
+        expected_version: 1,
+      }
+    );
+    expect(nonOwnerResolveError?.message).toMatch(/only the Follow-up owner/i);
+
+    const concurrentResolutions = await Promise.all([
+      owner.client.rpc("resolve_follow_up", {
+        target_follow_up_id: followUp.id,
+        expected_version: 1,
+      }),
+      owner.client.rpc("resolve_follow_up", {
+        target_follow_up_id: followUp.id,
+        expected_version: 1,
+      }),
+    ]);
+    expect(
+      concurrentResolutions.filter((result) => !result.error)
+    ).toHaveLength(1);
+    expect(concurrentResolutions.filter((result) => result.error)).toHaveLength(
+      1
+    );
+    expect(
+      concurrentResolutions.find((result) => result.error)?.error?.message
+    ).toMatch(/version conflict/i);
+
+    const { data: reassigned, error: reassignmentError } =
+      await workspaceAdmin.client.rpc("assign_review", {
+        target_call_id: call.callId,
+        target_assignee_id: secondManager.userId,
+        expected_assignment_version: 1,
+      });
+    expect(reassignmentError).toBeNull();
+    expect(reassigned).toMatchObject({
+      assignee_id: secondManager.userId,
+      version: 2,
+    });
+
+    const { data: awaitingQueue } = await secondManager.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(awaitingQueue?.[0]).toMatchObject({
+      display_status: "awaiting_verification",
+      can_verify: true,
+      version: 2,
+    });
+    const { error: formerAssigneeVerifyError } = await firstManager.client.rpc(
+      "verify_follow_up",
+      {
+        target_follow_up_id: followUp.id,
+        expected_version: 2,
+      }
+    );
+    expect(formerAssigneeVerifyError?.message).toMatch(
+      /Review Assignee or an Admin/i
+    );
+    const { data: verified, error: verifyError } =
+      await secondManager.client.rpc("verify_follow_up", {
+        target_follow_up_id: followUp.id,
+        expected_version: 2,
+      });
+    expect(verifyError).toBeNull();
+    expect(verified).toMatchObject({ status: "verified", version: 3 });
+    const { data: closedOwnerQueue } = await owner.client.rpc(
+      "follow_up_queue",
+      { as_of_date: overdueDate.toISOString().slice(0, 10) }
+    );
+    expect(closedOwnerQueue).toEqual([]);
+
+    const reopenedDueDate = new Date(overdueDate);
+    reopenedDueDate.setUTCDate(reopenedDueDate.getUTCDate() + 14);
+    const { error: reopenError } = await secondManager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        target_call_id: call.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 1,
+        expected_assignment_version: 2,
+        target_status: "needs_follow_up",
+        target_summary: "A new submission reopens the tracked work.",
+        target_follow_up: "Complete the revised coaching action.",
+        target_follow_up_due_date: reopenedDueDate.toISOString().slice(0, 10),
+        target_answers: [
+          {
+            criterionId: criterion!.id,
+            value: 4,
+            comment: "",
+          },
+        ],
+      }
+    );
+    expect(reopenError).toBeNull();
+    const { data: reopened, count: followUpCount } = await admin
+      .from("follow_ups")
+      .select("id, status, version, created_from_revision", {
+        count: "exact",
+      })
+      .eq("review_id", review.id)
+      .single();
+    expect(followUpCount).toBe(1);
+    expect(reopened).toMatchObject({
+      id: followUp.id,
+      status: "open",
+      version: 4,
+      created_from_revision: 2,
+    });
+
+    const pastCall = await createCall(owner.userId, { status: "ready" });
+    const { error: pastClaimError } = await secondManager.client.rpc(
+      "claim_review",
+      { target_call_id: pastCall.callId }
+    );
+    expect(pastClaimError).toBeNull();
+    const pastDate = new Date();
+    pastDate.setUTCDate(pastDate.getUTCDate() - 1);
+    const { error: pastDueDateError } = await secondManager.client.rpc(
+      "submit_call_review_with_follow_up",
+      {
+        target_call_id: pastCall.callId,
+        target_scorecard_version_id: scorecardVersionId,
+        expected_version: 0,
+        expected_assignment_version: 1,
+        target_status: "needs_follow_up",
+        target_summary: "Past due dates are invalid.",
+        target_follow_up: "This should roll back.",
+        target_follow_up_due_date: pastDate.toISOString().slice(0, 10),
+        target_answers: [
+          {
+            criterionId: criterion!.id,
+            value: 3,
+            comment: "",
+          },
+        ],
+      }
+    );
+    expect(pastDueDateError?.message).toMatch(/cannot be in the past/i);
+    const { count: pastCallFollowUps } = await admin
+      .from("follow_ups")
+      .select("id", { count: "exact", head: true })
+      .eq("call_id", pastCall.callId);
+    const { count: pastCallReviews } = await admin
+      .from("call_reviews")
+      .select("id", { count: "exact", head: true })
+      .eq("call_id", pastCall.callId);
+    expect(pastCallFollowUps).toBe(0);
+    expect(pastCallReviews).toBe(0);
+
+    const { error: directStateWriteError } = await owner.client
+      .from("follow_ups")
+      .update({ status: "verified" })
+      .eq("id", followUp.id);
+    expect(directStateWriteError).not.toBeNull();
+
+    const { data: auditEvents } = await admin
+      .from("audit_events")
+      .select("action, entity_id, metadata")
+      .eq("entity_id", followUp.id);
+    expect(auditEvents?.map((event) => event.action)).toEqual(
+      expect.arrayContaining([
+        "follow_up.created",
+        "follow_up.resolved",
+        "follow_up.verified",
+        "follow_up.reopened",
+      ])
+    );
+    expect(JSON.stringify(auditEvents)).not.toContain(
+      "Complete the agreed coaching action."
+    );
   });
 
   it("enforces one Workspace per person and the ten-active-member pilot cap", async () => {

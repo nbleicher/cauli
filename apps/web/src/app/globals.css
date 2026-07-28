@@ -1440,6 +1440,77 @@ textarea:focus {
   border-top: 1px solid var(--line);
 }
 
+.follow-up-list {
+  display: grid;
+  gap: 12px;
+}
+
+.follow-up-card {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(300px, auto) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.follow-up-card h2 {
+  margin: 5px 0;
+  font-size: 16px;
+}
+
+.follow-up-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.follow-up-card dl {
+  display: flex;
+  gap: 18px;
+  margin: 0;
+}
+
+.follow-up-card dl div {
+  display: grid;
+  gap: 2px;
+}
+
+.follow-up-card dt {
+  color: var(--faint);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.follow-up-card dd {
+  margin: 0;
+  font-size: 11px;
+}
+
+.follow-up-status {
+  display: inline-flex;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.follow-up-status.overdue {
+  background: var(--red-soft);
+  color: var(--red-text);
+}
+
+.follow-up-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .review-queue {
   display: grid;
   gap: 14px;
@@ -1522,7 +1593,8 @@ textarea:focus {
   }
 
   .bulk-assignment,
-  .review-queue-row {
+  .review-queue-row,
+  .follow-up-card {
     grid-template-columns: 1fr;
   }
 

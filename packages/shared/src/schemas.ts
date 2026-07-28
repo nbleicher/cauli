@@ -53,14 +53,32 @@ export const reviewAnswerSchema = z.object({
   comment: z.string().trim().max(4_000).default(""),
 });
 
-export const submitReviewSchema = z.object({
-  expectedVersion: z.number().int().min(0),
-  expectedAssignmentVersion: z.number().int().min(0),
-  status: reviewStatusSchema.exclude(["unreviewed"]),
-  summary: z.string().trim().max(10_000).default(""),
-  followUp: z.string().trim().max(10_000).default(""),
-  answers: z.array(reviewAnswerSchema),
-});
+export const submitReviewSchema = z
+  .object({
+    expectedVersion: z.number().int().min(0),
+    expectedAssignmentVersion: z.number().int().min(0),
+    status: reviewStatusSchema.exclude(["unreviewed"]),
+    summary: z.string().trim().max(10_000).default(""),
+    followUp: z.string().trim().max(10_000).default(""),
+    followUpDueDate: z.iso.date().nullable().default(null),
+    answers: z.array(reviewAnswerSchema),
+  })
+  .superRefine((review, context) => {
+    if (review.status === "needs_follow_up" && !review.followUpDueDate) {
+      context.addIssue({
+        code: "custom",
+        path: ["followUpDueDate"],
+        message: "Needs Follow-up requires a due date.",
+      });
+    }
+    if (review.status !== "needs_follow_up" && review.followUpDueDate) {
+      context.addIssue({
+        code: "custom",
+        path: ["followUpDueDate"],
+        message: "Only Needs Follow-up may set a due date.",
+      });
+    }
+  });
 
 export const extensionRecordingSchema = z.object({
   legacyRecordingId: z.union([z.string(), z.number()]).transform(String),

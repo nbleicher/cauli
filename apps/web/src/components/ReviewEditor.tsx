@@ -43,6 +43,12 @@ interface Revision {
   submittedBy: string;
 }
 
+function sevenDaysFromToday() {
+  const dueDate = new Date();
+  dueDate.setUTCDate(dueDate.getUTCDate() + 7);
+  return dueDate.toISOString().slice(0, 10);
+}
+
 export interface ReviewEditorProps {
   callId: string;
   scorecardVersionId: string;
@@ -54,6 +60,7 @@ export interface ReviewEditorProps {
     status: ReviewStatus;
     summary: string;
     followUp: string;
+    followUpDueDate: string | null;
     answers: ReviewAnswer[];
   } | null;
   assignment: {
@@ -97,6 +104,9 @@ export function ReviewEditor({
   });
   const [summary, setSummary] = useState(initialReview?.summary ?? "");
   const [followUp, setFollowUp] = useState(initialReview?.followUp ?? "");
+  const [followUpDueDate, setFollowUpDueDate] = useState(
+    initialReview?.followUpDueDate ?? ""
+  );
   const [status, setStatus] = useState<Exclude<ReviewStatus, "unreviewed">>(
     initialReview?.status === "unreviewed" || !initialReview
       ? "in_progress"
@@ -138,6 +148,7 @@ export function ReviewEditor({
         status,
         summary,
         followUp,
+        followUpDueDate: status === "needs_follow_up" ? followUpDueDate : null,
         answers: reviewAnswers,
       },
       categories.flatMap((category) => category.criteria)
@@ -160,6 +171,8 @@ export function ReviewEditor({
             status,
             summary,
             followUp,
+            followUpDueDate:
+              status === "needs_follow_up" ? followUpDueDate : null,
             answers: reviewAnswers,
           }),
         }
@@ -195,7 +208,13 @@ export function ReviewEditor({
         {!readOnly && (
           <select
             value={status}
-            onChange={(event) => setStatus(event.target.value as typeof status)}
+            onChange={(event) => {
+              const nextStatus = event.target.value as typeof status;
+              setStatus(nextStatus);
+              if (nextStatus === "needs_follow_up" && !followUpDueDate) {
+                setFollowUpDueDate(sevenDaysFromToday());
+              }
+            }}
           >
             <option value="in_progress">In progress</option>
             <option value="reviewed">Reviewed</option>
@@ -301,6 +320,15 @@ export function ReviewEditor({
               onChange={(event) => setFollowUp(event.target.value)}
               placeholder="What specific action needs to happen, and who should own it?"
               maxLength={10_000}
+            />
+          )}
+          {!readOnly && (
+            <input
+              type="date"
+              aria-label="Follow-up due date"
+              value={followUpDueDate}
+              onChange={(event) => setFollowUpDueDate(event.target.value)}
+              required
             />
           )}
         </div>

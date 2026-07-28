@@ -63,16 +63,20 @@ export async function POST(
     );
   }
 
-  const { data, error } = await supabase.rpc("submit_call_review", {
-    target_call_id: id,
-    target_scorecard_version_id: scorecardVersionId,
-    expected_version: parsed.data.expectedVersion,
-    expected_assignment_version: parsed.data.expectedAssignmentVersion,
-    target_status: parsed.data.status,
-    target_summary: parsed.data.summary,
-    target_follow_up: parsed.data.followUp,
-    target_answers: parsed.data.answers,
-  });
+  const { data, error } = await supabase.rpc(
+    "submit_call_review_with_follow_up",
+    {
+      target_call_id: id,
+      target_scorecard_version_id: scorecardVersionId,
+      expected_version: parsed.data.expectedVersion,
+      expected_assignment_version: parsed.data.expectedAssignmentVersion,
+      target_status: parsed.data.status,
+      target_summary: parsed.data.summary,
+      target_follow_up: parsed.data.followUp,
+      target_follow_up_due_date: parsed.data.followUpDueDate,
+      target_answers: parsed.data.answers,
+    }
+  );
 
   if (error) {
     const limited = await rateLimitResponse(error, supabase, "review.submit");

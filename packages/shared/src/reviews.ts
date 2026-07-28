@@ -4,6 +4,7 @@ export interface ReviewCompletionInput {
   status: Exclude<ReviewStatus, "unreviewed">;
   summary: string;
   followUp?: string;
+  followUpDueDate?: string | null;
   answers: Array<{
     criterionId: string;
     value: number | null;
@@ -38,6 +39,16 @@ export function validateReviewCompletion(
     issues.push({
       field: "followUp",
       message: "Needs Follow-up requires an explanation.",
+    });
+  }
+  if (
+    review.status === "needs_follow_up" &&
+    review.followUpDueDate !== undefined &&
+    !review.followUpDueDate
+  ) {
+    issues.push({
+      field: "followUpDueDate",
+      message: "Needs Follow-up requires a due date.",
     });
   }
 

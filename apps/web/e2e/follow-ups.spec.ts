@@ -19,12 +19,12 @@ test.skip(
   "requires the local Supabase stack"
 );
 
-test("a Call owner sees complete submissions but not a newer draft", async ({
+test("a Needs Follow-up moves through owner and Review Assignee queues", async ({
   page,
 }) => {
   const password = `Test-${crypto.randomUUID()}!`;
-  const managerEmail = `history-manager-${crypto.randomUUID()}@example.com`;
-  const ownerEmail = `history-owner-${crypto.randomUUID()}@example.com`;
+  const managerEmail = `follow-up-manager-${crypto.randomUUID()}@example.com`;
+  const ownerEmail = `follow-up-owner-${crypto.randomUUID()}@example.com`;
   const { data: managerResult, error: managerError } =
     await admin.auth.admin.createUser({
       email: managerEmail,
@@ -68,14 +68,15 @@ test("a Call owner sees complete submissions but not a newer draft", async ({
         password,
       });
     if (managerSignInError) throw managerSignInError;
-    await enrollVerifiedTotp(managerClient);
+    const { secret: managerTotpSecret } =
+      await enrollVerifiedTotp(managerClient);
 
     const { data: scorecardVersionId, error: publishError } = await admin.rpc(
       "publish_scorecard",
       {
         target_workspace_id: workspaceId,
         target_template_id: null,
-        target_name: "Revision history Scorecard",
+        target_name: "Follow-up journey Scorecard",
         target_actor_id: managerResult.user.id,
         target_categories: [
           {
@@ -93,30 +94,19 @@ test("a Call owner sees complete submissions but not a newer draft", async ({
       }
     );
     if (publishError) throw publishError;
-    const { data: version, error: versionError } = await admin
+    const { data: version } = await admin
       .from("scorecard_versions")
       .select("template_id")
       .eq("id", scorecardVersionId)
       .single();
-    if (versionError) throw versionError;
-    templateId = version.template_id;
-    const { data: category } = await admin
-      .from("scorecard_categories")
-      .select("id")
-      .eq("version_id", scorecardVersionId)
-      .single();
-    const { data: criterion } = await admin
-      .from("scorecard_criteria")
-      .select("id")
-      .eq("category_id", category!.id)
-      .single();
+    templateId = version!.template_id;
 
     callId = crypto.randomUUID();
     const { error: callError } = await admin.from("calls").insert({
       id: callId,
       workspace_id: workspaceId,
       owner_id: ownerResult.user.id,
-      title: "Revision visibility Call",
+      title: "Follow-up queue Call",
       source_mode: "both",
       status: "ready",
       chunk_prefix: `${workspaceId}/${callId}/chunks`,
@@ -129,66 +119,99 @@ test("a Call owner sees complete submissions but not a newer draft", async ({
     });
     if (claimError) throw claimError;
 
-    const { error: firstSubmitError } = await managerClient.rpc(
-      "submit_call_review_with_follow_up",
-      {
-        target_call_id: callId,
-        target_scorecard_version_id: scorecardVersionId,
-        expected_version: 0,
-        expected_assignment_version: 1,
-        target_status: "reviewed",
-        target_summary: "First visible summary.",
-        target_follow_up: "",
-        target_follow_up_due_date: null,
-        target_answers: [
-          {
-            criterionId: criterion!.id,
-            value: 5,
-            comment: "Visible criterion comment.",
-          },
-        ],
-      }
+    await signInAsWorkspaceMember(
+      page,
+      managerEmail,
+      password,
+      2,
+      managerTotpSecret
     );
-    if (firstSubmitError) throw firstSubmitError;
-    const { error: draftSubmitError } = await managerClient.rpc(
-      "submit_call_review_with_follow_up",
-      {
-        target_call_id: callId,
-        target_scorecard_version_id: scorecardVersionId,
-        expected_version: 1,
-        expected_assignment_version: 1,
-        target_status: "in_progress",
-        target_summary: "Private draft summary.",
-        target_follow_up: "",
-        target_follow_up_due_date: null,
-        target_answers: [
-          {
-            criterionId: criterion!.id,
-            value: 1,
-            comment: "Private draft comment.",
-          },
-        ],
-      }
-    );
-    if (draftSubmitError) throw draftSubmitError;
-
-    await signInAsWorkspaceMember(page, ownerEmail, password);
     await page.goto(`/calls/${callId}`);
-    await expect(
-      page.getByText("Revision history Scorecard", { exact: true })
-    ).toBeVisible();
-    await expect(
-      page.getByText("First visible summary.", { exact: true })
-    ).toBeVisible();
-    await expect(page.getByText("Private draft summary.")).toHaveCount(0);
-    await expect(page.getByText("Private draft comment.")).toHaveCount(0);
+    await page
+      .locator(".scorecard-summary select")
+      .selectOption("needs_follow_up");
+    await page
+      .getByRole("group", { name: "Clear outcome" })
+      .getByRole("button", { name: "3" })
+      .click();
+    await page.getByLabel("Review summary").fill("Coaching action required.");
+    await page
+      .getByLabel("Required follow-up")
+      .fill("Complete the agreed coaching action.");
+    const expectedDefaultDueDate = new Date();
+    expectedDefaultDueDate.setUTCDate(expectedDefaultDueDate.getUTCDate() + 7);
+    await expect(page.getByLabel("Follow-up due date")).toHaveValue(
+      expectedDefaultDueDate.toISOString().slice(0, 10)
+    );
+    const reviewResponse = page.waitForResponse(
+      (response) =>
+        response.url().includes(`/api/calls/${callId}/review`) &&
+        response.request().method() === "POST"
+    );
+    await page.getByRole("button", { name: "Submit review" }).click();
+    expect((await reviewResponse).status()).toBe(200);
 
-    await page.getByText("1 visible revision", { exact: true }).click();
-    await page.getByText(/Revision 1 · reviewed/).click();
+    const { data: followUp, error: followUpError } = await admin
+      .from("follow_ups")
+      .select("id, due_date, status, version")
+      .eq("call_id", callId)
+      .single();
+    if (followUpError) throw followUpError;
+    expect(followUp).toMatchObject({
+      due_date: expectedDefaultDueDate.toISOString().slice(0, 10),
+      status: "open",
+      version: 1,
+    });
+
+    await page.evaluate(() => window.localStorage.clear());
+    await page.context().clearCookies();
+    await signInAsWorkspaceMember(page, ownerEmail, password);
+    await page.goto("/follow-ups");
     await expect(
-      page.getByText(/Clear outcome: 5 · Visible criterion comment\./)
+      page.getByText("Complete the agreed coaching action.", { exact: true })
     ).toBeVisible();
-    await expect(page.getByText(/Scorecard Version 1/)).toBeVisible();
+    const resolveResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/api/follow-ups/${followUp.id}`) &&
+        response.request().method() === "POST"
+    );
+    await page.getByRole("button", { name: "Mark Resolved" }).click();
+    expect((await resolveResponse).status()).toBe(200);
+    await expect(page.getByText("awaiting verification")).toBeVisible();
+
+    await page.evaluate(() => window.localStorage.clear());
+    await page.context().clearCookies();
+    await signInAsWorkspaceMember(
+      page,
+      managerEmail,
+      password,
+      2,
+      managerTotpSecret
+    );
+    await page.goto("/follow-ups");
+    await expect(page.getByText("awaiting verification")).toBeVisible();
+    const verifyResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/api/follow-ups/${followUp.id}`) &&
+        response.request().method() === "POST"
+    );
+    await page.getByRole("button", { name: "Verify closure" }).click();
+    expect((await verifyResponse).status()).toBe(200);
+    await expect(
+      page.getByRole("heading", { name: "No open Follow-ups" })
+    ).toBeVisible();
+
+    const { data: auditEvents } = await admin
+      .from("audit_events")
+      .select("action")
+      .eq("entity_id", followUp.id);
+    expect(auditEvents?.map((event) => event.action)).toEqual(
+      expect.arrayContaining([
+        "follow_up.created",
+        "follow_up.resolved",
+        "follow_up.verified",
+      ])
+    );
   } finally {
     if (callId) await admin.from("calls").delete().eq("id", callId);
     if (templateId) {
