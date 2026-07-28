@@ -4663,6 +4663,11 @@ describe.skipIf(
         "public.processing_jobs",
         "storage.objects",
         "public.claim_processing_job",
+        "public.assert_transcription_models_priced",
+        "public.resume_budget_paused_jobs",
+        "public.processing_service_level",
+        "public.processing_queue_age_seconds",
+        "public.processing_operational_alerts",
       ]) {
         expect(granted.get(allowed), allowed).toBe(true);
       }
@@ -4697,6 +4702,22 @@ describe.skipIf(
           })
         ).error
       ).toBeTruthy();
+
+      const workerOperations = await Promise.all([
+        worker.rpc("assert_transcription_models_priced", {
+          target_models: [
+            "openai/whisper-large-v3-turbo",
+            "openai/whisper-large-v3",
+          ],
+        }),
+        worker.rpc("resume_budget_paused_jobs"),
+        worker.rpc("processing_service_level", { window_hours: 24 }),
+        worker.rpc("processing_queue_age_seconds"),
+        worker.rpc("processing_operational_alerts"),
+      ]);
+      for (const [index, operation] of workerOperations.entries()) {
+        expect(operation.error, `worker operation ${index}`).toBeNull();
+      }
     }
   );
 

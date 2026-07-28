@@ -709,6 +709,32 @@ as $$
       ('public.claim_processing_job', 'execute',
         has_function_privilege(
           'cauli_worker', 'public.claim_processing_job(text)', 'execute'
+        )),
+      ('public.assert_transcription_models_priced', 'execute',
+        has_function_privilege(
+          'cauli_worker',
+          'public.assert_transcription_models_priced(text[])',
+          'execute'
+        )),
+      ('public.resume_budget_paused_jobs', 'execute',
+        has_function_privilege(
+          'cauli_worker', 'public.resume_budget_paused_jobs()', 'execute'
+        )),
+      ('public.processing_service_level', 'execute',
+        has_function_privilege(
+          'cauli_worker', 'public.processing_service_level(integer)', 'execute'
+        )),
+      ('public.processing_queue_age_seconds', 'execute',
+        has_function_privilege(
+          'cauli_worker',
+          'public.processing_queue_age_seconds()',
+          'execute'
+        )),
+      ('public.processing_operational_alerts', 'execute',
+        has_function_privilege(
+          'cauli_worker',
+          'public.processing_operational_alerts()',
+          'execute'
         ))
   ) as privileges (object_name, privilege, granted);
 $$;
