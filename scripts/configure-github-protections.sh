@@ -16,7 +16,6 @@ gh api --method PUT "repos/$repository/private-vulnerability-reporting" >/dev/nu
 
 jq -n '{
   security_and_analysis: {
-    advanced_security: {status: "enabled"},
     secret_scanning: {status: "enabled"},
     secret_scanning_push_protection: {status: "enabled"}
   },
