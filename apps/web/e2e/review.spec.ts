@@ -49,7 +49,7 @@ test("review API enforces completion and optimistic concurrency", async ({
         {
           workspace_id: workspaceId,
           user_id: reviewer.user.id,
-          role: "manager",
+          role: "admin",
         },
         {
           workspace_id: workspaceId,
@@ -99,38 +99,53 @@ test("review API enforces completion and optimistic concurrency", async ({
     if (templateError) throw templateError;
     templateId = template.id;
 
-    const { data: version, error: versionError } = await admin
-      .from("scorecard_versions")
-      .insert({
-        template_id: template.id,
-        version: 1,
-        published_by: reviewer.user.id,
-      })
-      .select("id")
-      .single();
+    const { data: versionId, error: versionError } = await admin.rpc(
+      "publish_scorecard",
+      {
+        target_workspace_id: workspaceId,
+        target_template_id: template.id,
+        target_name: "Review API test",
+        target_actor_id: reviewer.user.id,
+        target_categories: [
+          {
+            name: "Discovery",
+            criteria: [
+              {
+                label: "Asked a discovery question",
+                description: "",
+                weight: 1,
+                required: true,
+              },
+              {
+                label: "Confirmed the next step",
+                description: "",
+                weight: 100,
+                required: false,
+              },
+            ],
+          },
+        ],
+      }
+    );
     if (versionError) throw versionError;
+    const version = { id: versionId as string };
     const { data: category, error: categoryError } = await admin
       .from("scorecard_categories")
-      .insert({
-        version_id: version.id,
-        name: "Discovery",
-        position: 0,
-      })
       .select("id")
+      .eq("version_id", version.id)
       .single();
     if (categoryError) throw categoryError;
-    const { data: criterion, error: criterionError } = await admin
+    const { data: criteria, error: criterionError } = await admin
       .from("scorecard_criteria")
-      .insert({
-        category_id: category.id,
-        label: "Asked a discovery question",
-        weight: 1,
-        required: true,
-        position: 0,
-      })
-      .select("id")
-      .single();
+      .select("id, label, required")
+      .eq("category_id", category.id)
+      .order("position");
     if (criterionError) throw criterionError;
+    const criterion = criteria?.find((item) => item.required);
+    const optionalCriterion = criteria?.find((item) => !item.required);
+    if (!criterion || !optionalCriterion) {
+      throw new Error("Expected required and optional Scorecard criteria");
+    }
 
     await signInAsWorkspaceMember(
       page,
@@ -144,6 +159,7 @@ test("review API enforces completion and optimistic concurrency", async ({
     const incomplete = await page.request.post(endpoint, {
       data: {
         expectedVersion: 0,
+        expectedAssignmentVersion: 0,
         status: "reviewed",
         summary: "",
         followUp: "",
@@ -155,6 +171,7 @@ test("review API enforces completion and optimistic concurrency", async ({
     const submitted = await page.request.post(endpoint, {
       data: {
         expectedVersion: 0,
+        expectedAssignmentVersion: 0,
         status: "reviewed",
         summary: "Completed review.",
         followUp: "",
@@ -164,6 +181,11 @@ test("review API enforces completion and optimistic concurrency", async ({
             value: 3,
             comment: "",
           },
+          {
+            criterionId: optionalCriterion.id,
+            value: null,
+            comment: "Not applicable to this Call.",
+          },
         ],
       },
     });
@@ -172,6 +194,7 @@ test("review API enforces completion and optimistic concurrency", async ({
     const stale = await page.request.post(endpoint, {
       data: {
         expectedVersion: 0,
+        expectedAssignmentVersion: 0,
         status: "reviewed",
         summary: "Stale overwrite.",
         followUp: "",
@@ -202,6 +225,52 @@ test("review API enforces completion and optimistic concurrency", async ({
       version: 1,
     });
     expect(revisionCount).toBe(1);
+
+    const { error: immutableCriterionError } = await admin
+      .from("scorecard_criteria")
+      .update({ label: "Rewritten criterion" })
+      .eq("id", criterion.id);
+    expect(immutableCriterionError?.message).toMatch(/immutable/i);
+
+    await page.goto("/admin/scorecards");
+    const requiredToggles = page.locator(".criterion-required-field input");
+    await expect(requiredToggles).toHaveCount(2);
+    await expect(requiredToggles.nth(0)).toBeChecked();
+    await expect(requiredToggles.nth(1)).not.toBeChecked();
+    await requiredToggles.nth(0).uncheck();
+    await page.getByRole("button", { name: "Publish version" }).click();
+    await expect(page.getByText(/Published version 2/)).toBeVisible();
+
+    const versionToggles = page.locator(".version-selection input");
+    await expect(versionToggles).toHaveCount(2);
+    await versionToggles.nth(0).check();
+    await versionToggles.nth(1).check();
+    await page
+      .getByRole("button", { name: "Mark selected versions comparable" })
+      .click();
+    await expect(page.getByText(/currently comparable/).first()).toBeVisible();
+
+    await page.getByRole("button", { name: "Stop combining" }).click();
+    await expect(page.getByText(/currently comparable/)).toHaveCount(0);
+
+    const { data: scorecardAudit } = await admin
+      .from("audit_events")
+      .select("action")
+      .eq("workspace_id", workspaceId)
+      .in("action", [
+        "scorecard.version.published",
+        "scorecard.versions.comparable",
+        "scorecard.versions.comparability_revoked",
+      ]);
+    expect(
+      new Set((scorecardAudit ?? []).map((event) => event.action))
+    ).toEqual(
+      new Set([
+        "scorecard.version.published",
+        "scorecard.versions.comparable",
+        "scorecard.versions.comparability_revoked",
+      ])
+    );
 
     const { error: deactivateError } = await admin
       .from("scorecard_templates")

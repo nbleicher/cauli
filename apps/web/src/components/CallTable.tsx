@@ -8,24 +8,28 @@ export interface CallTableRow {
   id: string;
   title: string | null;
   ownerName: string;
-  assigneeName?: string | null;
   sourceMode: SourceMode;
   status: CallStatus;
   reviewStatus: ReviewStatus;
   startedAt: string;
   durationMs: number;
   degraded: boolean;
+  reviewAssigneeId: string | null;
+  reviewAssigneeName: string | null;
+  assignmentVersion: number;
 }
 
 export function CallTable({
   calls,
   showOwner,
   filtered = false,
+  showReviewAssignee = false,
 }: {
   calls: CallTableRow[];
   showOwner: boolean;
   /** An empty page means something different once a filter is narrowing it. */
   filtered?: boolean;
+  showReviewAssignee?: boolean;
 }) {
   if (calls.length === 0) {
     return (
@@ -54,6 +58,9 @@ export function CallTable({
           <tr>
             <th>Call</th>
             {showOwner && <th className="hide-mobile">Owner</th>}
+            {showReviewAssignee && (
+              <th className="hide-mobile">Review Assignee</th>
+            )}
             <th className="hide-mobile">Source</th>
             <th>Processing</th>
             <th className="hide-mobile">Review</th>
@@ -74,6 +81,11 @@ export function CallTable({
                 </Link>
               </td>
               {showOwner && <td className="hide-mobile">{call.ownerName}</td>}
+              {showReviewAssignee && (
+                <td className="hide-mobile">
+                  {call.reviewAssigneeName ?? "Unassigned"}
+                </td>
+              )}
               <td className="hide-mobile call-source">
                 {call.sourceMode}
                 {call.degraded ? " · degraded" : ""}

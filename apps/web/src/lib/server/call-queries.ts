@@ -26,7 +26,9 @@ interface RawPageRow {
   degraded: boolean;
   owner_id: string;
   owner_name: string;
+  assignee_id: string | null;
   assignee_name: string | null;
+  assignment_version: number;
 }
 
 export async function listCallsPage(
@@ -61,13 +63,15 @@ export async function listCallsPage(
     id: call.id,
     title: call.title,
     ownerName: call.owner_name,
-    assigneeName: call.assignee_name,
     sourceMode: call.source_mode,
     status: call.status,
     reviewStatus: call.review_status,
     startedAt: call.started_at,
     durationMs: call.duration_ms,
     degraded: call.degraded,
+    reviewAssigneeId: call.assignee_id,
+    reviewAssigneeName: call.assignee_name,
+    assignmentVersion: call.assignment_version,
   }));
   const last = page[page.length - 1];
   return {
