@@ -6,6 +6,7 @@ import { config } from "./config.js";
 import { createSupabaseCheckpointStore } from "./checkpoint-store.js";
 import { startJobLeaseHeartbeat } from "./job-lease.js";
 import { log, sanitizedError } from "./log.js";
+import { captureWorkerError } from "./telemetry.js";
 import {
   concatenateFiles,
   fileSize,
@@ -261,6 +262,57 @@ async function handleJob(job: ProcessingJob, stopHeartbeat: StopHeartbeat) {
   throw new Error(`Unsupported job kind: ${job.kind}`);
 }
 
+/**
+ * Refuses to start against a model nobody has priced. Without this the first
+ * Call of a misconfigured deployment would sit in Budget Paused with no
+ * explanation until somebody went looking for it.
+ */
+export async function assertTranscriptionModelsPriced() {
+  const { error } = await supabase.rpc("assert_transcription_models_priced", {
+    target_models: [
+      config.transcriptionModel,
+      config.transcriptionFallbackModel,
+    ],
+  });
+  if (error) throw error;
+}
+
+/**
+ * Budget Paused work has nothing to retry — it is waiting for money. Asking on
+ * a cadence covers both ways capacity returns: the daily ledger rolling over,
+ * and a Platform Admin raising a limit.
+ */
+export async function resumeBudgetPausedJobs() {
+  const { data, error } = await supabase.rpc("resume_budget_paused_jobs");
+  if (error) throw error;
+  const resumed = (data as number | null) ?? 0;
+  if (resumed > 0) log.info("budget_paused_jobs_resumed", { resumed });
+  return resumed;
+}
+
+/**
+ * The operator's view of how processing is actually doing, computed from
+ * Cauli's own durable evidence rather than from telemetry that may have been
+ * sampled away or dropped for quota.
+ */
+export async function readOperationalMetrics() {
+  const [level, queueAge, alerts] = await Promise.all([
+    supabase.rpc("processing_service_level", { window_hours: 24 }),
+    supabase.rpc("processing_queue_age_seconds"),
+    supabase.rpc("processing_operational_alerts"),
+  ]);
+  for (const result of [level, queueAge, alerts]) {
+    if (result.error) throw result.error;
+  }
+  return {
+    worker: config.workerName,
+    concurrency: config.concurrency,
+    queueAgeSeconds: queueAge.data ?? 0,
+    serviceLevel: level.data,
+    alerts: alerts.data ?? [],
+  };
+}
+
 export async function claimJob() {
   const { data, error } = await supabase.rpc("claim_processing_job", {
     worker_name: config.workerName,
@@ -307,6 +359,13 @@ export async function runJob(job: ProcessingJob) {
         jobId: job.id,
         error: sanitizedError(error),
       });
+      captureWorkerError(error, {
+        jobId: job.id,
+        callId: job.call_id,
+        jobKind: job.kind,
+        errorClass:
+          error instanceof Error ? error.constructor.name : "UnknownError",
+      });
     },
   });
   try {
@@ -347,6 +406,13 @@ export async function runJob(job: ProcessingJob) {
       kind: job.kind,
     });
   } catch (error) {
+    captureWorkerError(error, {
+      jobId: job.id,
+      callId: job.call_id,
+      jobKind: job.kind,
+      errorClass:
+        error instanceof Error ? error.constructor.name : "UnknownError",
+    });
     const ownsLease = await heartbeat.stop();
     const message = sanitizedError(error);
     const transcriptionError =

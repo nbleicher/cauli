@@ -22,10 +22,13 @@ export interface CallTableRow {
 export function CallTable({
   calls,
   showOwner,
+  filtered = false,
   showReviewAssignee = false,
 }: {
   calls: CallTableRow[];
   showOwner: boolean;
+  /** An empty page means something different once a filter is narrowing it. */
+  filtered?: boolean;
   showReviewAssignee?: boolean;
 }) {
   if (calls.length === 0) {
@@ -38,10 +41,11 @@ export function CallTable({
           height={80}
           className="empty-cal"
         />
-        <h2>No calls yet</h2>
+        <h2>{filtered ? "No matching calls" : "No calls yet"}</h2>
         <p>
-          Cal&rsquo;s ready when you are. New recordings appear here as soon as
-          their upload begins.
+          {filtered
+            ? "Nothing here matches those filters. Try widening the date range or clearing the search."
+            : "Cal\u2019s ready when you are. New recordings appear here as soon as their upload begins."}
         </p>
       </div>
     );

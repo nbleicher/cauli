@@ -259,7 +259,7 @@ export async function transcribeAudioSegments(
       load: async () => null,
       save: async () => {},
     },
-    fallbackModel: overrides.fallbackModel ?? "openai/whisper-large-v3",
+    fallbackModel: overrides.fallbackModel ?? config.transcriptionFallbackModel,
     fetch: overrides.fetch ?? fetch,
     language: overrides.language ?? (config.transcriptionLanguage || "en"),
     maxAttempts: overrides.maxAttempts ?? 5,

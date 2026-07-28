@@ -168,8 +168,13 @@ test("an Admin Invitation remains pending until TOTP is verified", async ({
           response.url().includes("grant_type=password") &&
           response.ok()
       ),
+      page.waitForEvent(
+        "framenavigated",
+        (frame) => frame === page.mainFrame()
+      ),
       page.getByRole("button", { name: "Sign in" }).click(),
     ]);
+    await page.waitForLoadState("networkidle");
     await page.goto(`/activate/password?invite=${inviteId}`);
     await page.getByLabel("New password").fill(permanentPassword);
     await page.getByLabel("Confirm password").fill(permanentPassword);
