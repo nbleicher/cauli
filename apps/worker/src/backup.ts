@@ -147,9 +147,10 @@ export async function backUpOneSourceAudio(
       log.info("source_audio_backup_cancelled_by_deletion", {});
       return true;
     }
-    // The database lets retention proceed after this bounded window. Start the
-    // clock at authorization so a paused process cannot wake after a 404
-    // deletion and begin a fresh, late PUT.
+    // Bound the normal client request to the database's authorization window.
+    // This is a latency bound, not the deletion safety boundary: receiver-side
+    // tombstones remain authoritative across clock skew, suspension, and an
+    // HTTP client disconnect.
     const uploadSignal = AbortSignal.timeout(remainingUploadMilliseconds);
 
     await createBackupObject(
