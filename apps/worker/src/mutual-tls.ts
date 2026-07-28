@@ -51,6 +51,7 @@ export function mutualTlsFetch(
           cert: credentials.clientCertificatePem,
           key: credentials.clientKeyPem,
           ca: credentials.certificateAuthorityPem,
+          signal: init?.signal ?? undefined,
           // The pinned CA is the whole point; never fall back to the system
           // trust store, and never accept an unverified peer.
           rejectUnauthorized: true,

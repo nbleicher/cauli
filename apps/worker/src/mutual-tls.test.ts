@@ -112,6 +112,14 @@ beforeAll(async () => {
         response.end();
         return;
       }
+      if (request.url === "/slow") {
+        request.resume();
+        setTimeout(() => {
+          response.writeHead(200);
+          response.end();
+        }, 250);
+        return;
+      }
       request.resume();
       request.on("end", () => {
         response.writeHead(201, { "x-cauli-checksum-sha256": "a".repeat(64) });
@@ -179,6 +187,16 @@ describe("the mutual TLS transport", () => {
     ).rejects.toThrow();
   });
 
+  it("aborts a request that exceeds its bounded upload window", async () => {
+    await expect(
+      mutualTlsFetch(credentials())(`${baseUrl}/slow`, {
+        method: "PUT",
+        body: new Uint8Array(Buffer.from("ciphertext")),
+        signal: AbortSignal.timeout(10),
+      })
+    ).rejects.toThrow(/abort/i);
+  });
+
   it("carries a real backup and a real deletion end to end", async () => {
     received = [];
     const created = await createBackupObject(credentials(), {
@@ -192,8 +210,6 @@ describe("the mutual TLS transport", () => {
     });
     expect(created.created).toBe(true);
 
-    // Loaded here because the retention module reads worker configuration at
-    // import time, and this contract is about the transport, not the worker.
     const { deleteBackupObject } = await import("./retention.js");
     await deleteBackupObject(credentials(), objectName);
 
