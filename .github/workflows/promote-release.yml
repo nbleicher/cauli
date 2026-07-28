@@ -74,7 +74,7 @@ jobs:
 
     steps:
       - name: Check out the exact release source
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 0
@@ -178,7 +178,7 @@ jobs:
 
     steps:
       - name: Check out the exact staged source
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.commit_sha }}
 
