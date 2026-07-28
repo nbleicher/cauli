@@ -1,6 +1,7 @@
 import type { Role } from "@calllog/shared";
 import {
   ClipboardCheck,
+  FileClock,
   Headphones,
   LogOut,
   Mic2,
@@ -32,6 +33,7 @@ const managerNav = [
 
 const adminNav = [
   { href: "/admin/attention", label: "Needs Attention", icon: TriangleAlert },
+  { href: "/admin/audit", label: "Audit Log", icon: FileClock },
   { href: "/admin/workspace", label: "Workspace Admin", icon: Users },
   { href: "/admin/scorecards", label: "Scorecards", icon: Settings2 },
 ];

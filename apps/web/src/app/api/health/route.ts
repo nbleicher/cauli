@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { isServiceRoleConfigured, isSupabaseConfigured } from "@/lib/env";
+import { isSupabaseConfigured } from "@/lib/env";
 
 export function GET() {
-  const configured = isSupabaseConfigured() && isServiceRoleConfigured();
+  const configured = isSupabaseConfigured();
   return NextResponse.json({
     ok: true,
     configured,

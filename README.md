@@ -2,13 +2,17 @@
 
 cauli is a deployable call recording, transcription, and QA review application. It records microphone and browser-tab audio in the browser, uploads durable chunks to private storage, transcribes recordings asynchronously, and gives managers a versioned weighted scorecard.
 
-The legacy Chrome extension is retained as a launcher and one-time migration bridge.
+Copyright © 2026 Cauli. All rights reserved. Public source visibility does not
+grant an open-source license; see [NOTICE](NOTICE).
 
 ## Documentation
 
 - [Technical reference](docs/TECHNICAL_REFERENCE.md)
 - [Deployment guide](docs/DEPLOYMENT.md)
 - [Manual verification](docs/MANUAL_TESTING.md)
+- [Security policy](SECURITY.md)
+- [Controlled-pilot production-readiness specification](docs/product/controlled-pilot-production-readiness.md)
+- [Human production-readiness runbook](docs/operations/human-production-readiness-runbook.md)
 
 ## Repository
 
@@ -68,16 +72,12 @@ Create separate Railway services from this repository:
 - Web service: config file `/railway.web.toml`
 - Worker service: config file `/railway.worker.toml`
 
-Both services use the same Supabase and OpenRouter secrets. See [Deployment](docs/DEPLOYMENT.md) for the complete setup and [Manual verification](docs/MANUAL_TESTING.md) for the release checklist.
+Staging and production use separate credentials. See
+[Deployment](docs/DEPLOYMENT.md) for setup and
+[Manual verification](docs/MANUAL_TESTING.md) for release checks.
 
-## Companion extension
+## Archived legacy extension
 
-Build the extension for the exact deployed origin:
-
-```bash
-CALLLOG_WEB_ORIGIN=https://your-calllog-domain.example \
-CALLLOG_SUPABASE_ORIGIN=https://your-project.supabase.co \
-  npm run build -w @calllog/extension
-```
-
-Load `apps/extension/dist` as the unpacked extension or package that directory for Chrome distribution. The production origin is compiled into both the manifest match pattern and the runtime origin check.
+`apps/extension` and the extension-import API remain only as unsupported
+historical migration code. They are not part of production navigation,
+deployment, or pilot support.

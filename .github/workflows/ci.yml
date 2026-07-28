@@ -9,6 +9,22 @@ permissions:
   contents: read
 
 jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan complete Git history for secrets
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks@sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055 \
+            detect --source=/repo --no-banner --redact --verbose
+
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -33,15 +49,21 @@ jobs:
         run: |
           supabase start
           supabase db reset
-          supabase status -o env \
-            | sed -E 's/^([A-Z_]+)="(.*)"$/\1=\2/' \
-            >> "$GITHUB_ENV"
+          while IFS='=' read -r name value; do
+            value="${value#\"}"
+            value="${value%\"}"
+            echo "::add-mask::$value"
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done < <(supabase status -o env)
 
       - name: Install Chrome
         run: npx playwright install --with-deps chromium
 
       - name: Audit production dependencies
         run: npm audit --omit=dev
+
+      - name: Public-source and regulated-claim checks
+        run: npm run check:release
 
       - name: Lint
         run: npm run lint

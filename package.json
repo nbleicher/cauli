@@ -8,6 +8,8 @@
   ],
   "scripts": {
     "build": "npm run build -w @calllog/shared && npm run build -w @calllog/web && npm run build -w @calllog/worker && npm run build -w @calllog/extension",
+    "check:claims": "node scripts/check-regulated-claims.mjs",
+    "check:release": "node scripts/check-public-source.mjs && npm run check:claims",
     "dev": "npm run dev -w @calllog/web",
     "dev:web": "npm run dev -w @calllog/web",
     "dev:worker": "npm run dev -w @calllog/worker",

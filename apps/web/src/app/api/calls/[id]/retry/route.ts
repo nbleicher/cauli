@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { createAdminSupabaseClient } from "@/lib/supabase/admin";
 import { authorizeCall } from "@/lib/server/calls";
 import { isAuthError, requireApiAuth } from "@/lib/server/auth";
 import { sanitizeError } from "@/lib/server/http";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export async function POST(
   _request: Request,
@@ -21,32 +21,15 @@ export async function POST(
     );
   }
 
-  const admin = createAdminSupabaseClient();
-  const { error: callError } = await admin
-    .from("calls")
-    .update({ status: "queued", error_message: null })
-    .eq("id", id);
-  const { error: jobError } = await admin.from("processing_jobs").upsert(
-    {
-      workspace_id: call.access.workspaceId,
-      call_id: id,
-      kind: "process_recording",
-      status: "queued",
-      idempotency_key: `process:${id}`,
-      attempts: 0,
-      next_attempt_at: new Date().toISOString(),
-      error_message: null,
-      error_category: null,
-      error_chunk_index: null,
-      provider_generation_id: null,
-    },
-    { onConflict: "idempotency_key" }
-  );
+  const supabase = await createServerSupabaseClient();
+  const { error } = await supabase.rpc("request_call_retry", {
+    target_call_id: id,
+  });
 
-  if (callError || jobError) {
+  if (error) {
     return NextResponse.json(
       {
-        error: sanitizeError(callError ?? jobError),
+        error: sanitizeError(error),
       },
       { status: 500 }
     );

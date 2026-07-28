@@ -214,6 +214,104 @@ h2,
   margin-top: 26px;
 }
 
+.public-policy-page {
+  min-height: 100vh;
+  padding: 48px 20px 24px;
+  background: var(--bg);
+}
+
+.public-policy-card {
+  width: min(760px, 100%);
+  margin: 0 auto;
+  padding: 34px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+.public-policy-brand {
+  width: fit-content;
+  margin-bottom: 32px;
+  color: var(--ink);
+  font-size: 18px;
+  text-decoration: none;
+}
+
+.public-policy-card h1 {
+  margin: 8px 0 14px;
+}
+
+.status-pill.warning {
+  color: #835d00;
+  background: #fff4c2;
+}
+
+.policy-hash {
+  margin: 14px 0 28px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.policy-copy {
+  display: grid;
+  gap: 16px;
+  line-height: 1.65;
+}
+
+.public-footer {
+  width: min(960px, 100%);
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  margin: 36px auto 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.public-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.public-footer a,
+.legal-version-list a,
+.legal-acceptance-panel a {
+  color: var(--coral-strong);
+}
+
+.legal-acceptance-panel {
+  max-width: 620px;
+}
+
+.legal-version-list {
+  display: grid;
+  gap: 10px;
+  margin: 24px 0;
+}
+
+.legal-version-list > div {
+  display: grid;
+  gap: 3px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.legal-version-list span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.legal-confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 22px 0 16px;
+}
+
 .auth-form label,
 .field label {
   color: var(--muted);
@@ -720,6 +818,41 @@ textarea:focus {
 
 .data-table tbody tr:hover {
   background: rgb(43 39 36 / 3%);
+}
+
+.audit-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 16px;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.audit-filters label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.audit-filter-actions {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.audit-filter-actions > * {
+  flex: 1;
+}
+
+.audit-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 
 .table-scroll {

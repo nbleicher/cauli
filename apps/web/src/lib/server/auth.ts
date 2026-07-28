@@ -27,6 +27,7 @@ export async function getAuthContext(): Promise<AuthContext | null> {
     .from("workspace_members")
     .select("workspace_id, user_id, role")
     .eq("user_id", user.id)
+    .eq("status", "active")
     .limit(1)
     .maybeSingle();
 
@@ -57,6 +58,11 @@ async function getSecondFactorRequirement() {
 export async function requirePageAuth() {
   const context = await getAuthContext();
   if (!context) redirect(isSupabaseConfigured() ? "/login" : "/setup");
+  const supabase = await createServerSupabaseClient();
+  const { data: legalReady, error: legalError } = await supabase.rpc(
+    "legal_gate_satisfied_for_current_user"
+  );
+  if (legalError || !legalReady) redirect("/legal/acceptance");
   const secondFactor = await getSecondFactorRequirement();
   if (secondFactor === "required") redirect("/auth/mfa");
   if (secondFactor === "unavailable") {
@@ -71,6 +77,16 @@ export async function requireApiAuth(
   const context = await getAuthContext();
   if (!context) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const supabase = await createServerSupabaseClient();
+  const { data: legalReady, error: legalError } = await supabase.rpc(
+    "legal_gate_satisfied_for_current_user"
+  );
+  if (legalError || !legalReady) {
+    return NextResponse.json(
+      { error: "Current Legal Document acceptance is required" },
+      { status: 403 }
+    );
   }
   const secondFactor = await getSecondFactorRequirement();
   if (secondFactor === "required") {

@@ -22,25 +22,22 @@ test("review API enforces completion and optimistic concurrency", async ({
   const password = `Test-${crypto.randomUUID()}!`;
   const reviewerEmail = `reviewer-${crypto.randomUUID()}@example.com`;
   const ownerEmail = `owner-${crypto.randomUUID()}@example.com`;
-  const [
-    { data: reviewer, error: reviewerError },
-    { data: owner, error: ownerError },
-  ] = await Promise.all([
-    admin.auth.admin.createUser({
+  const { data: reviewer, error: reviewerError } =
+    await admin.auth.admin.createUser({
       email: reviewerEmail,
       password,
       email_confirm: true,
-    }),
-    admin.auth.admin.createUser({
-      email: ownerEmail,
-      password,
-      email_confirm: true,
-    }),
-  ]);
+    });
   if (reviewerError) throw reviewerError;
+  const { data: owner, error: ownerError } = await admin.auth.admin.createUser({
+    email: ownerEmail,
+    password,
+    email_confirm: true,
+  });
   if (ownerError) throw ownerError;
 
   let templateId = "";
+  let replacementTemplateId = "";
   let callId = "";
   try {
     const { error: membershipError } = await admin
@@ -182,6 +179,32 @@ test("review API enforces completion and optimistic concurrency", async ({
       version: 1,
     });
     expect(revisionCount).toBe(1);
+
+    const { error: deactivateError } = await admin
+      .from("scorecard_templates")
+      .update({ is_active: false })
+      .eq("id", template.id);
+    if (deactivateError) throw deactivateError;
+    const replacementName = `Current Review template ${crypto.randomUUID()}`;
+    const { data: replacement, error: replacementError } = await admin
+      .from("scorecard_templates")
+      .insert({
+        workspace_id: workspaceId,
+        name: replacementName,
+        created_by: reviewer.user.id,
+      })
+      .select("id")
+      .single();
+    if (replacementError) throw replacementError;
+    replacementTemplateId = replacement.id;
+
+    await page.goto(`/calls/${call.id}`);
+    await expect(
+      page.getByText("Review API test", { exact: true })
+    ).toBeVisible();
+    await expect(
+      page.getByText(replacementName, { exact: true })
+    ).not.toBeVisible();
   } finally {
     if (callId) {
       await admin.from("calls").delete().eq("id", callId);
@@ -189,9 +212,19 @@ test("review API enforces completion and optimistic concurrency", async ({
     if (templateId) {
       await admin.from("scorecard_templates").delete().eq("id", templateId);
     }
-    await Promise.all([
-      admin.auth.admin.deleteUser(reviewer.user.id),
-      admin.auth.admin.deleteUser(owner.user.id),
-    ]);
+    if (replacementTemplateId) {
+      await admin
+        .from("scorecard_templates")
+        .delete()
+        .eq("id", replacementTemplateId);
+    }
+    const { error: reviewerCleanupError } = await admin.auth.admin.deleteUser(
+      reviewer.user.id
+    );
+    if (reviewerCleanupError) throw reviewerCleanupError;
+    const { error: ownerCleanupError } = await admin.auth.admin.deleteUser(
+      owner.user.id
+    );
+    if (ownerCleanupError) throw ownerCleanupError;
   }
 });

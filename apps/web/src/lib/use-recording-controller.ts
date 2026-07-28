@@ -52,6 +52,12 @@ export function useRecordingController() {
     setDrafts(await listRecoverableRecordingDrafts());
   }, []);
 
+  const cleanCapture = useCallback(async () => {
+    const capture = captureRef.current;
+    captureRef.current = null;
+    await closeActiveCapture(capture);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     listRecoverableRecordingDrafts()
@@ -62,14 +68,13 @@ export function useRecordingController() {
     return () => {
       cancelled = true;
       if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, []);
+      const recorder = recorderRef.current;
+      recorderRef.current = null;
+      if (recorder && recorder.state !== "inactive") recorder.stop();
 
-  const cleanCapture = useCallback(async () => {
-    const capture = captureRef.current;
-    captureRef.current = null;
-    await closeActiveCapture(capture);
-  }, []);
+      void cleanCapture();
+    };
+  }, [cleanCapture]);
 
   const stopRecording = useCallback(
     async (reason?: string) => {

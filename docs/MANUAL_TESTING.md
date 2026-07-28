@@ -71,12 +71,8 @@ Primary release matrix:
 - Confirm Members cannot read an In Progress draft through either the UI or a
   direct table request.
 
-## Extension migration
+## Archived extension migration
 
-Use a v1.1.8 profile containing source-only, converted, completed-transcript, failed-transcript, and partially saved recordings.
-
-- Confirm the web page detects only the exact-origin companion extension.
-- Retry migration and confirm `(workspace, user, legacy ID)` prevents duplicates.
-- Confirm existing completed transcripts are preserved without retranscription.
-- Confirm recordings without transcripts are processed normally.
-- Delete an imported call and confirm source, converted, and generated artifacts are removed.
+The legacy extension-import path is unsupported and excluded from production
+navigation, deployment, and pilot acceptance. Its retained source is historical
+only and must not be included in a production release artifact.

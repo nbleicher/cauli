@@ -25,3 +25,8 @@ file_size_limit = "100MiB"
 
 [analytics]
 enabled = false
+
+[functions.identity-admin]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/identity-admin/index.ts"

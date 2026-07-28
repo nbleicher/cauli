@@ -3,7 +3,6 @@ import { redirect } from "next/navigation";
 import { PageHeader } from "@/components/PageHeader";
 import { WorkspaceAdmin } from "@/components/WorkspaceAdmin";
 import { requirePageAuth } from "@/lib/server/auth";
-import { createAdminSupabaseClient } from "@/lib/supabase/admin";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 interface ProfileRelation {
@@ -27,7 +26,7 @@ export default async function WorkspaceAdminPage() {
       .from("workspace_members")
       .select(
         `
-        user_id, role, joined_at,
+        user_id, role, status, joined_at,
         profile:profiles!workspace_members_user_id_fkey(email, display_name)
       `
       )
@@ -41,22 +40,6 @@ export default async function WorkspaceAdminPage() {
       .gt("expires_at", new Date().toISOString())
       .order("created_at", { ascending: false }),
   ]);
-
-  // Which members have a verified second factor. Needs the service role, so it
-  // is resolved here rather than in the client component.
-  const adminClient = createAdminSupabaseClient();
-  const mfaEntries = await Promise.all(
-    (memberships ?? []).map(async (membership) => {
-      const { data } = await adminClient.auth.admin.mfa.listFactors({
-        userId: membership.user_id,
-      });
-      const enabled = (data?.factors ?? []).some(
-        (factor) => factor.status === "verified"
-      );
-      return [membership.user_id, enabled] as const;
-    })
-  );
-  const mfaByUser = new Map(mfaEntries);
 
   return (
     <main className="page page-narrow">
@@ -73,8 +56,11 @@ export default async function WorkspaceAdminPage() {
             email: profile?.email ?? "",
             displayName: profile?.display_name ?? "",
             role: membership.role as Role,
+            status: membership.status as "active" | "suspended" | "former",
             joinedAt: membership.joined_at,
-            mfaEnabled: mfaByUser.get(membership.user_id) ?? false,
+            // Role-aware MFA state becomes application-owned in ticket #14;
+            // the normal web runtime deliberately has no Auth-admin secret.
+            mfaEnabled: false,
           };
         })}
         invites={(invites ?? []).map((invite) => ({

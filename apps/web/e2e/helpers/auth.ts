@@ -75,7 +75,8 @@ async function describeProtectedNavigationFailure(page: Page, detail: string) {
 export async function signInAsWorkspaceMember(
   page: Page,
   email: string,
-  password: string
+  password: string,
+  transientRetries = 2
 ) {
   await page.goto("/login");
   await page.getByLabel("Work email").fill(email);
@@ -97,6 +98,19 @@ export async function signInAsWorkspaceMember(
   const authResponse = await authResponsePromise;
   const authBody = await readPasswordAuthResponse(authResponse);
   if (!authResponse.ok()) {
+    if (
+      transientRetries > 0 &&
+      authResponse.status() >= 500 &&
+      authBody.code === "request_timeout"
+    ) {
+      await page.waitForTimeout(250);
+      return signInAsWorkspaceMember(
+        page,
+        email,
+        password,
+        transientRetries - 1
+      );
+    }
     throw new Error(describeAuthFailure(authResponse, authBody));
   }
 

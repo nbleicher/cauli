@@ -1,9 +1,9 @@
 import { finalizeCallSchema } from "@calllog/shared";
 import { NextResponse } from "next/server";
-import { createAdminSupabaseClient } from "@/lib/supabase/admin";
 import { authorizeCall } from "@/lib/server/calls";
 import { isAuthError, requireApiAuth } from "@/lib/server/auth";
 import { parseJson, sanitizeError } from "@/lib/server/http";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export async function POST(
   request: Request,
@@ -21,8 +21,8 @@ export async function POST(
   if (parsed.error) return parsed.error;
   const body = parsed.data;
 
-  const admin = createAdminSupabaseClient();
-  const { data, error } = await admin.rpc("finalize_call", {
+  const supabase = await createServerSupabaseClient();
+  const { data, error } = await supabase.rpc("finalize_owned_call", {
     target_call_id: id,
     final_chunk_sequence: body.finalChunkSequence,
     target_duration_ms: body.durationMs,

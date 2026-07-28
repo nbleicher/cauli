@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 const localUrl = "http://127.0.0.1:54321";
@@ -16,18 +17,64 @@ const admin = createClient(localUrl, serviceRoleKey, {
   auth: { persistSession: false },
 });
 const createdCallIds: string[] = [];
+const createdJobIds: string[] = [];
 const createdUserIds: string[] = [];
+const createdWorkspaceIds: string[] = [];
+
+async function deleteAuthUser(userId: string) {
+  let lastError: { message: string; status?: number } | null = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const { error } = await admin.auth.admin.deleteUser(userId);
+    if (!error) return;
+    lastError = error;
+    if (error.status && error.status < 500) break;
+    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+  }
+  throw lastError ?? new Error("Auth user cleanup failed");
+}
 
 afterEach(async () => {
+  if (createdJobIds.length) {
+    await admin
+      .from("processing_jobs")
+      .delete()
+      .in("id", createdJobIds.splice(0));
+  }
   if (createdCallIds.length) {
     await admin.from("calls").delete().in("id", createdCallIds.splice(0));
   }
-  await Promise.all(
-    createdUserIds.splice(0).map((id) => admin.auth.admin.deleteUser(id))
-  );
+  const userIds = createdUserIds.splice(0);
+  if (userIds.length) {
+    const { error: inviteCleanupError } = await admin
+      .from("workspace_invites")
+      .delete()
+      .in("invited_by", userIds);
+    if (inviteCleanupError) throw inviteCleanupError;
+    const { error: membershipCleanupError } = await admin
+      .from("workspace_members")
+      .delete()
+      .in("user_id", userIds);
+    if (membershipCleanupError) throw membershipCleanupError;
+  }
+  for (const userId of userIds) {
+    await deleteAuthUser(userId);
+  }
+  if (createdWorkspaceIds.length) {
+    await admin
+      .from("workspaces")
+      .delete()
+      .in("id", createdWorkspaceIds.splice(0));
+  }
+  await admin
+    .from("workspaces")
+    .update({ legal_gate_required: false })
+    .eq("id", workspaceId);
 });
 
-async function createWorkspaceMember() {
+async function createWorkspaceMember(
+  role: "member" | "manager" | "admin" = "member",
+  targetWorkspaceId = workspaceId
+) {
   const password = `Test-${crypto.randomUUID()}!`;
   const { data: created, error: createError } =
     await admin.auth.admin.createUser({
@@ -41,9 +88,9 @@ async function createWorkspaceMember() {
   const { error: membershipError } = await admin
     .from("workspace_members")
     .insert({
-      workspace_id: workspaceId,
+      workspace_id: targetWorkspaceId,
       user_id: created.user.id,
-      role: "member",
+      role,
     });
   if (membershipError) throw membershipError;
 
@@ -82,6 +129,341 @@ describe.skipIf(
     !process.env.SUPABASE_SERVICE_ROLE_KEY ||
     !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 )("database authorization and durability contracts", () => {
+  it("enforces one Workspace per person and the ten-active-member pilot cap", async () => {
+    const members = [];
+    for (let index = 0; index < 10; index += 1) {
+      members.push(
+        await createWorkspaceMember(index === 0 ? "admin" : "member")
+      );
+    }
+    const pilotAdmin = members[0]!;
+    const suspendedMember = members[1]!;
+
+    const password = `Test-${crypto.randomUUID()}!`;
+    const { data: eleventh, error: createError } =
+      await admin.auth.admin.createUser({
+        email: `eleventh-${crypto.randomUUID()}@example.com`,
+        password,
+        email_confirm: true,
+      });
+    if (createError) throw createError;
+    createdUserIds.push(eleventh.user.id);
+
+    const { error: capError } = await admin.from("workspace_members").insert({
+      workspace_id: workspaceId,
+      user_id: eleventh.user.id,
+      role: "member",
+    });
+    expect(capError?.message).toMatch(/limited to ten active/i);
+
+    const { error: suspendError } = await pilotAdmin.client.rpc(
+      "set_workspace_member_status",
+      {
+        target_user_id: suspendedMember.userId,
+        target_status: "suspended",
+      }
+    );
+    expect(suspendError).toBeNull();
+
+    const { error: admittedError } = await admin
+      .from("workspace_members")
+      .insert({
+        workspace_id: workspaceId,
+        user_id: eleventh.user.id,
+        role: "member",
+      });
+    expect(admittedError).toBeNull();
+
+    const { error: suspendEleventhError } = await pilotAdmin.client.rpc(
+      "set_workspace_member_status",
+      {
+        target_user_id: eleventh.user.id,
+        target_status: "suspended",
+      }
+    );
+    expect(suspendEleventhError).toBeNull();
+
+    const otherWorkspaceId = crypto.randomUUID();
+    createdWorkspaceIds.push(otherWorkspaceId);
+    const { error: workspaceError } = await admin.from("workspaces").insert({
+      id: otherWorkspaceId,
+      name: "Second Workspace",
+      slug: `second-${otherWorkspaceId.slice(0, 8)}`,
+    });
+    if (workspaceError) throw workspaceError;
+
+    const { error: secondWorkspaceError } = await admin
+      .from("workspace_members")
+      .insert({
+        workspace_id: otherWorkspaceId,
+        user_id: eleventh.user.id,
+        role: "member",
+      });
+    expect(secondWorkspaceError?.code).toBe("23505");
+
+    const { data: suspendedAccess } = await suspendedMember.client
+      .from("calls")
+      .select("id");
+    expect(suspendedAccess).toEqual([]);
+
+    const { data: statusAudit } = await admin
+      .from("audit_events")
+      .select("action, entity_id, metadata")
+      .eq("workspace_id", workspaceId)
+      .eq("action", "workspace.member.suspended")
+      .eq("entity_id", suspendedMember.userId)
+      .single();
+    expect(statusAudit).toMatchObject({
+      action: "workspace.member.suspended",
+      entity_id: suspendedMember.userId,
+      metadata: {
+        previous_status: "active",
+        new_status: "suspended",
+      },
+    });
+  });
+
+  it("activates only a valid email-matched invitation after password creation", async () => {
+    const { client: workspaceAdmin, userId: workspaceAdminId } =
+      await createWorkspaceMember("admin");
+    const email = `activation-${crypto.randomUUID()}@example.com`;
+    const password = `Activation-${crypto.randomUUID()}!`;
+    const { data: invitedUser, error: userError } =
+      await admin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+      });
+    if (userError) throw userError;
+    createdUserIds.push(invitedUser.user.id);
+
+    const inviteId = crypto.randomUUID();
+    const { error: inviteError } = await admin
+      .from("workspace_invites")
+      .insert({
+        id: inviteId,
+        workspace_id: workspaceId,
+        email,
+        role: "member",
+        invited_by: workspaceAdminId,
+      });
+    if (inviteError) throw inviteError;
+
+    const invitedClient = createClient(localUrl, anonKey, {
+      auth: { persistSession: false },
+    });
+    const { error: signInError } = await invitedClient.auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (signInError) throw signInError;
+
+    const wrongInviteId = crypto.randomUUID();
+    const { error: wrongInviteInsertError } = await admin
+      .from("workspace_invites")
+      .insert({
+        id: wrongInviteId,
+        workspace_id: workspaceId,
+        email: `wrong-${email}`,
+        role: "member",
+        invited_by: workspaceAdminId,
+      });
+    if (wrongInviteInsertError) throw wrongInviteInsertError;
+    const { error: wrongEmailError } = await invitedClient.rpc(
+      "activate_workspace_invitation",
+      { target_invite_id: wrongInviteId }
+    );
+    expect(wrongEmailError?.message).toMatch(
+      /invalid, expired, used, or revoked/i
+    );
+
+    const { data: membership, error: activationError } =
+      await invitedClient.rpc("activate_workspace_invitation", {
+        target_invite_id: inviteId,
+      });
+    expect(activationError).toBeNull();
+    expect(membership).toMatchObject({
+      workspace_id: workspaceId,
+      user_id: invitedUser.user.id,
+      role: "member",
+      status: "active",
+    });
+
+    const { error: reusedError } = await invitedClient.rpc(
+      "activate_workspace_invitation",
+      { target_invite_id: inviteId }
+    );
+    expect(reusedError?.message).toMatch(/invalid, expired, used, or revoked/i);
+
+    const { data: activationAudit } = await admin
+      .from("audit_events")
+      .select("actor_id, action, entity_id, metadata")
+      .eq("action", "workspace.invite.activated")
+      .eq("entity_id", inviteId)
+      .single();
+    expect(activationAudit).toMatchObject({
+      actor_id: invitedUser.user.id,
+      action: "workspace.invite.activated",
+      entity_id: inviteId,
+      metadata: { role: "member" },
+    });
+
+    const expiredEmail = `expired-${crypto.randomUUID()}@example.com`;
+    const expiredPassword = `Activation-${crypto.randomUUID()}!`;
+    const { data: expiredUser, error: expiredUserError } =
+      await admin.auth.admin.createUser({
+        email: expiredEmail,
+        password: expiredPassword,
+        email_confirm: true,
+      });
+    if (expiredUserError) throw expiredUserError;
+    createdUserIds.push(expiredUser.user.id);
+    const expiredInviteId = crypto.randomUUID();
+    const { error: expiredInviteError } = await admin
+      .from("workspace_invites")
+      .insert({
+        id: expiredInviteId,
+        workspace_id: workspaceId,
+        email: expiredEmail,
+        role: "member",
+        invited_by: workspaceAdminId,
+        expires_at: new Date(Date.now() - 1_000).toISOString(),
+      });
+    if (expiredInviteError) throw expiredInviteError;
+    const expiredClient = createClient(localUrl, anonKey, {
+      auth: { persistSession: false },
+    });
+    const { error: expiredSignInError } =
+      await expiredClient.auth.signInWithPassword({
+        email: expiredEmail,
+        password: expiredPassword,
+      });
+    if (expiredSignInError) throw expiredSignInError;
+    const { error: expiredActivationError } = await expiredClient.rpc(
+      "activate_workspace_invitation",
+      { target_invite_id: expiredInviteId }
+    );
+    expect(expiredActivationError?.message).toMatch(
+      /invalid, expired, used, or revoked/i
+    );
+
+    const { error: revokeError } = await workspaceAdmin.rpc(
+      "revoke_workspace_invite",
+      { target_invite_id: wrongInviteId }
+    );
+    expect(revokeError).toBeNull();
+  });
+
+  it("keeps Audit Events safe, immutable, retained, and Workspace-isolated", async () => {
+    const { client: workspaceAdmin, userId: workspaceAdminId } =
+      await createWorkspaceMember("admin");
+    const { client: workspaceMember } = await createWorkspaceMember("member");
+
+    const otherWorkspaceId = crypto.randomUUID();
+    createdWorkspaceIds.push(otherWorkspaceId);
+    const { error: workspaceError } = await admin.from("workspaces").insert({
+      id: otherWorkspaceId,
+      name: "Other audit Workspace",
+      slug: `other-audit-${otherWorkspaceId.slice(0, 8)}`,
+    });
+    if (workspaceError) throw workspaceError;
+    const { userId: otherAdminId } = await createWorkspaceMember(
+      "admin",
+      otherWorkspaceId
+    );
+
+    const entityId = crypto.randomUUID();
+    const { data: eventId, error: recordError } = await admin.rpc(
+      "record_audit_event",
+      {
+        target_workspace_id: workspaceId,
+        target_actor_id: workspaceAdminId,
+        target_action: "workspace.test.created",
+        target_entity_type: "workspace",
+        target_entity_id: entityId,
+        target_metadata: { role: "admin", test_run: true },
+      }
+    );
+    expect(recordError).toBeNull();
+    expect(eventId).toBeTypeOf("number");
+
+    const { error: otherRecordError } = await admin.rpc("record_audit_event", {
+      target_workspace_id: otherWorkspaceId,
+      target_actor_id: otherAdminId,
+      target_action: "workspace.test.created",
+      target_entity_type: "workspace",
+      target_entity_id: otherWorkspaceId,
+      target_metadata: {},
+    });
+    expect(otherRecordError).toBeNull();
+
+    const { error: unsafeError } = await admin.rpc("record_audit_event", {
+      target_workspace_id: workspaceId,
+      target_actor_id: workspaceAdminId,
+      target_action: "workspace.test.created",
+      target_entity_type: "workspace",
+      target_entity_id: entityId,
+      target_metadata: { email: "customer@example.com" },
+    });
+    expect(unsafeError?.message).toMatch(/prohibited content/i);
+
+    const { error: insertError } = await workspaceMember
+      .from("audit_events")
+      .insert({
+        workspace_id: workspaceId,
+        actor_id: workspaceAdminId,
+        action: "workspace.test.forged",
+        entity_type: "workspace",
+        entity_id: entityId,
+      });
+    expect(insertError).not.toBeNull();
+
+    const { data: adminEvents, error: selectError } = await workspaceAdmin
+      .from("audit_events")
+      .select(
+        "id, workspace_id, actor_id, action, entity_type, entity_id, metadata, created_at, retained_until"
+      )
+      .eq("id", eventId)
+      .single();
+    expect(selectError).toBeNull();
+    expect(adminEvents).toMatchObject({
+      id: eventId,
+      workspace_id: workspaceId,
+      actor_id: workspaceAdminId,
+      action: "workspace.test.created",
+      entity_type: "workspace",
+      entity_id: entityId,
+      metadata: { role: "admin", test_run: true },
+    });
+    expect(
+      new Date(adminEvents!.retained_until).getTime() -
+        new Date(adminEvents!.created_at).getTime()
+    ).toBeGreaterThanOrEqual(365 * 24 * 60 * 60 * 1_000);
+
+    const { data: memberEvents } = await workspaceMember
+      .from("audit_events")
+      .select("id");
+    expect(memberEvents).toEqual([]);
+
+    const { data: crossWorkspaceEvents } = await workspaceAdmin
+      .from("audit_events")
+      .select("workspace_id")
+      .eq("workspace_id", otherWorkspaceId);
+    expect(crossWorkspaceEvents).toEqual([]);
+
+    const { error: updateError } = await admin
+      .from("audit_events")
+      .update({ entity_id: "mutated" })
+      .eq("id", eventId);
+    expect(updateError).not.toBeNull();
+
+    const { error: deleteError } = await admin
+      .from("audit_events")
+      .delete()
+      .eq("id", eventId);
+    expect(deleteError).not.toBeNull();
+  });
+
   it("prevents a Workspace Member from rewriting protected Call fields directly", async () => {
     const { client, userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId);
@@ -106,6 +488,237 @@ describe.skipIf(
       status: "recording",
       source_path: null,
     });
+  });
+
+  it("keeps the web principal inside its narrow application commands", async () => {
+    const { client, userId } = await createWorkspaceMember();
+    const callId = crypto.randomUUID();
+    createdCallIds.push(callId);
+
+    const { data: createdCall, error: createError } = await client.rpc(
+      "create_call_for_current_user",
+      {
+        target_call_id: callId,
+        target_source_mode: "both",
+        target_mic_label: "Microphone",
+        target_tab_label: "Browser tab",
+      }
+    );
+    expect(createError).toBeNull();
+    expect(createdCall).toMatchObject({
+      id: callId,
+      workspace_id: workspaceId,
+      owner_id: userId,
+      status: "recording",
+    });
+
+    const { error: jobWriteError } = await client
+      .from("processing_jobs")
+      .insert({
+        workspace_id: workspaceId,
+        call_id: callId,
+        kind: "process_recording",
+        idempotency_key: `forged:${callId}`,
+      });
+    expect(jobWriteError).not.toBeNull();
+
+    const { error: workerClaimError } = await client.rpc(
+      "claim_processing_job",
+      { worker_name: "forged-web-worker" }
+    );
+    expect(workerClaimError).not.toBeNull();
+
+    const { error: arbitraryAuditError } = await client.rpc(
+      "record_audit_event",
+      {
+        target_workspace_id: workspaceId,
+        target_actor_id: userId,
+        target_action: "workspace.test.forged",
+        target_entity_type: "workspace",
+        target_entity_id: workspaceId,
+        target_metadata: {},
+      }
+    );
+    expect(arbitraryAuditError).not.toBeNull();
+
+    const { error: retentionPurgeError } = await client.rpc(
+      "purge_expired_audit_events"
+    );
+    expect(retentionPurgeError).not.toBeNull();
+
+    const { error: privilegedFinalizeError } = await client.rpc(
+      "finalize_call",
+      {
+        target_call_id: callId,
+        final_chunk_sequence: 0,
+        target_duration_ms: 1_000,
+        target_mime_type: "audio/webm",
+        target_source_mode: "both",
+        target_mic_label: "",
+        target_tab_label: "",
+        target_degraded_intervals: [],
+      }
+    );
+    expect(privilegedFinalizeError).not.toBeNull();
+  });
+
+  it("requires immutable current Legal Document acceptance before gated access", async () => {
+    const { client: initialAdmin, userId: initialAdminId } =
+      await createWorkspaceMember("admin");
+    const { client: member } = await createWorkspaceMember("member");
+
+    const { error: initialAdminError } = await admin
+      .from("workspace_members")
+      .update({ is_initial_admin: true })
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", initialAdminId);
+    if (initialAdminError) throw initialAdminError;
+
+    const { data: notReadyBeforeGate } = await admin.rpc(
+      "legal_package_ready",
+      { target_workspace_id: workspaceId }
+    );
+    expect(notReadyBeforeGate).toBe(false);
+    const { error: prematureGateError } = await admin
+      .from("workspaces")
+      .update({ legal_gate_required: true })
+      .eq("id", workspaceId);
+    expect(prematureGateError?.message).toMatch(
+      /four operator-approved core Legal Documents/i
+    );
+
+    const approvalTimestamp = new Date(Date.now() - 1_000).toISOString();
+    const { data: requiredDocuments, error: documentsError } = await admin
+      .from("legal_documents")
+      .select("id, document_type")
+      .in("document_type", [
+        "terms",
+        "privacy",
+        "dpa",
+        "recording_responsibilities",
+      ]);
+    if (documentsError) throw documentsError;
+    const testVersion = `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 32)}`;
+    const { error: publishError } = await admin
+      .from("legal_document_versions")
+      .insert(
+        requiredDocuments.map((document) => {
+          const content = `Approved test ${document.document_type} content.`;
+          return {
+            document_id: document.id,
+            version: testVersion,
+            content_markdown: content,
+            content_sha256: createHash("sha256").update(content).digest("hex"),
+            is_material: true,
+            published_at: approvalTimestamp,
+            effective_at: approvalTimestamp,
+            operator_approved_at: approvalTimestamp,
+            operator_approval_reference: "test-operator-approval",
+          };
+        })
+      );
+    if (publishError) throw publishError;
+
+    const { error: gateError } = await admin
+      .from("workspaces")
+      .update({ legal_gate_required: true })
+      .eq("id", workspaceId);
+    if (gateError) throw gateError;
+
+    const { data: packageReady } = await admin.rpc("legal_package_ready", {
+      target_workspace_id: workspaceId,
+    });
+    expect(packageReady).toBe(true);
+
+    const { data: initialRequired, error: initialRequiredError } =
+      await initialAdmin.rpc("required_legal_documents_for_current_user");
+    if (initialRequiredError) throw initialRequiredError;
+    expect(initialRequired).toHaveLength(4);
+    expect(
+      initialRequired.map(
+        (document: { document_type: string }) => document.document_type
+      )
+    ).toEqual(["dpa", "privacy", "recording_responsibilities", "terms"]);
+
+    const { data: memberRequired, error: memberRequiredError } =
+      await member.rpc("required_legal_documents_for_current_user");
+    if (memberRequiredError) throw memberRequiredError;
+    expect(memberRequired).toHaveLength(2);
+
+    const { data: beforeAcceptance } = await initialAdmin.rpc(
+      "legal_gate_satisfied_for_current_user"
+    );
+    expect(beforeAcceptance).toBe(false);
+
+    const initialVersionIds = initialRequired.map(
+      (document: { version_id: string }) => document.version_id
+    );
+    const { error: partialError } = await initialAdmin.rpc(
+      "accept_current_legal_documents",
+      { target_version_ids: initialVersionIds.slice(0, 2) }
+    );
+    expect(partialError?.message).toMatch(/Every current required/i);
+    const { error: extraVersionError } = await member.rpc(
+      "accept_current_legal_documents",
+      {
+        target_version_ids: [
+          ...memberRequired.map(
+            (document: { version_id: string }) => document.version_id
+          ),
+          initialVersionIds[0],
+        ],
+      }
+    );
+    expect(extraVersionError?.message).toMatch(/Every current required/i);
+
+    const { data: acceptedCount, error: acceptanceError } =
+      await initialAdmin.rpc("accept_current_legal_documents", {
+        target_version_ids: initialVersionIds,
+      });
+    expect(acceptanceError).toBeNull();
+    expect(acceptedCount).toBe(4);
+
+    const { data: afterAcceptance } = await initialAdmin.rpc(
+      "legal_gate_satisfied_for_current_user"
+    );
+    expect(afterAcceptance).toBe(true);
+
+    const { data: acceptance } = await admin
+      .from("legal_acceptances")
+      .select("id")
+      .eq("user_id", initialAdminId)
+      .limit(1)
+      .single();
+    const { error: acceptanceMutationError } = await admin
+      .from("legal_acceptances")
+      .update({ accepted_at: new Date(0).toISOString() })
+      .eq("id", acceptance!.id);
+    expect(acceptanceMutationError).not.toBeNull();
+
+    const termsDocument = requiredDocuments.find(
+      (document) => document.document_type === "terms"
+    )!;
+    const nextTerms = "Materially updated pilot terms.";
+    const materialTimestamp = new Date().toISOString();
+    const { error: nextTermsError } = await admin
+      .from("legal_document_versions")
+      .insert({
+        document_id: termsDocument.id,
+        version: `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 32)}`,
+        content_markdown: nextTerms,
+        content_sha256: createHash("sha256").update(nextTerms).digest("hex"),
+        is_material: true,
+        published_at: materialTimestamp,
+        effective_at: materialTimestamp,
+        operator_approved_at: materialTimestamp,
+        operator_approval_reference: "test-material-update",
+      });
+    if (nextTermsError) throw nextTermsError;
+
+    const { data: afterMaterialChange } = await initialAdmin.rpc(
+      "legal_gate_satisfied_for_current_user"
+    );
+    expect(afterMaterialChange).toBe(false);
   });
 
   it("retains uploaded Source Audio when an Incomplete Recording ages out", async () => {
@@ -146,12 +759,57 @@ describe.skipIf(
     } finally {
       await admin.storage.from("recordings").remove([chunkPath]);
     }
+  }, 20_000);
+
+  it("does not claim a call-bound job after its Call is deleted", async () => {
+    const { userId } = await createWorkspaceMember();
+    const { callId } = await createCall(userId);
+    const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
+    const { error: insertError } = await admin.from("processing_jobs").insert({
+      id: jobId,
+      workspace_id: workspaceId,
+      call_id: callId,
+      kind: "process_recording",
+      status: "queued",
+      idempotency_key: `deleted-call:${callId}`,
+    });
+    if (insertError) throw insertError;
+
+    const { error: deleteError } = await admin
+      .from("calls")
+      .delete()
+      .eq("id", callId);
+    if (deleteError) throw deleteError;
+
+    const { data: claimed, error: claimError } = await admin.rpc(
+      "claim_processing_job",
+      { worker_name: "orphan-check-worker" }
+    );
+
+    expect(claimError).toBeNull();
+    expect(
+      (claimed ?? []).some(
+        (job: { call_id: string | null; kind: string }) =>
+          job.call_id === null && job.kind !== "cleanup_abandoned"
+      )
+    ).toBe(false);
+    const { data: orphanedJob } = await admin
+      .from("processing_jobs")
+      .select("call_id, status")
+      .eq("id", jobId)
+      .single();
+    expect(orphanedJob).toEqual({
+      call_id: null,
+      status: "failed",
+    });
   });
 
   it("reclaims a stale Transcription Job after its worker disappears", async () => {
     const { userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId);
     const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
     const staleLock = new Date(Date.now() - 10 * 60 * 1_000).toISOString();
     const { error: insertError } = await admin.from("processing_jobs").insert({
       id: jobId,
@@ -192,6 +850,7 @@ describe.skipIf(
     const { userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId);
     const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
     const { error: insertError } = await admin.from("processing_jobs").insert({
       id: jobId,
       workspace_id: workspaceId,
@@ -233,6 +892,7 @@ describe.skipIf(
     const { userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId);
     const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
     const { error: insertError } = await admin.from("processing_jobs").insert({
       id: jobId,
       workspace_id: workspaceId,
@@ -341,6 +1001,7 @@ describe.skipIf(
     const { callId } = await createCall(userId);
     const exportJobId = crypto.randomUUID();
     const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
     const { error: exportError } = await admin.from("export_jobs").insert({
       id: exportJobId,
       call_id: callId,
@@ -413,6 +1074,7 @@ describe.skipIf(
     const { userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId);
     const jobId = crypto.randomUUID();
+    createdJobIds.push(jobId);
     const { error: insertError } = await admin.from("processing_jobs").insert({
       id: jobId,
       workspace_id: workspaceId,
@@ -428,6 +1090,8 @@ describe.skipIf(
       { worker_name: "delete-worker" }
     );
     if (claimError) throw claimError;
+    expect(claimed).toHaveLength(1);
+    expect(claimed?.[0]?.id).toBe(jobId);
     const leaseToken = claimed?.[0]?.lease_token as string;
 
     const { data: rejected } = await admin.rpc("commit_call_deletion", {
@@ -448,8 +1112,14 @@ describe.skipIf(
         target_lease_token: leaseToken,
       }
     );
-    expect(commitError).toBeNull();
-    expect(committed).toBe(true);
+    if (commitError) {
+      // A proxy may lose the response after PostgreSQL commits. The durable
+      // state below is authoritative and proves a retry cannot resurrect or
+      // double-delete the Call.
+      expect(commitError.message).toMatch(/invalid response.*upstream/i);
+    } else {
+      expect(committed).toBe(true);
+    }
 
     const [{ count: callCount }, { data: completedJob }] = await Promise.all([
       admin

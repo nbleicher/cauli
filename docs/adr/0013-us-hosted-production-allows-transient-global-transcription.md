@@ -1,0 +1,5 @@
+# U.S.-Hosted Production allows transient global transcription
+
+Cauli will host its persistent production systems in verified U.S. regions but will continue using OpenRouter for transcription even though model inference is not guaranteed to remain in the United States. Every request and the OpenRouter account must deny provider data collection and require zero data retention, unavailable compliant endpoints must fail closed rather than weaken those controls, and customer-facing legal documents must disclose possible transient international processing instead of claiming strict U.S. data residency.
+
+Before launch, the operator will retain private timestamped provider screenshots or API output proving Railway Virginia (`us-east4-eqdc4a`), Supabase `us-east-1`, and AWS KMS `us-east-2`; GitHub will retain only a content-free record that the evidence was verified. Deployment checks will reject mismatched configured regions, and evidence will be refreshed after every infrastructure change and at least quarterly.

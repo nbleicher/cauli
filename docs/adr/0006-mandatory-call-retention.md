@@ -1,0 +1,3 @@
+# Mandatory Call retention
+
+Recorded conversations should not remain indefinitely merely because nobody remembered to delete them. Every Workspace will therefore have a mandatory Retention Policy, defaulting to 90 days and configurable by an Admin to 30, 60, 90, 180, or 365 days; there is no retain-forever option in the production pilot. Expiration uses the same audited deletion workflow as manual deletion so the Call, Recording, Source Audio, Transcript, Reviews, exports, and other owned artifacts are removed together. Content-free Audit Events are excluded from Call deletion and retained for one year so governance evidence outlives the content without preserving it.
