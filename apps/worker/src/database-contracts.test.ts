@@ -20,6 +20,7 @@ const createdCallIds: string[] = [];
 const createdJobIds: string[] = [];
 const createdUserIds: string[] = [];
 const createdWorkspaceIds: string[] = [];
+const createdScorecardTemplateIds: string[] = [];
 
 async function deleteAuthUser(userId: string) {
   let lastError: { message: string; status?: number } | null = null;
@@ -42,6 +43,13 @@ afterEach(async () => {
   }
   if (createdCallIds.length) {
     await admin.from("calls").delete().in("id", createdCallIds.splice(0));
+  }
+  if (createdScorecardTemplateIds.length) {
+    const { error: scorecardCleanupError } = await admin
+      .from("scorecard_templates")
+      .delete()
+      .in("id", createdScorecardTemplateIds.splice(0));
+    if (scorecardCleanupError) throw scorecardCleanupError;
   }
   const userIds = createdUserIds.splice(0);
   if (userIds.length) {
@@ -187,6 +195,259 @@ describe.skipIf(
     !process.env.SUPABASE_SERVICE_ROLE_KEY ||
     !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 )("database authorization and durability contracts", () => {
+  it("keeps optional scoring and Scorecard Version comparability explicit", async () => {
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const manager = await createWorkspaceMember("manager");
+    const owner = await createWorkspaceMember("member");
+
+    const categories = [
+      {
+        name: "Discovery",
+        criteria: [
+          {
+            label: "Required discovery",
+            description: "",
+            weight: 1,
+            required: true,
+          },
+          {
+            label: "Optional next step",
+            description: "",
+            weight: 100,
+            required: false,
+          },
+        ],
+      },
+    ];
+    const { data: firstVersionId, error: firstPublishError } =
+      await workspaceAdmin.client.rpc("publish_scorecard_for_current_admin", {
+        target_template_id: null,
+        target_name: "Database contract Scorecard",
+        target_categories: categories,
+      });
+    expect(firstPublishError).toBeNull();
+
+    const { data: firstVersion, error: firstVersionError } = await admin
+      .from("scorecard_versions")
+      .select("id, template_id, name")
+      .eq("id", firstVersionId)
+      .single();
+    if (firstVersionError) throw firstVersionError;
+    createdScorecardTemplateIds.push(firstVersion.template_id);
+    expect(firstVersion.name).toBe("Database contract Scorecard");
+
+    const { data: firstCategories, error: firstCategoriesError } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", firstVersion.id);
+    if (firstCategoriesError) throw firstCategoriesError;
+    const { data: firstCriteria, error: firstCriteriaError } = await admin
+      .from("scorecard_criteria")
+      .select("id, label, required, weight")
+      .in(
+        "category_id",
+        (firstCategories ?? []).map((category) => category.id)
+      )
+      .order("position");
+    if (firstCriteriaError) throw firstCriteriaError;
+    const requiredCriterion = firstCriteria?.find(
+      (criterion) => criterion.required
+    );
+    const optionalCriterion = firstCriteria?.find(
+      (criterion) => !criterion.required
+    );
+    if (!requiredCriterion || !optionalCriterion) {
+      throw new Error("Expected required and optional criteria");
+    }
+
+    const firstCall = await createCall(owner.userId, { status: "ready" });
+    const { data: firstReview, error: firstReviewError } =
+      await manager.client.rpc("submit_call_review", {
+        target_call_id: firstCall.callId,
+        target_scorecard_version_id: firstVersion.id,
+        expected_version: 0,
+        target_status: "reviewed",
+        target_summary: "Optional criterion is not applicable.",
+        target_follow_up: "",
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: 5,
+            comment: "Complete",
+          },
+          {
+            criterionId: optionalCriterion.id,
+            value: null,
+            comment: "Not applicable",
+          },
+        ],
+      });
+    expect(firstReviewError).toBeNull();
+    expect(firstReview.score).toBe(100);
+
+    const secondCall = await createCall(owner.userId, { status: "ready" });
+    const { error: requiredNaError } = await manager.client.rpc(
+      "submit_call_review",
+      {
+        target_call_id: secondCall.callId,
+        target_scorecard_version_id: firstVersion.id,
+        expected_version: 0,
+        target_status: "reviewed",
+        target_summary: "Required criterion cannot be N/A.",
+        target_follow_up: "",
+        target_answers: [
+          {
+            criterionId: requiredCriterion.id,
+            value: null,
+            comment: "",
+          },
+        ],
+      }
+    );
+    expect(requiredNaError?.message).toMatch(/required criteria/i);
+
+    const { error: immutableCriterionError } = await admin
+      .from("scorecard_criteria")
+      .update({ label: "Mutated publication" })
+      .eq("id", requiredCriterion.id);
+    expect(immutableCriterionError?.message).toMatch(/immutable/i);
+    const { error: immutableVersionError } = await admin
+      .from("scorecard_versions")
+      .delete()
+      .eq("id", firstVersion.id);
+    expect(immutableVersionError?.message).toMatch(/immutable/i);
+
+    const { data: secondVersionId, error: secondPublishError } =
+      await workspaceAdmin.client.rpc("publish_scorecard_for_current_admin", {
+        target_template_id: firstVersion.template_id,
+        target_name: "Database contract Scorecard",
+        target_categories: [
+          {
+            ...categories[0],
+            criteria: [
+              ...categories[0]!.criteria,
+              {
+                label: "Optional wrap-up",
+                description: "",
+                weight: 3,
+                required: false,
+              },
+            ],
+          },
+        ],
+      });
+    expect(secondPublishError).toBeNull();
+
+    const { data: boundReview } = await admin
+      .from("call_reviews")
+      .select("scorecard_version_id")
+      .eq("id", firstReview.id)
+      .single();
+    expect(boundReview?.scorecard_version_id).toBe(firstVersion.id);
+    const { data: preservedCriterion } = await admin
+      .from("scorecard_criteria")
+      .select("label")
+      .eq("id", requiredCriterion.id)
+      .single();
+    expect(preservedCriterion?.label).toBe("Required discovery");
+
+    const { data: secondVersionCategories } = await admin
+      .from("scorecard_categories")
+      .select("id")
+      .eq("version_id", secondVersionId);
+    const { data: secondVersionCriteria } = await admin
+      .from("scorecard_criteria")
+      .select("id")
+      .in(
+        "category_id",
+        (secondVersionCategories ?? []).map((category) => category.id)
+      )
+      .order("position");
+    const thirdCall = await createCall(owner.userId, { status: "ready" });
+    const { error: thirdReviewError } = await manager.client.rpc(
+      "submit_call_review",
+      {
+        target_call_id: thirdCall.callId,
+        target_scorecard_version_id: secondVersionId,
+        expected_version: 0,
+        target_status: "reviewed",
+        target_summary: "Second version review.",
+        target_follow_up: "",
+        target_answers: (secondVersionCriteria ?? []).map((criterion) => ({
+          criterionId: criterion.id,
+          value: 4,
+          comment: "",
+        })),
+      }
+    );
+    expect(thirdReviewError).toBeNull();
+
+    const { data: defaultSegments } = await workspaceAdmin.client
+      .from("review_score_segments")
+      .select("scorecard_version_id, analytics_segment_id")
+      .in("call_id", [firstCall.callId, thirdCall.callId])
+      .order("scorecard_version_id");
+    expect(
+      new Set(
+        (defaultSegments ?? []).map((segment) => segment.analytics_segment_id)
+      ).size
+    ).toBe(2);
+
+    const { error: managerComparisonError } = await manager.client.rpc(
+      "mark_scorecard_versions_comparable",
+      { target_version_ids: [firstVersion.id, secondVersionId] }
+    );
+    expect(managerComparisonError?.message).toMatch(/admin access/i);
+
+    const { data: comparisonSetId, error: comparisonError } =
+      await workspaceAdmin.client.rpc("mark_scorecard_versions_comparable", {
+        target_version_ids: [firstVersion.id, secondVersionId],
+      });
+    expect(comparisonError).toBeNull();
+
+    const { data: combinedSegments } = await workspaceAdmin.client
+      .from("review_score_segments")
+      .select("analytics_segment_id")
+      .in("call_id", [firstCall.callId, thirdCall.callId]);
+    expect(
+      new Set(
+        (combinedSegments ?? []).map((segment) => segment.analytics_segment_id)
+      )
+    ).toEqual(new Set([comparisonSetId]));
+
+    const { error: revokeError } = await workspaceAdmin.client.rpc(
+      "revoke_scorecard_version_comparability",
+      { target_comparison_set_id: comparisonSetId }
+    );
+    expect(revokeError).toBeNull();
+    const { data: segmentedAgain } = await workspaceAdmin.client
+      .from("review_score_segments")
+      .select("analytics_segment_id")
+      .in("call_id", [firstCall.callId, thirdCall.callId]);
+    expect(
+      new Set(
+        (segmentedAgain ?? []).map((segment) => segment.analytics_segment_id)
+      )
+    ).toEqual(new Set([firstVersion.id, secondVersionId]));
+
+    const { data: auditEvents } = await admin
+      .from("audit_events")
+      .select("action")
+      .eq("workspace_id", workspaceId)
+      .in("action", [
+        "scorecard.version.published",
+        "scorecard.versions.comparable",
+        "scorecard.versions.comparability_revoked",
+      ]);
+    expect(new Set((auditEvents ?? []).map((event) => event.action))).toEqual(
+      new Set([
+        "scorecard.version.published",
+        "scorecard.versions.comparable",
+        "scorecard.versions.comparability_revoked",
+      ])
+    );
+  });
+
   it("enforces one Workspace per person and the ten-active-member pilot cap", async () => {
     const members = [];
     for (let index = 0; index < 10; index += 1) {

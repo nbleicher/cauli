@@ -1321,7 +1321,7 @@ textarea:focus {
 
 .criterion-builder-row {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 76px 34px;
+  grid-template-columns: 24px minmax(0, 1fr) 76px 88px 34px;
   gap: 8px;
   align-items: center;
   padding: 9px 0;
@@ -1356,6 +1356,43 @@ textarea:focus {
   text-transform: uppercase;
 }
 
+.criterion-required-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.criterion-required-field input,
+.version-selection input {
+  width: auto;
+  min-height: auto;
+}
+
+.scorecard-comparability {
+  display: grid;
+  gap: 14px;
+}
+
+.version-selection {
+  display: grid;
+  gap: 8px;
+}
+
+.version-selection label,
+.comparison-set {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.comparison-set {
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
 .scorecard-builder-actions {
   display: flex;
   justify-content: space-between;
@@ -1373,7 +1410,7 @@ textarea:focus {
   }
 
   .criterion-builder-row {
-    grid-template-columns: 20px minmax(0, 1fr) 62px 34px;
+    grid-template-columns: 20px minmax(0, 1fr) 62px 76px 34px;
   }
 }
 

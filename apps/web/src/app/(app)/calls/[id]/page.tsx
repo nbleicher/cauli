@@ -86,7 +86,7 @@ export default async function CallDetailPage({
   if (scorecardVersionId) {
     const { data: boundVersion } = await supabase
       .from("scorecard_versions")
-      .select("template_id")
+      .select("template_id, name")
       .eq("id", scorecardVersionId)
       .maybeSingle();
     if (boundVersion) {
@@ -96,6 +96,7 @@ export default async function CallDetailPage({
         .eq("id", boundVersion.template_id)
         .maybeSingle();
       template = boundTemplate;
+      if (template && boundVersion.name) template.name = boundVersion.name;
     }
   } else {
     const { data: activeTemplate } = await supabase
