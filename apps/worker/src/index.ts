@@ -11,6 +11,7 @@ import { log, sanitizedError } from "./log.js";
 import {
   deleteOneAuthorizedBackup,
   expireCallsForRetention,
+  reportBackupDeletionBacklog,
   retentionClientFromEnvironment,
   retentionTargetFromEnvironment,
 } from "./retention.js";
@@ -20,6 +21,7 @@ let shuttingDown = false;
 let activeJobs = 0;
 let lastCleanupAt = 0;
 let lastLagReportAt = 0;
+let lastExpiryAt = 0;
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -32,18 +34,20 @@ function delay(ms: number) {
  */
 async function backupLoop() {
   const target = backupTargetFromEnvironment();
-  if (!target) {
-    // Loudly, and once: a Workspace whose Source Audio is not being copied
-    // anywhere should not look healthy.
-    log.error("source_audio_backup_not_configured", {});
-    return;
-  }
 
   while (!shuttingDown) {
     try {
+      // Lag is reported whether or not a target is configured. An unconfigured
+      // backup is the loudest possible reason for a copy to be late, so this
+      // must not be the branch that switches its own alarm off.
       if (Date.now() - lastLagReportAt > 60_000) {
         lastLagReportAt = Date.now();
         await reportBackupLag();
+      }
+      if (!target) {
+        log.error("source_audio_backup_not_configured", {});
+        await delay(60_000);
+        continue;
       }
       const recipients = await loadActiveBackupRecipients();
       if (!recipients) {
@@ -101,20 +105,32 @@ async function workerLoop(index: number) {
 async function retentionLoop() {
   const target = retentionTargetFromEnvironment();
   const client = retentionClientFromEnvironment() ?? undefined;
-  if (!target || !client) {
-    log.error("backup_retention_principal_not_configured", {});
-  }
 
   while (!shuttingDown) {
     try {
-      await expireCallsForRetention();
-      if (target && client) {
-        const worked = await deleteOneAuthorizedBackup({
-          target,
-          client,
-        });
-        if (worked) continue;
+      // How much deletion the application has promised and nobody has carried
+      // out. Reported first, and unconditionally, because the case where it
+      // grows fastest is the case where the retention principal is missing.
+      await reportBackupDeletionBacklog();
+
+      if (!target || !client) {
+        // Expiring a Call while the only principal that can remove its backup
+        // is absent would tell the Workspace its recording is gone while the
+        // encrypted copy stays on the VPS. Refuse rather than promise that.
+        log.error("backup_retention_principal_not_configured", {});
+        await delay(60_000);
+        continue;
       }
+
+      // Expiry is a sweep over every Call, so it runs on its own slow clock
+      // rather than once per queued deletion.
+      if (Date.now() - lastExpiryAt > 60_000) {
+        lastExpiryAt = Date.now();
+        await expireCallsForRetention();
+      }
+
+      const worked = await deleteOneAuthorizedBackup({ target, client });
+      if (worked) continue;
     } catch (error) {
       log.error("retention_loop_error", { error: sanitizedError(error) });
     }

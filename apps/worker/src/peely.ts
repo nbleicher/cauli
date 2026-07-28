@@ -89,6 +89,34 @@ export async function synchronizePeely(
 
   await mkdir(directory, { recursive: true });
 
+  // Authorized removals are applied first. Doing this after the copy loop would
+  // mean fetching an object back from the VPS only to delete it again on the
+  // same run, every run.
+  const { data: authorized, error: deletionError } = await client.rpc(
+    "list_authorized_backup_deletions"
+  );
+  if (deletionError) throw deletionError;
+
+  for (const { object_name: objectName } of (authorized ?? []) as {
+    object_name: string;
+  }[]) {
+    try {
+      const localPath = objectPath(directory, objectName);
+      // Authorizations outlive the copies they removed, so every run sees all
+      // of them. Only a copy that was still here counts as removed by this run.
+      const present = await stat(localPath).then(
+        () => true,
+        () => false
+      );
+      if (!present) continue;
+      await rm(localPath, { force: true });
+      await rm(manifestPath(directory, objectName), { force: true });
+      result.removed += 1;
+    } catch (error) {
+      result.failures.push(sanitizedError(error));
+    }
+  }
+
   const { data: objects, error: listError } = await client.rpc(
     "list_backup_objects_for_sync"
   );
@@ -127,31 +155,6 @@ export async function synchronizePeely(
       result.copied += 1;
     } catch (error) {
       // One bad object does not abandon the rest of the run.
-      result.failures.push(sanitizedError(error));
-    }
-  }
-
-  const { data: authorized, error: deletionError } = await client.rpc(
-    "list_authorized_backup_deletions"
-  );
-  if (deletionError) throw deletionError;
-
-  for (const { object_name: objectName } of (authorized ?? []) as {
-    object_name: string;
-  }[]) {
-    try {
-      const localPath = objectPath(directory, objectName);
-      // Authorizations outlive the copies they removed, so every run sees all
-      // of them. Only a copy that was still here counts as removed by this run.
-      const present = await stat(localPath).then(
-        () => true,
-        () => false
-      );
-      if (!present) continue;
-      await rm(localPath, { force: true });
-      await rm(manifestPath(directory, objectName), { force: true });
-      result.removed += 1;
-    } catch (error) {
       result.failures.push(sanitizedError(error));
     }
   }

@@ -62,10 +62,7 @@ async function createBackedUpCall(ownerId: string) {
   const { data: claimed } = await admin.rpc("claim_source_audio_backup", {
     worker_name: "deletion-journey",
   });
-  const objectName = crypto
-    .randomUUID()
-    .replaceAll("-", "")
-    .concat(crypto.randomUUID().replaceAll("-", ""));
+  const objectName = claimed.object_name as string;
   await admin.rpc("commit_source_audio_backup", {
     target_call_id: claimed.call_id,
     target_lease_token: claimed.lease_token,

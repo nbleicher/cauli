@@ -1,8 +1,5 @@
-import {
-  encryptSourceAudio,
-  opaqueObjectName,
-  type BackupRecipients,
-} from "./backup-crypto.js";
+import { createHash } from "node:crypto";
+import { encryptSourceAudio, type BackupRecipients } from "./backup-crypto.js";
 import {
   createBackupObject,
   RetryableBackupError,
@@ -27,6 +24,8 @@ interface BackupRow {
   attempts: number;
   lease_token: string;
   queued_at: string;
+  /** Reserved by the claim, so the name exists before any byte is sent. */
+  object_name: string;
 }
 
 export interface BackupDependencies {
@@ -39,7 +38,7 @@ export interface BackupDependencies {
 export async function loadActiveBackupRecipients(): Promise<BackupRecipients | null> {
   const { data, error } = await supabase
     .from("backup_key_versions")
-    .select("version, kms_key_id, age_recipient")
+    .select("version, kms_key_id, age_recipient, kms_public_key_sha256")
     .is("retired_at", null)
     .order("version", { ascending: false })
     .limit(1)
@@ -49,12 +48,32 @@ export async function loadActiveBackupRecipients(): Promise<BackupRecipients | n
 
   const kmsPublicKeyPem = process.env.BACKUP_KMS_PUBLIC_KEY?.trim();
   if (!kmsPublicKeyPem) return null;
+
+  // The key version says which public key it means, and the worker's
+  // environment says which one it holds. If a rotation moves one before the
+  // other, wrapping under the old key while labelling it the new one would
+  // quietly destroy the KMS recovery path for everything backed up in the gap.
+  // The digest is recorded for exactly this comparison, so make it.
+  const actualDigest = createHash("sha256")
+    .update(normalizePem(kmsPublicKeyPem))
+    .digest("hex");
+  if (actualDigest !== data.kms_public_key_sha256) {
+    throw new Error(
+      `The configured KMS public key does not match backup key version ${data.version}`
+    );
+  }
+
   return {
     kmsPublicKeyPem,
     kmsKeyId: data.kms_key_id,
     ageRecipient: data.age_recipient,
     keyVersion: data.version,
   };
+}
+
+/** Digest the key itself, so whitespace and line endings cannot change it. */
+export function normalizePem(pem: string) {
+  return pem.replace(/\s+/g, "");
 }
 
 async function claimBackup(): Promise<BackupRow | null> {
@@ -97,7 +116,7 @@ export async function backUpOneSourceAudio(
       dependencies.recipients,
       call.mime_type
     );
-    const objectName = opaqueObjectName();
+    const objectName = claimed.object_name;
 
     await createBackupObject(
       dependencies.target,

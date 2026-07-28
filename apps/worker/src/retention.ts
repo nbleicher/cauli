@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { Agent } from "node:https";
 import { config } from "./config.js";
+import { mutualTlsFetch } from "./mutual-tls.js";
 import { log, sanitizedError } from "./log.js";
 import { supabase } from "./supabase.js";
 
@@ -84,17 +84,12 @@ export async function deleteBackupObject(
     throw new Error("The Source Audio Backup receiver requires HTTPS");
   }
 
-  const response = await (options.fetch ?? fetch)(
+  // The retention principal presents its own certificate, not the worker's.
+  const response = await (options.fetch ?? mutualTlsFetch(target))(
     `${target.baseUrl.replace(/\/$/, "")}/objects/${objectName}`,
     {
       method: "DELETE",
-      dispatcher: new Agent({
-        cert: target.clientCertificatePem,
-        key: target.clientKeyPem,
-        ca: target.certificateAuthorityPem,
-        rejectUnauthorized: true,
-      }),
-    } as RequestInit & { dispatcher: Agent }
+    }
   );
 
   if (response.status === 204 || response.status === 404) return;
@@ -154,4 +149,24 @@ export async function expireCallsForRetention() {
   const expired = Number(data ?? 0);
   if (expired > 0) log.info("calls_expired_by_retention", { expired });
   return expired;
+}
+
+/**
+ * Deletion the application authorized and nobody has carried out. Every one of
+ * these is an encrypted copy still sitting on the VPS after the Workspace was
+ * told its Call was gone, so it is reported rather than left to be inferred.
+ */
+export async function reportBackupDeletionBacklog() {
+  const { data, error } = await supabase.rpc("backup_deletion_backlog");
+  if (error) throw error;
+  const backlog = (
+    data as { outstanding: number; oldest_seconds: number }[]
+  )?.[0];
+  if (backlog && backlog.outstanding > 0) {
+    log.error("backup_deletion_backlog", {
+      outstanding: backlog.outstanding,
+      oldestSeconds: backlog.oldest_seconds,
+    });
+  }
+  return backlog ?? { outstanding: 0, oldest_seconds: 0 };
 }

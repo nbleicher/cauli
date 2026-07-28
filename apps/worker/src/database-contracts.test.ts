@@ -45,12 +45,11 @@ afterEach(async () => {
   if (createdCallIds.length) {
     await admin.from("calls").delete().in("id", createdCallIds.splice(0));
   }
-  if (createdObjectNames.length) {
-    await admin
-      .from("backup_deletion_requests")
-      .delete()
-      .in("object_name", createdObjectNames.splice(0));
-  }
+  // Backup deletion is a single global queue that hands out the oldest
+  // outstanding instruction, so one test's leftovers would be claimed by the
+  // next. Clear the whole queue, as the rate-limit counters already do.
+  createdObjectNames.splice(0);
+  await admin.from("backup_deletion_requests").delete().neq("object_name", "");
   if (createdKeyVersions.length) {
     await admin
       .from("backup_key_versions")
@@ -81,7 +80,11 @@ afterEach(async () => {
   }
   await admin
     .from("workspaces")
-    .update({ legal_gate_required: false, retention_days: 90 })
+    .update({
+      legal_gate_required: false,
+      retention_days: 90,
+      retention_effective_from: new Date().toISOString(),
+    })
     .eq("id", workspaceId);
   // Rate-limit counters are Workspace- and Call-scoped, so one test's spending
   // would otherwise be charged to the next.
@@ -231,10 +234,9 @@ async function createStoredBackupCall(
     { worker_name: "deletion-fixture" }
   );
   if (claimError) throw claimError;
-  const objectName = crypto
-    .randomUUID()
-    .replaceAll("-", "")
-    .concat(crypto.randomUUID().replaceAll("-", ""));
+  // The claim reserved the name this attempt will use, so the fixture stores
+  // under the same one the worker would.
+  const objectName = claimed.object_name as string;
   const { error: commitError } = await admin.rpc("commit_source_audio_backup", {
     target_call_id: claimed.call_id,
     target_lease_token: claimed.lease_token,
@@ -1838,6 +1840,13 @@ describe.skipIf(
       /workspaces_retention_days_allowed/
     );
 
+    // The policy has been in force since long before these Calls, so the
+    // schedule is measured from when each was recorded.
+    await admin
+      .from("workspaces")
+      .update({ retention_effective_from: "2025-01-01T00:00:00Z" })
+      .eq("id", workspaceId);
+
     const { client: retentionAdmin, userId: retentionAdminId } =
       await createWorkspaceMember("admin");
     const { client: retentionManager } = await createWorkspaceMember("manager");
@@ -1969,6 +1978,54 @@ describe.skipIf(
     expect(isolated).toEqual([]);
   });
 
+  it("never lets a new Retention Policy reach back before it existed", async () => {
+    const { client: prospectiveAdmin, userId: prospectiveAdminId } =
+      await createWorkspaceMember("admin");
+    const policyStartedAt = new Date();
+    await admin
+      .from("workspaces")
+      .update({
+        retention_days: 30,
+        retention_effective_from: policyStartedAt.toISOString(),
+      })
+      .eq("id", workspaceId);
+
+    // A Call recorded years before anyone chose a Retention Policy. Measured
+    // from when it was recorded it expired long ago.
+    const { callId: ancientCallId } = await createCall(prospectiveAdminId, {
+      started_at: "2020-01-01T00:00:00Z",
+    });
+
+    const { data: schedule } = await prospectiveAdmin
+      .from("call_retention_schedule")
+      .select("scheduled_deletion_at")
+      .eq("call_id", ancientCallId)
+      .single();
+    const scheduled = new Date(schedule!.scheduled_deletion_at);
+
+    // It gets the full 30 days from the day the rule began, not from 2020.
+    expect(scheduled.getTime()).toBeGreaterThan(Date.now());
+    expect(
+      Math.round((scheduled.getTime() - policyStartedAt.getTime()) / 86_400_000)
+    ).toBe(30);
+
+    // So the sweep that would otherwise have destroyed it on the day this
+    // shipped leaves it alone.
+    const { data: expired, error: expiryError } = await admin.rpc(
+      "expire_calls_for_retention",
+      { batch_size: 100, target_workspace_id: workspaceId }
+    );
+    if (expiryError) throw expiryError;
+    expect(Number(expired)).toBe(0);
+
+    const { data: survivor } = await admin
+      .from("calls")
+      .select("deleted_at")
+      .eq("id", ancientCallId)
+      .single();
+    expect(survivor?.deleted_at).toBeNull();
+  });
+
   it("keeps retention a Workspace rule with no per-Call exception or hold", async () => {
     const { client: exceptionAdmin, userId: exceptionAdminId } =
       await createWorkspaceMember("admin");
@@ -2087,8 +2144,9 @@ describe.skipIf(
     });
     const leaseToken = claimed.lease_token as string;
 
-    // Only the worker holding the lease may declare the copy stored.
-    const objectName = "c".repeat(64);
+    // Only the worker holding the lease may declare the copy stored, and the
+    // name it stores under is the one the claim reserved for it.
+    const objectName = claimed.object_name as string;
     const commitArguments = {
       target_call_id: callId,
       target_object_name: objectName,
@@ -2131,18 +2189,21 @@ describe.skipIf(
       lease_token: null,
     });
 
-    // Nobody writes this table directly — not the Workspace, not the worker's
-    // own service role. Every change has to come through a command.
-    for (const overwrite of [
-      { object_name: "e".repeat(64) },
-      { ciphertext_sha256: "f".repeat(64) },
-      { state: "pending" },
-    ]) {
+    // A stored copy cannot be overwritten or walked back, and that holds
+    // against the operational plane itself rather than only against a missing
+    // grant — so it holds for the commands too.
+    for (const [overwrite, refusal] of [
+      [{ object_name: "e".repeat(64) }, /cannot be overwritten/],
+      [{ ciphertext_sha256: "f".repeat(64) }, /cannot be overwritten/],
+      [{ state: "pending" }, /cannot be un-stored/],
+    ] as const) {
       const { error: overwriteError } = await admin
         .from("source_audio_backups")
         .update(overwrite)
         .eq("call_id", callId);
-      expect(overwriteError?.message).toMatch(/permission denied/i);
+      expect(overwriteError?.message, JSON.stringify(overwrite)).toMatch(
+        refusal
+      );
     }
 
     // And the commit command will not let a different copy take the place of
@@ -2181,6 +2242,102 @@ describe.skipIf(
     });
     // The evidence says a copy exists; it does not say what was recorded.
     expect(JSON.stringify(storedAudit)).not.toMatch(/source|title|owner|webm/i);
+  });
+
+  it("reclaims a backup whose worker never came back", async () => {
+    const { userId } = await createWorkspaceMember("member");
+    const { callId } = await createCall(userId);
+    await admin
+      .from("calls")
+      .update({ source_path: `${workspaceId}/${callId}/artifacts/source.webm` })
+      .eq("id", callId);
+
+    const { data: claimed } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "worker-that-dies",
+    });
+    expect(claimed).toMatchObject({ call_id: callId, state: "in_progress" });
+
+    // It is not handed to a second worker while the first may still be working.
+    const { data: notStolen } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "second-worker",
+    });
+    expect(notStolen?.call_id ?? null).not.toBe(callId);
+
+    // The worker is killed mid-upload — a redeploy, an OOM — so it never
+    // commits and never reports failure. Age the lease rather than wait.
+    await admin
+      .from("source_audio_backups")
+      .update({
+        locked_at: new Date(Date.now() - 20 * 60_000).toISOString(),
+      })
+      .eq("call_id", callId);
+
+    const { data: reclaimed } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "worker-that-finishes",
+    });
+    expect(reclaimed).toMatchObject({
+      call_id: callId,
+      state: "in_progress",
+      attempts: 2,
+      locked_by: "worker-that-finishes",
+    });
+    // The abandoned lease cannot be used to commit after it was taken away.
+    expect(reclaimed.lease_token).not.toBe(claimed.lease_token);
+    const { data: refused } = await admin.rpc("commit_source_audio_backup", {
+      target_call_id: callId,
+      target_lease_token: claimed.lease_token,
+      target_object_name: claimed.object_name,
+      target_key_version: null,
+      target_kms_wrapped_key: "kms",
+      target_age_wrapped_key: "age",
+      target_ciphertext_sha256: "d".repeat(64),
+      target_ciphertext_bytes: 1,
+    });
+    expect(refused).toBe(false);
+  });
+
+  it("authorizes removal of a copy that was in flight when deletion arrived", async () => {
+    const { userId } = await createWorkspaceMember("member");
+    const { callId } = await createCall(userId);
+    await admin
+      .from("calls")
+      .update({ source_path: `${workspaceId}/${callId}/artifacts/source.webm` })
+      .eq("id", callId);
+
+    // The claim reserves the name before a byte is sent, so an upload that is
+    // about to land is already nameable.
+    const { data: claimed } = await admin.rpc("claim_source_audio_backup", {
+      worker_name: "slow-uploader",
+    });
+    const inFlightName = claimed.object_name as string;
+    expect(inFlightName).toMatch(/^[0-9a-f]{64}$/);
+
+    // Deletion arrives mid-upload. The copy has not committed and now never
+    // will, but it may already be sitting on the VPS.
+    await admin.rpc("begin_call_deletion", {
+      target_call_id: callId,
+      target_actor_id: userId,
+      target_reason: "manual",
+      target_actor_role: "member",
+    });
+
+    const { data: authorization } = await admin
+      .from("backup_deletion_requests")
+      .select("object_name")
+      .eq("object_name", inFlightName)
+      .single();
+    expect(authorization?.object_name).toBe(inFlightName);
+
+    const { data: auditEvent } = await admin
+      .from("audit_events")
+      .select("metadata")
+      .eq("action", "call.deletion.requested")
+      .eq("entity_id", callId)
+      .single();
+    expect(auditEvent?.metadata).toMatchObject({
+      backup_deletion_requested: true,
+      backup_objects_authorized: 1,
+    });
   });
 
   it("retries a failed copy on a backoff until it succeeds", async () => {
@@ -2313,7 +2470,7 @@ describe.skipIf(
     const { data: claimed } = await admin.rpc("claim_source_audio_backup", {
       worker_name: "backup-worker",
     });
-    const objectName = crypto.randomUUID().replaceAll("-", "").repeat(2);
+    const objectName = claimed.object_name as string;
     const checksum = "d".repeat(64);
     await admin.rpc("commit_source_audio_backup", {
       target_call_id: callId,
@@ -2433,6 +2590,13 @@ describe.skipIf(
   });
 
   it("sends manual deletion and retention expiry down one workflow", async () => {
+    // The policy has been in force for years, so a Call recorded in 2020 is
+    // genuinely past its date rather than merely older than the rule.
+    await admin
+      .from("workspaces")
+      .update({ retention_effective_from: "2020-01-01T00:00:00Z" })
+      .eq("id", workspaceId);
+
     const { userId: ownerId } = await createWorkspaceMember("member");
     const manual = await createStoredBackupCall(ownerId);
     // Recorded long enough ago that the 90-day default has passed.
@@ -2454,7 +2618,7 @@ describe.skipIf(
 
     const { data: expiredCount, error: expiryError } = await admin.rpc(
       "expire_calls_for_retention",
-      { batch_size: 100 }
+      { batch_size: 100, target_workspace_id: workspaceId }
     );
     if (expiryError) throw expiryError;
     expect(Number(expiredCount)).toBeGreaterThanOrEqual(1);
@@ -2537,7 +2701,10 @@ describe.skipIf(
       });
       expect(repeat.data).toBe(false);
     }
-    await admin.rpc("expire_calls_for_retention", { batch_size: 100 });
+    await admin.rpc("expire_calls_for_retention", {
+      batch_size: 100,
+      target_workspace_id: workspaceId,
+    });
 
     const [
       { count: jobCount },

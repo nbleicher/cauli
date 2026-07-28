@@ -137,6 +137,25 @@ test("holds the demonstrated recovery time to four hours", () => {
       }),
     /recorded how long it took/
   );
+
+  // Evidence is append-only, so one honest slow drill from two years ago must
+  // not condemn every promotion after it. Once it is too old to satisfy the
+  // schedule it is too old to fail it.
+  assert.doesNotThrow(() =>
+    validateRecoveryDrills({
+      ...complete,
+      drills: [
+        ...complete.drills,
+        {
+          kind: "database_point_in_time",
+          performedAt: daysAgo(700),
+          evidenceReference: "drill-pitr-2024-08",
+          recoverySeconds: 6 * 60 * 60,
+          succeeded: true,
+        },
+      ],
+    })
+  );
 });
 
 test("requires the offline copy to be fresh", () => {

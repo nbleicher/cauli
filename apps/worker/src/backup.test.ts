@@ -1,5 +1,10 @@
 import { createClient } from "@supabase/supabase-js";
-import { generateKeyPairSync, privateDecrypt, constants } from "node:crypto";
+import {
+  createHash,
+  generateKeyPairSync,
+  privateDecrypt,
+  constants,
+} from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 const localUrl = "http://127.0.0.1:54321";
@@ -55,12 +60,16 @@ afterEach(async () => {
   }
 });
 
-async function registerKeyVersion() {
+async function registerKeyVersion(
+  publicKeyPem = kmsPublicKeyPem
+): Promise<number> {
   const version = Math.floor(Math.random() * 1_000_000) + 5_000_000;
   const { error } = await admin.from("backup_key_versions").insert({
     version,
     kms_key_id: "arn:aws:kms:us-east-2:000000000000:key/cauli-backup",
-    kms_public_key_sha256: "a".repeat(64),
+    kms_public_key_sha256: createHash("sha256")
+      .update(publicKeyPem.replace(/\s+/g, ""))
+      .digest("hex"),
     age_recipient: ageRecipient,
     age_recipient_sha256: "b".repeat(64),
   });
@@ -201,6 +210,23 @@ describe.skipIf(
         fetch: async () => new Response(null, { status: 201 }),
       })
     ).toBe(false);
+  });
+
+  it("refuses to wrap under a key the active version does not name", async () => {
+    const { loadActiveBackupRecipients } = await import("./backup.js");
+    // A rotation that moved the key version before the worker's environment,
+    // or after it. Either way the wrap would be labelled with a version that
+    // cannot open it, and the KMS recovery path for that window would be gone
+    // without anything failing at the time.
+    const rotated = generateKeyPairSync("rsa", { modulusLength: 4096 });
+    const version = await registerKeyVersion(
+      rotated.publicKey.export({ type: "spki", format: "pem" }).toString()
+    );
+    process.env.BACKUP_KMS_PUBLIC_KEY = kmsPublicKeyPem;
+
+    await expect(loadActiveBackupRecipients()).rejects.toThrow(
+      new RegExp(`does not match backup key version ${version}`)
+    );
   });
 
   it("leaves an unreachable target queued for another attempt", async () => {

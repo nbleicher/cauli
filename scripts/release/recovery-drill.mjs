@@ -86,14 +86,19 @@ export function validateRecoveryDrills({
 
   // The objective is what was demonstrated, not what was hoped for, so the
   // slowest proven restore is the one that has to fit inside four hours.
-  const timedRestores = drills.filter(
-    (drill) =>
-      drill.succeeded &&
-      typeof drill.recoverySeconds === "number" &&
-      (drill.kind === "kms_source_audio_restore" ||
-        drill.kind === "offline_age_restore" ||
-        drill.kind === "database_point_in_time")
-  );
+  //
+  // Only drills still inside their own freshness window count. A drill records
+  // what recovery took at the time; once it is too old to satisfy the schedule
+  // it is too old to condemn the schedule either, and rows are append-only, so
+  // a single slow early drill would otherwise block every promotion forever.
+  const timedRestores = drills.filter((drill) => {
+    const required = requiredDrills.find((entry) => entry.kind === drill.kind);
+    if (!required || !drill.succeeded) return false;
+    if (typeof drill.recoverySeconds !== "number") return false;
+    const performedAt = new Date(drill.performedAt);
+    if (Number.isNaN(performedAt.valueOf())) return false;
+    return daysBetween(now, performedAt) <= required.withinDays;
+  });
   if (!timedRestores.length) {
     throw new Error("No recovery drill recorded how long it took");
   }

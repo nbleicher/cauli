@@ -48,6 +48,14 @@ test("an Admin sets the Retention Policy every Workspace Member can read", async
   let callId = "";
 
   try {
+    // The Retention Policy has been in force since before this Call, so its
+    // schedule is measured from when the Call was recorded.
+    const { error: policyError } = await admin
+      .from("workspaces")
+      .update({ retention_effective_from: "2025-01-01T00:00:00Z" })
+      .eq("id", workspaceId);
+    if (policyError) throw policyError;
+
     for (const [email, role] of [
       [adminEmail, "admin"],
       [memberEmail, "member"],
@@ -169,7 +177,10 @@ test("an Admin sets the Retention Policy every Workspace Member can read", async
     if (callId) await admin.from("calls").delete().eq("id", callId);
     await admin
       .from("workspaces")
-      .update({ retention_days: 90 })
+      .update({
+        retention_days: 90,
+        retention_effective_from: new Date().toISOString(),
+      })
       .eq("id", workspaceId);
     for (const userId of createdUserIds) {
       await admin.from("workspace_members").delete().eq("user_id", userId);

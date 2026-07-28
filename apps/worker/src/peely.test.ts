@@ -64,12 +64,11 @@ afterEach(async () => {
       .in("id", createdRunIds.splice(0));
   }
   await admin.from("peely_sync_runs").delete().neq("id", 0);
-  if (createdObjectNames.length) {
-    await admin
-      .from("backup_deletion_requests")
-      .delete()
-      .in("object_name", createdObjectNames.splice(0));
-  }
+  // Backup deletion is a single global queue that hands out the oldest
+  // outstanding instruction, so one test's leftovers would be claimed by the
+  // next. Clear the whole queue, as the rate-limit counters already do.
+  createdObjectNames.splice(0);
+  await admin.from("backup_deletion_requests").delete().neq("object_name", "");
   if (createdCallIds.length) {
     await admin.from("calls").delete().in("id", createdCallIds.splice(0));
   }
@@ -135,14 +134,10 @@ async function storeBackup(sourceAudio: Buffer) {
     ageRecipient,
     keyVersion: version,
   });
-  const objectName = crypto
-    .randomUUID()
-    .replaceAll("-", "")
-    .concat(crypto.randomUUID().replaceAll("-", ""));
-
   const { data: claimed } = await admin.rpc("claim_source_audio_backup", {
     worker_name: "peely-fixture",
   });
+  const objectName = claimed.object_name as string;
   await admin.rpc("commit_source_audio_backup", {
     target_call_id: claimed.call_id,
     target_lease_token: claimed.lease_token,

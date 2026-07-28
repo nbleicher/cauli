@@ -1,5 +1,3 @@
-import { Agent } from "node:https";
-
 /**
  * The narrow mTLS receiver on the shared Netcup VPS. The credential this module
  * carries can create an object and read one back for verification. It cannot
@@ -7,6 +5,8 @@ import { Agent } from "node:https";
  * the receiver refuses them for this client certificate besides. Deletion
  * belongs to the separate retention principal.
  */
+
+import { mutualTlsFetch } from "./mutual-tls.js";
 
 export interface BackupTargetConfig {
   /** `https://…` receiver endpoint. Plain HTTP is refused. */
@@ -84,13 +84,13 @@ function objectUrl(config: BackupTargetConfig, objectName: string) {
   return `${config.baseUrl.replace(/\/$/, "")}/objects/${objectName}`;
 }
 
-function mutualTlsAgent(config: BackupTargetConfig) {
-  return new Agent({
-    cert: config.clientCertificatePem,
-    key: config.clientKeyPem,
-    ca: config.certificateAuthorityPem,
-    rejectUnauthorized: true,
-  });
+/**
+ * Every request presents the client certificate and pins the receiver's CA. The
+ * transport is `node:https` rather than the global `fetch`, which silently
+ * ignores TLS material it is not given as an undici dispatcher.
+ */
+function transport(config: BackupTargetConfig, options: BackupTargetOptions) {
+  return options.fetch ?? mutualTlsFetch(config);
 }
 
 /**
@@ -104,7 +104,7 @@ export async function createBackupObject(
   options: BackupTargetOptions = {}
 ) {
   assertMutualTls(config);
-  const response = await (options.fetch ?? fetch)(
+  const response = await transport(config, options)(
     objectUrl(config, object.objectName),
     {
       method: "PUT",
@@ -119,8 +119,7 @@ export async function createBackupObject(
         "x-cauli-wrapped-age": object.ageWrappedKey,
       },
       body: new Uint8Array(object.ciphertext),
-      dispatcher: mutualTlsAgent(config),
-    } as RequestInit & { dispatcher: Agent }
+    }
   );
 
   if (response.status === 201) return { created: true as const };
@@ -159,12 +158,11 @@ export async function readBackupObject(
   options: BackupTargetOptions = {}
 ) {
   assertMutualTls(config);
-  const response = await (options.fetch ?? fetch)(
+  const response = await transport(config, options)(
     objectUrl(config, objectName),
     {
       method: "GET",
-      dispatcher: mutualTlsAgent(config),
-    } as RequestInit & { dispatcher: Agent }
+    }
   );
   if (!response.ok) {
     throw new Error(
