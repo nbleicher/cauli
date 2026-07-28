@@ -228,15 +228,6 @@ describe.skipIf(
       await createWorkspaceMember("admin");
     const email = `activation-${crypto.randomUUID()}@example.com`;
     const password = `Activation-${crypto.randomUUID()}!`;
-    const { data: invitedUser, error: userError } =
-      await admin.auth.admin.createUser({
-        email,
-        password,
-        email_confirm: true,
-      });
-    if (userError) throw userError;
-    createdUserIds.push(invitedUser.user.id);
-
     const inviteId = crypto.randomUUID();
     const { error: inviteError } = await admin
       .from("workspace_invites")
@@ -248,6 +239,30 @@ describe.skipIf(
         invited_by: workspaceAdminId,
       });
     if (inviteError) throw inviteError;
+
+    const { data: invitedUser, error: userError } =
+      await admin.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+      });
+    if (userError) throw userError;
+    createdUserIds.push(invitedUser.user.id);
+
+    const [{ data: pendingInvite }, { count: prematureMemberships }] =
+      await Promise.all([
+        admin
+          .from("workspace_invites")
+          .select("accepted_at")
+          .eq("id", inviteId)
+          .single(),
+        admin
+          .from("workspace_members")
+          .select("user_id", { count: "exact", head: true })
+          .eq("user_id", invitedUser.user.id),
+      ]);
+    expect(pendingInvite?.accepted_at).toBeNull();
+    expect(prematureMemberships).toBe(0);
 
     const invitedClient = createClient(localUrl, anonKey, {
       auth: { persistSession: false },
@@ -1112,14 +1127,8 @@ describe.skipIf(
         target_lease_token: leaseToken,
       }
     );
-    if (commitError) {
-      // A proxy may lose the response after PostgreSQL commits. The durable
-      // state below is authoritative and proves a retry cannot resurrect or
-      // double-delete the Call.
-      expect(commitError.message).toMatch(/invalid response.*upstream/i);
-    } else {
-      expect(committed).toBe(true);
-    }
+    if (commitError) throw commitError;
+    expect(committed).toBe(true);
 
     const [{ count: callCount }, { data: completedJob }] = await Promise.all([
       admin

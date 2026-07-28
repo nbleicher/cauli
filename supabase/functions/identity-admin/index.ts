@@ -32,15 +32,10 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 function safeMessage(error: unknown) {
-  if (error instanceof Error) return error.message;
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "message" in error &&
-    typeof error.message === "string"
-  ) {
-    return error.message;
-  }
+  console.error(
+    "identity.operation_failed",
+    error instanceof Error ? error.name : "UnknownError"
+  );
   return "Identity administration failed";
 }
 
@@ -53,12 +48,21 @@ Deno.serve(async (request) => {
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const authorization = request.headers.get("Authorization") ?? "";
-  if (!supabaseUrl || !anonKey || !serviceRoleKey || !authorization) {
+  if (!supabaseUrl || !anonKey || !serviceRoleKey) {
     return jsonResponse({ error: "Identity service is not configured" }, 503);
   }
+  if (!authorization) return jsonResponse({ error: "Unauthorized" }, 401);
 
   try {
-    const body = (await request.json()) as IdentityAdminRequest;
+    const candidate = (await request.json()) as { action?: unknown };
+    if (
+      candidate.action !== "invite" &&
+      candidate.action !== "reset_mfa" &&
+      candidate.action !== "request_password_reset"
+    ) {
+      return jsonResponse({ error: "Unsupported identity action" }, 400);
+    }
+    const body = candidate as IdentityAdminRequest;
     if (body.action === "request_password_reset") {
       const configuredOrigin = new URL(
         Deno.env.get("APP_URL") ?? "http://127.0.0.1:3102"
@@ -137,17 +141,25 @@ Deno.serve(async (request) => {
     });
 
     if (body.action === "invite") {
+      const configuredOrigin = new URL(
+        Deno.env.get("APP_URL") ?? "http://127.0.0.1:3102"
+      ).origin;
+      const redirect = new URL(body.redirectTo);
+      if (redirect.origin !== configuredOrigin) {
+        return jsonResponse({ error: "Invalid invitation redirect" }, 400);
+      }
       const { data: invite, error: inviteError } = await admin
         .from("workspace_invites")
         .select("id, workspace_id, email, role, invited_by, accepted_at")
         .eq("id", body.inviteId)
         .eq("workspace_id", membership.workspace_id)
-        .single();
+        .maybeSingle();
       if (inviteError) throw inviteError;
+      if (!invite) return jsonResponse({ error: "Invitation not found" }, 404);
 
       const { data: invited, error: authError } =
         await admin.auth.admin.inviteUserByEmail(invite.email, {
-          redirectTo: body.redirectTo,
+          redirectTo: redirect.toString(),
         });
       if (
         authError &&
@@ -199,8 +211,6 @@ Deno.serve(async (request) => {
       if (auditError) throw auditError;
       return jsonResponse({ removed });
     }
-
-    return jsonResponse({ error: "Unsupported identity action" }, 400);
   } catch (error) {
     return jsonResponse({ error: safeMessage(error) }, 500);
   }
