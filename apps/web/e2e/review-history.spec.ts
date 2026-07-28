@@ -19,7 +19,7 @@ test.skip(
   "requires the local Supabase stack"
 );
 
-test("a Call owner sees complete submissions but not a newer draft", async ({
+test("a Call owner sees complete submissions but not newer In Progress work", async ({
   page,
 }) => {
   const password = `Test-${crypto.randomUUID()}!`;
@@ -150,7 +150,7 @@ test("a Call owner sees complete submissions but not a newer draft", async ({
       }
     );
     if (firstSubmitError) throw firstSubmitError;
-    const { error: draftSubmitError } = await managerClient.rpc(
+    const { error: inProgressSubmitError } = await managerClient.rpc(
       "submit_call_review_with_follow_up",
       {
         target_call_id: callId,
@@ -158,19 +158,19 @@ test("a Call owner sees complete submissions but not a newer draft", async ({
         expected_version: 1,
         expected_assignment_version: 1,
         target_status: "in_progress",
-        target_summary: "Private draft summary.",
+        target_summary: "Private In Progress summary.",
         target_follow_up: "",
         target_follow_up_due_date: null,
         target_answers: [
           {
             criterionId: criterion!.id,
             value: 1,
-            comment: "Private draft comment.",
+            comment: "Private In Progress comment.",
           },
         ],
       }
     );
-    if (draftSubmitError) throw draftSubmitError;
+    if (inProgressSubmitError) throw inProgressSubmitError;
 
     await signInAsWorkspaceMember(page, ownerEmail, password);
     await page.goto(`/calls/${callId}`);
@@ -180,8 +180,8 @@ test("a Call owner sees complete submissions but not a newer draft", async ({
     await expect(
       page.getByText("First visible summary.", { exact: true })
     ).toBeVisible();
-    await expect(page.getByText("Private draft summary.")).toHaveCount(0);
-    await expect(page.getByText("Private draft comment.")).toHaveCount(0);
+    await expect(page.getByText("Private In Progress summary.")).toHaveCount(0);
+    await expect(page.getByText("Private In Progress comment.")).toHaveCount(0);
 
     await page.getByText("1 visible revision", { exact: true }).click();
     await page.getByText(/Revision 1 · reviewed/).click();

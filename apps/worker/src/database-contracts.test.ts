@@ -2,7 +2,8 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createHash, createHmac } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
-const localUrl = "http://127.0.0.1:54321";
+const localUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54321";
 const serviceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const anonKey =
@@ -760,7 +761,7 @@ describe.skipIf(
     }
   });
 
-  it("preserves complete immutable Review Revision history with draft privacy", async () => {
+  it("preserves complete immutable Review Revision history with In Progress privacy", async () => {
     const workspaceAdmin = await createWorkspaceMember("admin");
     const manager = await createWorkspaceMember("manager");
     const owner = await createWorkspaceMember("member");
@@ -849,7 +850,7 @@ describe.skipIf(
     expect(firstSubmitError).toBeNull();
     expect(firstReview).toMatchObject({ version: 1, score: 100 });
 
-    const { error: draftSubmitError } = await manager.client.rpc(
+    const { error: inProgressSubmitError } = await manager.client.rpc(
       "submit_call_review_with_follow_up",
       {
         target_call_id: call.callId,
@@ -857,27 +858,27 @@ describe.skipIf(
         expected_version: 1,
         expected_assignment_version: 1,
         target_status: "in_progress",
-        target_summary: "Private draft summary.",
+        target_summary: "Private In Progress summary.",
         target_follow_up: "",
         target_follow_up_due_date: null,
         target_answers: [
           {
             criterionId: requiredCriterion.id,
             value: 1,
-            comment: "Private draft comment.",
+            comment: "Private In Progress comment.",
           },
         ],
       }
     );
-    expect(draftSubmitError).toBeNull();
+    expect(inProgressSubmitError).toBeNull();
 
-    const { data: ownerHistoryDuringDraft, error: ownerHistoryError } =
+    const { data: ownerHistoryDuringInProgress, error: ownerHistoryError } =
       await owner.client.rpc("review_revision_history", {
         target_call_id: call.callId,
       });
     expect(ownerHistoryError).toBeNull();
-    expect(ownerHistoryDuringDraft).toHaveLength(1);
-    expect(ownerHistoryDuringDraft?.[0]).toMatchObject({
+    expect(ownerHistoryDuringInProgress).toHaveLength(1);
+    expect(ownerHistoryDuringInProgress?.[0]).toMatchObject({
       revision: 1,
       scorecard_version_id: scorecardVersionId,
       status: "reviewed",
@@ -886,8 +887,8 @@ describe.skipIf(
       follow_up_state: "not_required",
       submitted_by: manager.userId,
     });
-    expect(JSON.stringify(ownerHistoryDuringDraft)).not.toContain(
-      "Private draft"
+    expect(JSON.stringify(ownerHistoryDuringInProgress)).not.toContain(
+      "Private In Progress"
     );
 
     const { data: thirdReview, error: thirdSubmitError } =
@@ -932,7 +933,7 @@ describe.skipIf(
       status: "needs_follow_up",
       summary: "Third submitted summary.",
       follow_up: "Complete the documented action.",
-      follow_up_state: "required",
+      follow_up_state: "open",
       submitted_by: manager.userId,
     });
     expect(managerHistory?.[0]?.answers).toEqual([
@@ -963,6 +964,32 @@ describe.skipIf(
       { target_call_id: call.callId }
     );
     expect(nonOwnerHistory).toEqual([]);
+
+    const { data: ownerDirectHistory, error: ownerDirectHistoryError } =
+      await owner.client
+        .from("review_revisions")
+        .select("revision, status")
+        .eq("review_id", firstReview.id)
+        .order("revision");
+    expect(ownerDirectHistoryError).toBeNull();
+    expect(ownerDirectHistory).toEqual([
+      { revision: 1, status: "reviewed" },
+      { revision: 3, status: "needs_follow_up" },
+    ]);
+
+    const { error: suspendOwnerError } = await workspaceAdmin.client.rpc(
+      "set_workspace_member_status",
+      {
+        target_user_id: owner.userId,
+        target_status: "suspended",
+      }
+    );
+    expect(suspendOwnerError).toBeNull();
+    const { data: suspendedOwnerDirectHistory } = await owner.client
+      .from("review_revisions")
+      .select("id")
+      .eq("review_id", firstReview.id);
+    expect(suspendedOwnerDirectHistory).toEqual([]);
 
     const { error: staleReviewError } = await manager.client.rpc(
       "submit_call_review_with_follow_up",
@@ -1340,6 +1367,24 @@ describe.skipIf(
     expect(JSON.stringify(auditEvents)).not.toContain(
       "Complete the agreed coaching action."
     );
+
+    const { data: ownerDirectFollowUps, error: ownerDirectFollowUpsError } =
+      await owner.client.from("follow_ups").select("id").eq("id", followUp.id);
+    expect(ownerDirectFollowUpsError).toBeNull();
+    expect(ownerDirectFollowUps).toEqual([{ id: followUp.id }]);
+    const { error: suspendOwnerError } = await workspaceAdmin.client.rpc(
+      "set_workspace_member_status",
+      {
+        target_user_id: owner.userId,
+        target_status: "suspended",
+      }
+    );
+    expect(suspendOwnerError).toBeNull();
+    const { data: suspendedOwnerDirectFollowUps } = await owner.client
+      .from("follow_ups")
+      .select("id")
+      .eq("id", followUp.id);
+    expect(suspendedOwnerDirectFollowUps).toEqual([]);
   });
 
   it("enforces one Workspace per person and the ten-active-member pilot cap", async () => {

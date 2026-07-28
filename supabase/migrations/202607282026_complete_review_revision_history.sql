@@ -1,5 +1,5 @@
--- Ticket #26: complete, immutable Review Revision snapshots with draft-safe
--- history visibility.
+-- Ticket #26: complete, immutable Review Revision snapshots with In Progress
+-- privacy.
 
 alter table public.review_revisions
   add column scorecard_version_id uuid
