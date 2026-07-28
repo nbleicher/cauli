@@ -152,31 +152,32 @@ export async function backUpOneSourceAudio(
     // deletion and begin a fresh, late PUT.
     const uploadSignal = AbortSignal.timeout(remainingUploadMilliseconds);
 
-    try {
-      await createBackupObject(
-        dependencies.target,
-        {
-          objectName,
-          ciphertext: encrypted.ciphertext,
-          manifest: encrypted.manifest,
-          kmsWrappedKey: encrypted.wrapped.kmsWrappedKey,
-          ageWrappedKey: encrypted.wrapped.ageWrappedKey,
-          keyVersion: encrypted.wrapped.keyVersion,
-          ciphertextSha256: encrypted.ciphertextSha256,
-        },
-        { fetch: dependencies.fetch, signal: uploadSignal }
-      );
-    } finally {
-      const { error: finishError } = await client.rpc(
-        "finish_source_audio_backup_upload",
-        {
-          target_call_id: claimed.call_id,
-          target_lease_token: claimed.lease_token,
-          target_object_name: objectName,
-        }
-      );
-      if (finishError) throw finishError;
-    }
+    await createBackupObject(
+      dependencies.target,
+      {
+        objectName,
+        ciphertext: encrypted.ciphertext,
+        manifest: encrypted.manifest,
+        kmsWrappedKey: encrypted.wrapped.kmsWrappedKey,
+        ageWrappedKey: encrypted.wrapped.ageWrappedKey,
+        keyVersion: encrypted.wrapped.keyVersion,
+        ciphertextSha256: encrypted.ciphertextSha256,
+      },
+      { fetch: dependencies.fetch, signal: uploadSignal }
+    );
+    // A client abort does not prove the receiver stopped processing an already
+    // accepted body. Only a complete HTTP response closes the database's
+    // in-flight window early; otherwise retention observes the full grace
+    // period while the receiver's durable tombstone fences a late publish.
+    const { error: finishError } = await client.rpc(
+      "finish_source_audio_backup_upload",
+      {
+        target_call_id: claimed.call_id,
+        target_lease_token: claimed.lease_token,
+        target_object_name: objectName,
+      }
+    );
+    if (finishError) throw finishError;
 
     const { data: committed, error: commitError } = await client.rpc(
       "commit_source_audio_backup",

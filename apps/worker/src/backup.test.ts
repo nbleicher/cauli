@@ -267,5 +267,16 @@ describe.skipIf(
     expect(queued).toMatchObject({ state: "pending", attempts: 1 });
     expect(queued!.last_error).toMatch(/receiver is unavailable \(503\)/);
     expect(queued!.last_error).not.toContain(callId);
+
+    const { data: uploadFence } = await admin
+      .from("source_audio_backup_objects")
+      .select("upload_authorized_at, upload_finished_at")
+      .eq("call_id", callId)
+      .single();
+    expect(uploadFence?.upload_authorized_at).toBeTruthy();
+    // A failed/aborted client request cannot prove the receiver stopped. The
+    // DB must retain its full grace window rather than making DELETE claimable
+    // immediately.
+    expect(uploadFence?.upload_finished_at).toBeNull();
   });
 });

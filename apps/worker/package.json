@@ -8,6 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "start:backup": "node dist/backup-worker.js",
+    "start:receiver": "node dist/backup-receiver.js",
     "start:retention": "node dist/retention-worker.js",
     "peely:sync": "tsx src/peely-sync.ts",
     "test": "vitest run src --maxWorkers=1 --testTimeout=20000 --hookTimeout=20000",
