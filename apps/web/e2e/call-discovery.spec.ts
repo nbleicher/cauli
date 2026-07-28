@@ -3,7 +3,8 @@ import { expect, test } from "@playwright/test";
 import { signInAsWorkspaceMember } from "./helpers/auth";
 import { enrollVerifiedTotp } from "./helpers/totp";
 
-const localUrl = "http://127.0.0.1:54321";
+const localUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54321";
 const anonKey =
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "integration-test-anon-key";
 const localServiceRoleKey =
@@ -133,18 +134,20 @@ test("a Manager pages, filters, and searches more than 250 Calls", async ({
     // Owner and assignee filters name a specific Workspace member, rather than
     // collapsing every manager question into "mine".
     await page.getByLabel("Owner").selectOption(created.user.id);
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("owner"))
+      .toBe(created.user.id);
     await expect(rowLocator).toHaveCount(50);
-    expect(new URL(page.url()).searchParams.get("owner")).toBe(created.user.id);
     await page.getByRole("button", { name: /Clear filters/ }).click();
 
     await page.getByLabel("Assignment").selectOption(created.user.id);
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("assignment"))
+      .toBe(created.user.id);
     await expect(rowLocator).toHaveCount(1);
     await expect(
       page.getByRole("link", { name: /Discovery call 007/ })
     ).toBeVisible();
-    expect(new URL(page.url()).searchParams.get("assignment")).toBe(
-      created.user.id
-    );
     await page.getByRole("button", { name: /Clear filters/ }).click();
 
     // The processing-state filter alone matches exactly one seeded Call.
