@@ -1,0 +1,16 @@
+{
+  "202607240001_initial_schema.sql": "be6ea1e75e3d28a2709a80d87b504001e6eb26a745766b1e11edda7de9ddb4f2",
+  "202607250001_transcription_reliability.sql": "b0e1b784bd1c6f28581fb0fffaf0a54610bf13183d4ee9f794acad6c2c946693",
+  "202607250002_review_contract.sql": "25798bbafa82bbe389c22ca7605e977eaae89d2eb68113ce9f46091bd7251975",
+  "202607250003_degraded_recordings.sql": "3bcfbf4b492c9368affcd9bfc6044285cff378db8277feba12a98f86f49c5f3a",
+  "202607250004_recording_chunk_retries.sql": "5fd7a415df7d5c3cb6232895c3d2193b825959b64902d20512dc44ecf94fbbcf",
+  "202607250005_idempotent_exports.sql": "9e7afd5f11206667d41d938167091879447ef32d1ce88973a72036c98732ea98",
+  "202607250006_long_recordings.sql": "0f037eea6c04cf1c619323328f851ced4a75997796cc82c1c6386d266bbc22fa",
+  "202607260001_protect_calls_and_incomplete_recordings.sql": "5fe7f40faae13e3732db242018b7e7a1b9ed15cb76ca57101be52e2844fb4bd5",
+  "202607260002_reclaim_interrupted_jobs.sql": "1e2b9c57c5e071a5398dce7d9dd86e2ecf040c341e516a99e0e155895e4085b3",
+  "202607260003_prevent_orphaned_jobs.sql": "e28919433a69d975a93dc891bbfd8a427d5c38d90d13d903270fdd5e8db11b2a",
+  "202607270001_immutable_audit_events.sql": "4750c46864179ab22752e37e4bb5966b8ab91df339917bca2e09529b104d5509",
+  "202607270002_workspace_membership_boundaries.sql": "3088d13e6db662ad23901ccbc8dceb59728fa18728b4cac21d4d11aace8a4aff",
+  "202607270003_versioned_legal_acceptance.sql": "380733a8d1879b63eadfa794ccef091af64d231e18cd4d73934f2a45a599f228",
+  "202607270004_password_invitation_activation.sql": "7e71fb14ce39b54ed858f16a53ad485ac675a066a7f720c2d3a1ab3952106d56"
+}

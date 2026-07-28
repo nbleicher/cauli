@@ -1,0 +1,239 @@
+name: Deploy immutable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact accepted main commit
+        required: true
+        type: string
+      image_digest:
+        description: Exact sha256 image digest from Build release image
+        required: true
+        type: string
+      target:
+        description: Deploy to staging only or stage and promote to production
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+      pre_migration_timestamp:
+        description: Private evidence timestamp captured before database migration
+        required: true
+        type: string
+      staging_evidence:
+        description: Exact-candidate staging acceptance reference (production only)
+        required: false
+        type: string
+      region_evidence:
+        description: Current persistent-provider region evidence reference
+        required: false
+        type: string
+      principal_denial_evidence:
+        description: Production-principal denial-matrix evidence reference
+        required: false
+        type: string
+      security_header_evidence:
+        description: Enforced CSP and browser-header evidence reference
+        required: false
+        type: string
+      vulnerability_evidence:
+        description: Runtime scan and SBOM evidence reference
+        required: false
+        type: string
+      manual_signoff_evidence:
+        description: Phase B exact-candidate sign-off reference
+        required: false
+        type: string
+
+concurrency:
+  group: immutable-release
+  cancel-in-progress: false
+
+permissions:
+  attestations: read
+  contents: read
+  packages: read
+
+env:
+  CAULI_RELEASE_COMMIT: ${{ inputs.commit_sha }}
+  CAULI_RELEASE_IMAGE: ghcr.io/nbleicher/cauli@${{ inputs.image_digest }}
+
+jobs:
+  staging:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: staging
+
+    steps:
+      - name: Check out the exact release source
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Verify accepted main ancestry
+        run: |
+          test "$(git rev-parse HEAD)" = "$CAULI_RELEASE_COMMIT"
+          git fetch origin main
+          git merge-base --is-ancestor "$CAULI_RELEASE_COMMIT" origin/main
+
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Verify image provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify "oci://$CAULI_RELEASE_IMAGE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "nbleicher/cauli/.github/workflows/release-image.yml" \
+            --source-ref refs/heads/main \
+            --source-digest "$CAULI_RELEASE_COMMIT" \
+            --deny-self-hosted-runners
+
+      - name: Install the pinned Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          version: 2.110.0
+
+      - name: Reject a mismatched staging Supabase region
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: node scripts/release/supabase-region.mjs
+
+      - name: Apply compatible staging migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          supabase link \
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --password "$SUPABASE_DB_PASSWORD"
+          supabase db push --linked --password "$SUPABASE_DB_PASSWORD" --yes
+
+      - name: Deploy the staging web service by digest
+        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PROJECT_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_WEB_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_START_COMMAND: node apps/web/server.js
+          RAILWAY_HEALTHCHECK_PATH: /api/health
+        run: node scripts/release/railway-image.mjs
+
+      - name: Deploy the private staging worker by the same digest
+        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PROJECT_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_WORKER_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_START_COMMAND: node apps/worker/dist/index.js
+          RAILWAY_HEALTHCHECK_PATH: /health
+        run: node scripts/release/railway-image.mjs
+
+      - name: Verify staging public path and report-only CSP
+        env:
+          CAULI_APP_URL: ${{ vars.CAULI_APP_URL }}
+          CAULI_LOGIN_ORIGIN: ${{ vars.CAULI_APP_URL }}
+          EXPECTED_CSP_MODE: report-only
+          HSTS_EXPECTED: "false"
+        run: node scripts/release/http-smoke.mjs
+
+  production:
+    if: inputs.target == 'production'
+    needs: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+
+    steps:
+      - name: Check out the exact staged source
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Fail closed on missing Phase B evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PRE_MIGRATION_TIMESTAMP: ${{ inputs.pre_migration_timestamp }}
+          STAGING_EVIDENCE: ${{ inputs.staging_evidence }}
+          REGION_EVIDENCE: ${{ inputs.region_evidence }}
+          PRINCIPAL_DENIAL_EVIDENCE: ${{ inputs.principal_denial_evidence }}
+          SECURITY_HEADER_EVIDENCE: ${{ inputs.security_header_evidence }}
+          VULNERABILITY_EVIDENCE: ${{ inputs.vulnerability_evidence }}
+          MANUAL_SIGNOFF_EVIDENCE: ${{ inputs.manual_signoff_evidence }}
+        run: node scripts/release/promotion-gate.mjs
+
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Reverify the exact staged image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify "oci://$CAULI_RELEASE_IMAGE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "nbleicher/cauli/.github/workflows/release-image.yml" \
+            --source-ref refs/heads/main \
+            --source-digest "$CAULI_RELEASE_COMMIT" \
+            --deny-self-hosted-runners
+
+      - name: Install the pinned Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          version: 2.110.0
+
+      - name: Reject a mismatched production Supabase region
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: node scripts/release/supabase-region.mjs
+
+      - name: Apply compatible production migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+        run: |
+          supabase link \
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --password "$SUPABASE_DB_PASSWORD"
+          supabase db push --linked --password "$SUPABASE_DB_PASSWORD" --yes
+
+      - name: Deploy the production web service by the staged digest
+        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PROJECT_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_WEB_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_START_COMMAND: node apps/web/server.js
+          RAILWAY_HEALTHCHECK_PATH: /api/health
+        run: node scripts/release/railway-image.mjs
+
+      - name: Deploy the private production worker by the staged digest
+        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PROJECT_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_WORKER_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_START_COMMAND: node apps/worker/dist/index.js
+          RAILWAY_HEALTHCHECK_PATH: /health
+        run: node scripts/release/railway-image.mjs
+
+      - name: Verify production public path and enforced CSP
+        env:
+          CAULI_APP_URL: ${{ vars.CAULI_APP_URL }}
+          CAULI_LOGIN_ORIGIN: ${{ vars.CAULI_APP_URL }}
+          EXPECTED_CSP_MODE: enforce
+          HSTS_EXPECTED: "true"
+        run: node scripts/release/http-smoke.mjs

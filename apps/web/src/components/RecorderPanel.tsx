@@ -123,10 +123,7 @@ export function RecorderPanel() {
           </div>
           <div className="wave-bars" aria-hidden="true">
             {Array.from({ length: 24 }, (_, index) => (
-              <i
-                key={index}
-                style={{ animationDelay: `${(index % 8) * 55}ms` }}
-              />
+              <i key={index} className={`wave-delay-${index % 8}`} />
             ))}
           </div>
         </div>
