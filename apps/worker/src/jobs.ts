@@ -354,6 +354,16 @@ export async function runJob(job: ProcessingJob) {
   } catch (error) {
     const ownsLease = await heartbeat.stop();
     const message = sanitizedError(error);
+    if (ownsLease && job.kind === "delete_call") {
+      const { error: deletionAuditError } = await supabase.rpc(
+        "fail_call_deletion_execution",
+        {
+          target_job_id: job.id,
+          target_lease_token: job.lease_token,
+        }
+      );
+      if (deletionAuditError) throw deletionAuditError;
+    }
     const transcriptionError =
       error instanceof OpenRouterTranscriptionError ? error : null;
     const exhausted =

@@ -13,6 +13,7 @@ const workspaceId = "00000000-0000-0000-0000-000000000001";
 
 process.env.NEXT_PUBLIC_SUPABASE_URL = localUrl;
 process.env.SUPABASE_SERVICE_ROLE_KEY = serviceRoleKey;
+process.env.SUPABASE_WORKER_KEY = serviceRoleKey;
 process.env.OPENROUTER_API_KEY = "integration-test-key";
 
 const admin = createClient(localUrl, serviceRoleKey, {
@@ -3896,7 +3897,9 @@ describe.skipIf(
         target_object_name: inFlightName,
       }
     );
-    expect(uploadAuthorized).toBe(true);
+    expect(new Date(uploadAuthorized as string).getTime()).toBeGreaterThan(
+      Date.now()
+    );
 
     // Deletion arrives mid-upload. The copy has not committed and now never
     // will, but it may already be sitting on the VPS.
@@ -4000,7 +4003,7 @@ describe.skipIf(
         }
       );
       expect(lateUpload.error).toBeNull();
-      expect(lateUpload.data).toBe(false);
+      expect(lateUpload.data).toBeNull();
 
       const deletion = await admin.rpc("claim_backup_deletion", {
         worker_name: "retention-after-404",
@@ -4473,6 +4476,22 @@ describe.skipIf(
     await admin.rpc("start_call_deletion_execution", {
       target_call_id: callId,
     });
+    const firstPrimaryFailure = await admin.rpc(
+      "fail_call_deletion_execution",
+      {
+        target_job_id: deleteJob.id,
+        target_lease_token: deleteJob.lease_token,
+      }
+    );
+    const duplicatePrimaryFailure = await admin.rpc(
+      "fail_call_deletion_execution",
+      {
+        target_job_id: deleteJob.id,
+        target_lease_token: deleteJob.lease_token,
+      }
+    );
+    expect(firstPrimaryFailure.data).toBe(true);
+    expect(duplicatePrimaryFailure.data).toBe(false);
     const { data: committed } = await admin.rpc("commit_call_deletion", {
       target_job_id: deleteJob.id,
       target_lease_token: deleteJob.lease_token,
@@ -4538,6 +4557,7 @@ describe.skipIf(
       .eq("entity_id", callId)
       .in("action", [
         "call.deletion.execution_started",
+        "call.deletion.primary_failed",
         "call.deletion.primary_completed",
         "call.deletion.backup_execution_started",
         "call.deletion.backup_failed",
@@ -4549,6 +4569,7 @@ describe.skipIf(
         "call.deletion.backup_execution_started",
         "call.deletion.backup_failed",
         "call.deletion.execution_started",
+        "call.deletion.primary_failed",
         "call.deletion.primary_completed",
       ].sort()
     );
@@ -4593,6 +4614,60 @@ describe.skipIf(
     );
     expect(unauthorizedError?.message).toMatch(/never authorized/);
   });
+
+  it.skipIf(!jwtSecret)(
+    "gives the processing worker its own operational role and no neighboring authority",
+    async () => {
+      const { data: privileges, error } = await admin.rpc(
+        "worker_principal_privileges"
+      );
+      if (error) throw error;
+      const granted = new Map(
+        (privileges as { object_name: string; granted: boolean }[]).map(
+          (privilege) => [privilege.object_name, privilege.granted]
+        )
+      );
+      for (const allowed of [
+        "public.calls",
+        "public.processing_jobs",
+        "storage.objects",
+        "public.claim_processing_job",
+      ]) {
+        expect(granted.get(allowed), allowed).toBe(true);
+      }
+      for (const forbidden of [
+        "public.workspace_members",
+        "public.platform_admins",
+        "public.audit_events",
+        "public.source_audio_backups",
+        "public.backup_deletion_requests",
+        "public.peely_sync_runs",
+        "public.claim_source_audio_backup",
+        "public.claim_backup_deletion",
+        "public.list_backup_objects_for_sync",
+      ]) {
+        expect(granted.get(forbidden), forbidden).toBe(false);
+      }
+
+      const worker = createClient(localUrl, roleCredential("cauli_worker"), {
+        auth: { persistSession: false },
+      });
+      expect(
+        (await worker.from("calls").select("id").limit(1)).error
+      ).toBeNull();
+      expect(
+        (await worker.from("workspace_members").select("user_id").limit(1))
+          .error
+      ).toBeTruthy();
+      expect(
+        (
+          await worker.rpc("claim_backup_deletion", {
+            worker_name: "not-retention",
+          })
+        ).error
+      ).toBeTruthy();
+    }
+  );
 
   it("keeps a failed backup deletion owed rather than lost", async () => {
     const { userId: ownerId } = await createWorkspaceMember("member");

@@ -17,6 +17,7 @@ import { mutualTlsFetch } from "./mutual-tls.js";
 
 process.env.NEXT_PUBLIC_SUPABASE_URL ??= "http://127.0.0.1:54321";
 process.env.SUPABASE_SERVICE_ROLE_KEY ??= "mutual-tls-contract-key";
+process.env.SUPABASE_WORKER_KEY ??= "mutual-tls-contract-key";
 process.env.OPENROUTER_API_KEY ??= "mutual-tls-contract-key";
 
 const workspace = mkdtempSync(join(tmpdir(), "cauli-mtls-"));

@@ -8,6 +8,7 @@ const localServiceRoleKey =
 
 process.env.NEXT_PUBLIC_SUPABASE_URL = localUrl;
 process.env.SUPABASE_SERVICE_ROLE_KEY = localServiceRoleKey;
+process.env.SUPABASE_WORKER_KEY = localServiceRoleKey;
 process.env.OPENROUTER_API_KEY = "integration-test-key";
 
 const supabase = createClient(localUrl, localServiceRoleKey, {

@@ -56,6 +56,13 @@ export function validateRecoveryDrills({
   }
 
   for (const drill of drills) {
+    const performedAt = new Date(drill.performedAt);
+    if (
+      Number.isFinite(performedAt.valueOf()) &&
+      performedAt.getTime() > now.getTime()
+    ) {
+      throw new Error(`${drill.kind} drill is dated in the future`);
+    }
     if (drill.succeeded === false && !String(drill.remediation ?? "").trim()) {
       throw new Error(
         `The failed ${drill.kind} drill has no remediation record`
@@ -97,7 +104,8 @@ export function validateRecoveryDrills({
     if (typeof drill.recoverySeconds !== "number") return false;
     const performedAt = new Date(drill.performedAt);
     if (Number.isNaN(performedAt.valueOf())) return false;
-    return daysBetween(now, performedAt) <= required.withinDays;
+    const age = daysBetween(now, performedAt);
+    return age >= 0 && age <= required.withinDays;
   });
   if (!timedRestores.length) {
     throw new Error("No recovery drill recorded how long it took");

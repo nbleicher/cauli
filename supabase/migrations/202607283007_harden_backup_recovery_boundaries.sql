@@ -28,6 +28,7 @@ create table private.call_deletion_lifecycle (
   actor_id uuid,
   reason public.backup_deletion_reason not null,
   execution_started_at timestamptz,
+  primary_failure_audited_attempt integer not null default 0,
   primary_completed_at timestamptz,
   created_at timestamptz not null default now()
 );
@@ -93,7 +94,7 @@ create or replace function public.authorize_source_audio_backup_upload(
   target_lease_token uuid,
   target_object_name text
 )
-returns boolean
+returns timestamptz
 language plpgsql
 security definer
 set search_path = public
@@ -114,14 +115,14 @@ begin
   if object_record.object_name is null
     or object_record.deletion_requested_at is not null
   then
-    return false;
+    return null;
   end if;
 
   update public.source_audio_backup_objects
   set upload_authorized_at = now(),
       upload_finished_at = null
   where object_name = target_object_name;
-  return true;
+  return now() + interval '60 seconds';
 end;
 $$;
 
@@ -329,6 +330,51 @@ begin
       jsonb_build_object('reason', lifecycle.reason)
     );
   end if;
+  return true;
+end;
+$$;
+
+create or replace function public.fail_call_deletion_execution(
+  target_job_id uuid,
+  target_lease_token uuid
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, private
+as $$
+declare
+  claimed_job public.processing_jobs%rowtype;
+  lifecycle private.call_deletion_lifecycle;
+begin
+  select * into claimed_job
+  from private.lock_owned_processing_job(
+    target_job_id, target_lease_token, 'delete_call'
+  );
+  if not found or claimed_job.call_id is null then return false; end if;
+
+  select * into lifecycle
+  from private.call_deletion_lifecycle
+  where call_id = claimed_job.call_id
+  for update;
+  if lifecycle.call_id is null
+    or lifecycle.primary_failure_audited_attempt >= claimed_job.attempts
+  then
+    return false;
+  end if;
+
+  update private.call_deletion_lifecycle
+  set primary_failure_audited_attempt = claimed_job.attempts
+  where call_id = lifecycle.call_id;
+
+  perform public.record_audit_event(
+    lifecycle.workspace_id, lifecycle.actor_id,
+    'call.deletion.primary_failed', 'call', lifecycle.call_id::text,
+    jsonb_build_object(
+      'reason', lifecycle.reason,
+      'attempts', claimed_job.attempts
+    )
+  );
   return true;
 end;
 $$;
@@ -553,4 +599,122 @@ revoke all on function public.start_call_deletion_execution(uuid)
   from public, anon, authenticated, cauli_backup_writer, cauli_retention, cauli_peely;
 grant execute on function public.start_call_deletion_execution(uuid)
   to service_role;
+revoke all on function public.fail_call_deletion_execution(uuid, uuid)
+  from public, anon, authenticated, cauli_backup_writer, cauli_retention, cauli_peely;
+grant execute on function public.fail_call_deletion_execution(uuid, uuid)
+  to service_role;
 
+-- ---------------------------------------------------------------------------
+-- Ordinary processing worker
+-- ---------------------------------------------------------------------------
+
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'cauli_worker') then
+    create role cauli_worker nologin noinherit;
+  end if;
+end;
+$$;
+
+grant cauli_worker to authenticator;
+grant usage on schema public, storage to cauli_worker;
+
+grant select, update on table public.calls to cauli_worker;
+grant select, update on table public.processing_jobs to cauli_worker;
+grant select, insert, update on table public.transcription_chunks
+  to cauli_worker;
+grant select, update on table public.export_jobs to cauli_worker;
+grant select, insert, update, delete on table storage.objects to cauli_worker;
+
+create policy worker_calls_operational_access
+on public.calls for all to cauli_worker
+using (true) with check (true);
+create policy worker_jobs_operational_access
+on public.processing_jobs for all to cauli_worker
+using (true) with check (true);
+create policy worker_transcription_checkpoints_access
+on public.transcription_chunks for all to cauli_worker
+using (true) with check (true);
+create policy worker_export_jobs_operational_access
+on public.export_jobs for all to cauli_worker
+using (true) with check (true);
+
+create policy worker_recordings_select
+on storage.objects for select to cauli_worker
+using (bucket_id = 'recordings');
+create policy worker_recordings_insert
+on storage.objects for insert to cauli_worker
+with check (bucket_id = 'recordings');
+create policy worker_recordings_update
+on storage.objects for update to cauli_worker
+using (bucket_id = 'recordings')
+with check (bucket_id = 'recordings');
+create policy worker_recordings_delete
+on storage.objects for delete to cauli_worker
+using (bucket_id = 'recordings');
+
+grant execute on function public.claim_processing_job(text),
+  public.renew_processing_job_lease(uuid, uuid),
+  public.commit_processed_recording(
+    uuid, uuid, text, text, bigint, text, text, text, text, numeric, numeric, jsonb
+  ),
+  public.commit_wav_export(uuid, uuid, text),
+  public.commit_call_deletion(uuid, uuid),
+  public.start_call_deletion_execution(uuid),
+  public.fail_call_deletion_execution(uuid, uuid),
+  public.expire_calls_for_retention(integer),
+  public.expire_calls_for_retention(integer, uuid),
+  public.backup_deletion_backlog()
+to cauli_worker;
+
+create or replace function public.worker_principal_privileges()
+returns table (object_name text, privilege text, granted boolean)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select object_name, privilege, granted from (
+    values
+      ('public.calls', 'select',
+        has_table_privilege('cauli_worker', 'public.calls', 'select')),
+      ('public.processing_jobs', 'update',
+        has_table_privilege('cauli_worker', 'public.processing_jobs', 'update')),
+      ('storage.objects', 'delete',
+        has_table_privilege('cauli_worker', 'storage.objects', 'delete')),
+      ('public.workspace_members', 'select',
+        has_table_privilege('cauli_worker', 'public.workspace_members', 'select')),
+      ('public.platform_admins', 'select',
+        has_table_privilege('cauli_worker', 'public.platform_admins', 'select')),
+      ('public.audit_events', 'insert',
+        has_table_privilege('cauli_worker', 'public.audit_events', 'insert')),
+      ('public.source_audio_backups', 'select',
+        has_table_privilege('cauli_worker', 'public.source_audio_backups', 'select')),
+      ('public.backup_deletion_requests', 'select',
+        has_table_privilege('cauli_worker', 'public.backup_deletion_requests', 'select')),
+      ('public.peely_sync_runs', 'select',
+        has_table_privilege('cauli_worker', 'public.peely_sync_runs', 'select')),
+      ('public.claim_source_audio_backup', 'execute',
+        has_function_privilege(
+          'cauli_worker', 'public.claim_source_audio_backup(text)', 'execute'
+        )),
+      ('public.claim_backup_deletion', 'execute',
+        has_function_privilege(
+          'cauli_worker', 'public.claim_backup_deletion(text)', 'execute'
+        )),
+      ('public.list_backup_objects_for_sync', 'execute',
+        has_function_privilege(
+          'cauli_worker', 'public.list_backup_objects_for_sync()', 'execute'
+        )),
+      ('public.claim_processing_job', 'execute',
+        has_function_privilege(
+          'cauli_worker', 'public.claim_processing_job(text)', 'execute'
+        ))
+  ) as privileges (object_name, privilege, granted);
+$$;
+
+revoke all on function public.worker_principal_privileges()
+  from public, anon, authenticated, cauli_worker, cauli_backup_writer,
+       cauli_retention, cauli_peely;
+grant execute on function public.worker_principal_privileges()
+  to service_role;

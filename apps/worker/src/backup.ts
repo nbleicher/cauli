@@ -130,19 +130,27 @@ export async function backUpOneSourceAudio(
     );
     const objectName = claimed.object_name;
 
-    const { data: authorized, error: authorizationError } = await client.rpc(
-      "authorize_source_audio_backup_upload",
-      {
+    const { data: authorizedUntil, error: authorizationError } =
+      await client.rpc("authorize_source_audio_backup_upload", {
         target_call_id: claimed.call_id,
         target_lease_token: claimed.lease_token,
         target_object_name: objectName,
-      }
-    );
+      });
     if (authorizationError) throw authorizationError;
-    if (!authorized) {
+    const remainingUploadMilliseconds =
+      new Date(String(authorizedUntil ?? "")).getTime() - Date.now();
+    if (
+      !authorizedUntil ||
+      !Number.isFinite(remainingUploadMilliseconds) ||
+      remainingUploadMilliseconds <= 0
+    ) {
       log.info("source_audio_backup_cancelled_by_deletion", {});
       return true;
     }
+    // The database lets retention proceed after this bounded window. Start the
+    // clock at authorization so a paused process cannot wake after a 404
+    // deletion and begin a fresh, late PUT.
+    const uploadSignal = AbortSignal.timeout(remainingUploadMilliseconds);
 
     try {
       await createBackupObject(
@@ -156,7 +164,7 @@ export async function backUpOneSourceAudio(
           keyVersion: encrypted.wrapped.keyVersion,
           ciphertextSha256: encrypted.ciphertextSha256,
         },
-        { fetch: dependencies.fetch }
+        { fetch: dependencies.fetch, signal: uploadSignal }
       );
     } finally {
       const { error: finishError } = await client.rpc(

@@ -78,6 +78,21 @@ test("treats a quarterly drill older than a quarter as absent", () => {
   );
 });
 
+test("rejects recovery evidence dated in the future", () => {
+  assert.throws(
+    () =>
+      validateRecoveryDrills({
+        ...complete,
+        drills: complete.drills.map((drill) =>
+          drill.kind === "kms_source_audio_restore"
+            ? { ...drill, performedAt: daysAgo(-1) }
+            : drill
+        ),
+      }),
+    /dated in the future/
+  );
+});
+
 test("does not let a failed drill stand in for a successful one", () => {
   assert.throws(
     () =>

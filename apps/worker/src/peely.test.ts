@@ -13,6 +13,7 @@ const workspaceId = "00000000-0000-0000-0000-000000000001";
 
 process.env.NEXT_PUBLIC_SUPABASE_URL = localUrl;
 process.env.SUPABASE_SERVICE_ROLE_KEY = serviceRoleKey;
+process.env.SUPABASE_WORKER_KEY = serviceRoleKey;
 process.env.OPENROUTER_API_KEY = "integration-test-key";
 
 const admin = createClient(localUrl, serviceRoleKey, {

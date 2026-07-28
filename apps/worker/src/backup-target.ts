@@ -29,6 +29,8 @@ export interface BackupObject {
 
 export interface BackupTargetOptions {
   fetch?: typeof fetch;
+  /** Starts when the database authorizes PUT, not when the socket happens to. */
+  signal?: AbortSignal;
 }
 
 /** Raised when the copy has not landed but retrying later can still succeed. */
@@ -119,7 +121,7 @@ export async function createBackupObject(
         "x-cauli-wrapped-age": object.ageWrappedKey,
       },
       body: new Uint8Array(object.ciphertext),
-      signal: AbortSignal.timeout(60_000),
+      signal: options.signal ?? AbortSignal.timeout(60_000),
     }
   );
 
