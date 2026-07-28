@@ -16,34 +16,6 @@
  * is unknown waits in Budget Paused instead of spending blind.
  */
 
--- A Platform Admin is a Cauli operator rather than a Workspace role, so this
--- authority deliberately lives outside workspace_members and outside every
--- Workspace Admin's reach. #34 builds the full control plane on top of it.
-create table if not exists public.platform_admins (
-  user_id uuid primary key references public.profiles(id) on delete cascade,
-  granted_at timestamptz not null default now(),
-  granted_by uuid references public.profiles(id) on delete set null
-);
-
-alter table public.platform_admins enable row level security;
-revoke all on public.platform_admins from public, anon, authenticated;
-grant all privileges on public.platform_admins to service_role;
-
-create or replace function public.is_platform_admin(
-  target_user_id uuid default auth.uid()
-)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select target_user_id is not null
-    and exists (
-      select 1 from public.platform_admins where user_id = target_user_id
-    );
-$$;
-
 -- Platform-scope Audit Events have no Workspace to belong to, and the workspace
 -- foreign key was dropped when Audit Events became content-free operational
 -- evidence. This reserved identifier keeps them out of every Workspace Admin's
@@ -974,8 +946,8 @@ declare
   updated public.platform_processing_budget;
   resumed integer;
 begin
-  if not public.is_platform_admin() then
-    raise exception 'Only a Platform Admin can change a platform budget'
+  if auth.role() <> 'service_role' then
+    raise exception 'The Platform Admin control plane is not installed yet'
       using errcode = '42501';
   end if;
 
@@ -1025,8 +997,8 @@ as $$
 declare
   resumed integer;
 begin
-  if not public.is_platform_admin() then
-    raise exception 'Only a Platform Admin can change a Workspace budget'
+  if auth.role() <> 'service_role' then
+    raise exception 'The Platform Admin control plane is not installed yet'
       using errcode = '42501';
   end if;
 
@@ -1074,8 +1046,8 @@ security definer
 set search_path = public
 as $$
 begin
-  if not public.is_platform_admin() then
-    raise exception 'Only a Platform Admin can change provider pricing'
+  if auth.role() <> 'service_role' then
+    raise exception 'The Platform Admin control plane is not installed yet'
       using errcode = '42501';
   end if;
 
@@ -1166,9 +1138,6 @@ begin
 end;
 $$;
 
-revoke all on function public.is_platform_admin(uuid)
-  from public, anon;
-grant execute on function public.is_platform_admin(uuid) to authenticated;
 revoke all on function public.workspace_daily_budget_usd(uuid)
   from public, anon, authenticated;
 grant execute on function public.workspace_daily_budget_usd(uuid)
@@ -1193,17 +1162,17 @@ revoke all on function public.release_processing_budget_reservation()
   from public, anon, authenticated;
 
 revoke all on function public.set_platform_processing_budget(numeric, numeric)
-  from public, anon;
+  from public, anon, authenticated;
 grant execute on function public.set_platform_processing_budget(numeric, numeric)
-  to authenticated;
+  to service_role;
 revoke all on function public.set_workspace_processing_budget(uuid, numeric)
-  from public, anon;
+  from public, anon, authenticated;
 grant execute on function public.set_workspace_processing_budget(uuid, numeric)
-  to authenticated;
+  to service_role;
 revoke all on function public.set_provider_pricing(text, numeric, boolean)
-  from public, anon;
+  from public, anon, authenticated;
 grant execute on function public.set_provider_pricing(text, numeric, boolean)
-  to authenticated;
+  to service_role;
 revoke all on function public.workspace_processing_budget_status()
   from public, anon;
 grant execute on function public.workspace_processing_budget_status()

@@ -17,7 +17,7 @@ export interface CallFilters {
   quality?: "complete" | "degraded";
   assigneeId?: string;
   unassigned?: boolean;
-  followUp?: "open" | "resolved";
+  followUp?: "open" | "overdue" | "awaiting_verification" | "verified";
   search?: string;
 }
 
@@ -52,6 +52,15 @@ function single(params: SearchParams, key: string) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function uuid(value: string | undefined) {
+  return value &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      value
+    )
+    ? value
+    : undefined;
+}
+
 /**
  * Query strings arrive from the browser, so nothing here trusts them. A value
  * that is not one of the states this product actually has is dropped rather
@@ -76,9 +85,10 @@ export function parseCallFilters(
   const followUp = single(params, "followup");
   const assignment = single(params, "assignment");
   const search = single(params, "q")?.trim().slice(0, 120);
+  const selectedOwner = uuid(single(params, "owner"));
 
   return {
-    ownerId: viewer.ownedOnly ? viewer.userId : undefined,
+    ownerId: viewer.ownedOnly ? viewer.userId : selectedOwner,
     from: isoDate(single(params, "from"), false),
     to: isoDate(single(params, "to"), true),
     statuses: CALL_STATUSES.includes(status as CallStatus)
@@ -91,10 +101,20 @@ export function parseCallFilters(
       quality === "complete" || quality === "degraded" ? quality : undefined,
     // "Assigned to me" and "unassigned" are different questions, and only one
     // of them can be expressed as an identifier.
-    assigneeId: assignment === "mine" ? viewer.userId : undefined,
+    assigneeId:
+      assignment === "mine"
+        ? viewer.userId
+        : assignment !== "unassigned"
+          ? uuid(assignment)
+          : undefined,
     unassigned: assignment === "unassigned",
     followUp:
-      followUp === "open" || followUp === "resolved" ? followUp : undefined,
+      followUp === "open" ||
+      followUp === "overdue" ||
+      followUp === "awaiting_verification" ||
+      followUp === "verified"
+        ? followUp
+        : undefined,
     search: search || undefined,
   };
 }
@@ -107,6 +127,7 @@ export function hasActiveCallFilters(params: SearchParams) {
     "quality",
     "from",
     "to",
+    "owner",
     "assignment",
     "followup",
   ].some((key) => Boolean(single(params, key)));

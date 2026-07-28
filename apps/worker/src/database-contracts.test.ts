@@ -3757,10 +3757,25 @@ describe.skipIf(
     expect(await search({ target_quality: "degraded" })).toEqual([degradedId]);
     expect(await search({ target_quality: "complete" })).toEqual([cleanId]);
     expect(await search({ target_statuses: ["failed"] })).toEqual([cleanId]);
+    expect(await search({ target_owner_id: userId })).toEqual([
+      cleanId,
+      degradedId,
+    ]);
     expect(await search({ target_assignee_id: userId })).toEqual([degradedId]);
     expect(await search({ target_unassigned: true })).toEqual([cleanId]);
     expect(await search({ target_follow_up: "open" })).toEqual([degradedId]);
-    expect(await search({ target_follow_up: "resolved" })).toEqual([cleanId]);
+    expect(await search({ target_follow_up: "awaiting_verification" })).toEqual(
+      [cleanId]
+    );
+    const { error: verifyError } = await workspaceAdmin.client.rpc(
+      "verify_follow_up",
+      {
+        target_follow_up_id: resolvedFollowUp.id,
+        expected_version: resolvedFollowUp.version + 1,
+      }
+    );
+    if (verifyError) throw verifyError;
+    expect(await search({ target_follow_up: "verified" })).toEqual([cleanId]);
     // Metadata search matches the owner too.
     expect(
       (await search({ target_search: "database-contract" })).sort()
@@ -3797,7 +3812,7 @@ describe.skipIf(
     const { error: badFollowUp } = await client.rpc("list_calls_page", {
       target_follow_up: "someday",
     });
-    expect(badFollowUp?.message).toContain("open or resolved");
+    expect(badFollowUp?.message).toContain("awaiting_verification");
 
     const { error: halfCursor } = await client.rpc("list_calls_page", {
       cursor_started_at: new Date().toISOString(),
@@ -3944,6 +3959,27 @@ describe.skipIf(
       expect(serialized).not.toContain("Acme");
       expect(serialized).not.toMatch(/https?:/);
       expect(Object.keys(event.metadata as object)).toEqual(["artifact_type"]);
+    }
+  });
+
+  it("binds a Transcript export path to the Call's actual Workspace", async () => {
+    const { client, userId } = await createWorkspaceMember();
+    const { callId } = await createCall(userId, { status: "ready" });
+    const validPath = `${workspaceId}/${callId}/artifacts/transcript.txt`;
+    const forgedPath = `${crypto.randomUUID()}/${callId}/artifacts/transcript.txt`;
+
+    try {
+      const { error: validError } = await client.storage
+        .from("recordings")
+        .upload(validPath, new Blob(["safe transcript fixture"]));
+      if (validError) throw validError;
+
+      const { error: forgedError } = await client.storage
+        .from("recordings")
+        .upload(forgedPath, new Blob(["must not be accepted"]));
+      expect(forgedError?.message).toMatch(/row-level security|policy/i);
+    } finally {
+      await admin.storage.from("recordings").remove([validPath, forgedPath]);
     }
   });
 

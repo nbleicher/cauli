@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@calllog/shared": "2.0.0",
+    "@sentry/nextjs": "^10.68.0",
     "@supabase/ssr": "^0.12.3",
     "@supabase/supabase-js": "^2.110.8",
     "lucide-react": "^1.26.0",

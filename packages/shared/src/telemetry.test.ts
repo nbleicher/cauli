@@ -17,7 +17,7 @@ import {
  */
 const canaryEvent = {
   message:
-    "Call 'Q3 renewal with Acme' failed for dana@example.com at https://cauli.pro/calls/9?token=secret-value",
+    "Call 'Q3 renewal with Acme' failed for dana@example.com at https://cauli.pro/calls/9?token=secret-value. Customer agreed to confidential acquisition.",
   user: { email: "dana@example.com", ip_address: "203.0.113.7", id: "u_1" },
   request: {
     url: "https://app.cauli.pro/api/calls/9/media?format=source&download=1",
@@ -46,16 +46,29 @@ const canaryEvent = {
   ],
 };
 
+const canaryContent = [
+  "Q3 renewal with Acme",
+  "Customer agreed to confidential acquisition",
+  "we agreed to renew",
+  "The rep talked over the customer twice.",
+] as const;
+
 describe("telemetry scrubbing", () => {
   it("lets no forbidden value out of the canary event", () => {
     const scrubbed = scrubTelemetryValue(canaryEvent);
-    expect(findForbiddenTelemetry(scrubbed)).toEqual([]);
+    expect(findForbiddenTelemetry(scrubbed, canaryContent)).toEqual([]);
   });
 
   it("would have caught the leak if scrubbing were skipped", () => {
     // Without this the canary above could pass because the fixture is clean.
-    expect(findForbiddenTelemetry(canaryEvent)).toEqual(
-      expect.arrayContaining(["email", "url", "credential", "ip address"])
+    expect(findForbiddenTelemetry(canaryEvent, canaryContent)).toEqual(
+      expect.arrayContaining([
+        "email",
+        "url",
+        "credential",
+        "ip address",
+        ...canaryContent.map((value) => `content:${value}`),
+      ])
     );
   });
 

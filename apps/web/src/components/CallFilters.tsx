@@ -5,13 +5,26 @@ import { Search, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
+interface FilterPerson {
+  id: string;
+  name: string;
+}
+
 /**
  * Filters live in the URL rather than in component state so a filtered page is
  * shareable, survives a refresh, and pairs with the cursor the server hands
  * back. Changing any filter drops the cursor: page two of one question is not
  * page two of another.
  */
-export function CallFilters({ showOwner }: { showOwner: boolean }) {
+export function CallFilters({
+  showOwner,
+  owners = [],
+  assignees = [],
+}: {
+  showOwner: boolean;
+  owners?: FilterPerson[];
+  assignees?: FilterPerson[];
+}) {
   const router = useRouter();
   const params = useSearchParams();
   const [search, setSearch] = useState(params.get("q") ?? "");
@@ -40,6 +53,8 @@ export function CallFilters({ showOwner }: { showOwner: boolean }) {
     "from",
     "to",
     "owner",
+    "assignment",
+    "followup",
   ].some((key) => params.get(key));
 
   return (
@@ -106,17 +121,39 @@ export function CallFilters({ showOwner }: { showOwner: boolean }) {
         </label>
 
         {showOwner && (
-          <label>
-            <span>Assignment</span>
-            <select
-              value={params.get("assignment") ?? ""}
-              onChange={(event) => apply({ assignment: event.target.value })}
-            >
-              <option value="">Any</option>
-              <option value="unassigned">Unassigned</option>
-              <option value="mine">Assigned to me</option>
-            </select>
-          </label>
+          <>
+            <label>
+              <span>Owner</span>
+              <select
+                value={params.get("owner") ?? ""}
+                onChange={(event) => apply({ owner: event.target.value })}
+              >
+                <option value="">Any</option>
+                {owners.map((owner) => (
+                  <option key={owner.id} value={owner.id}>
+                    {owner.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label>
+              <span>Assignment</span>
+              <select
+                value={params.get("assignment") ?? ""}
+                onChange={(event) => apply({ assignment: event.target.value })}
+              >
+                <option value="">Any</option>
+                <option value="unassigned">Unassigned</option>
+                <option value="mine">Assigned to me</option>
+                {assignees.map((assignee) => (
+                  <option key={assignee.id} value={assignee.id}>
+                    {assignee.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
         )}
 
         <label>
@@ -127,7 +164,9 @@ export function CallFilters({ showOwner }: { showOwner: boolean }) {
           >
             <option value="">Any</option>
             <option value="open">Open</option>
-            <option value="resolved">Resolved</option>
+            <option value="overdue">Overdue</option>
+            <option value="awaiting_verification">Awaiting verification</option>
+            <option value="verified">Verified</option>
           </select>
         </label>
 

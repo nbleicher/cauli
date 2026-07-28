@@ -29,21 +29,37 @@ export default async function WorkspaceCallsPage({
     cursor
   );
   const supabase = await createServerSupabaseClient();
-  const { data: eligibleMembers } = await supabase
+  const { data: activeMembers } = await supabase
     .from("workspace_members")
     .select("user_id, role")
     .eq("workspace_id", member.workspaceId)
-    .eq("status", "active")
-    .in("role", ["manager", "admin"]);
-  const eligibleMemberIds = (eligibleMembers ?? []).map(
-    (eligibleMember) => eligibleMember.user_id
+    .eq("status", "active");
+  const activeMemberIds = (activeMembers ?? []).map(
+    (activeMember) => activeMember.user_id
   );
-  const { data: eligibleProfiles } = eligibleMemberIds.length
+  const { data: activeProfiles } = activeMemberIds.length
     ? await supabase
         .from("profiles")
         .select("id, display_name, email")
-        .in("id", eligibleMemberIds)
+        .in("id", activeMemberIds)
     : { data: [] };
+  const people = (activeMembers ?? []).map((activeMember) => {
+    const profile = (activeProfiles ?? []).find(
+      (activeProfile) => activeProfile.id === activeMember.user_id
+    );
+    return {
+      id: activeMember.user_id,
+      name:
+        profile?.display_name ||
+        profile?.email ||
+        activeMember.user_id.slice(0, 8),
+      role: activeMember.role as "member" | "manager" | "admin",
+    };
+  });
+  const assignees = people.filter(
+    (person): person is typeof person & { role: "manager" | "admin" } =>
+      person.role === "manager" || person.role === "admin"
+  );
 
   return (
     <main className="page">
@@ -56,24 +72,12 @@ export default async function WorkspaceCallsPage({
           ACTIVE_CALL_STATUSES.includes(call.status)
         )}
       />
-      <CallFilters showOwner />
+      <CallFilters showOwner owners={people} assignees={assignees} />
       <ReviewQueue
         calls={calls}
         currentUserId={user.id}
         role={member.role}
-        assignees={(eligibleMembers ?? []).map((eligibleMember) => {
-          const profile = (eligibleProfiles ?? []).find(
-            (eligibleProfile) => eligibleProfile.id === eligibleMember.user_id
-          );
-          return {
-            id: eligibleMember.user_id,
-            name:
-              profile?.display_name ||
-              profile?.email ||
-              eligibleMember.user_id.slice(0, 8),
-            role: eligibleMember.role as "manager" | "admin",
-          };
-        })}
+        assignees={assignees}
       />
       <CallTable
         calls={calls}

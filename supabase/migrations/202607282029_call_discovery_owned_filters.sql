@@ -67,8 +67,11 @@ begin
   end if;
 
   if target_follow_up is not null
-    and target_follow_up not in ('open', 'resolved') then
-    raise exception 'Follow-up state must be open or resolved'
+    and target_follow_up not in (
+      'open', 'overdue', 'awaiting_verification', 'verified'
+    ) then
+    raise exception
+      'Follow-up state must be open, overdue, awaiting_verification, or verified'
       using errcode = '22023';
   end if;
 
@@ -134,11 +137,11 @@ begin
     )
     and (
       target_follow_up is null
-      or (target_follow_up = 'open' and follow_up.status = 'open')
-      or (
-        target_follow_up = 'resolved'
-        and follow_up.status in ('resolved', 'verified')
-      )
+      or public.follow_up_display_status(
+        follow_up.status,
+        follow_up.due_date,
+        current_date
+      ) = target_follow_up
     )
     -- Title and owner only. Transcript content is deliberately absent.
     and (

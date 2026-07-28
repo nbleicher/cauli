@@ -6,6 +6,7 @@ import { config } from "./config.js";
 import { createSupabaseCheckpointStore } from "./checkpoint-store.js";
 import { startJobLeaseHeartbeat } from "./job-lease.js";
 import { log, sanitizedError } from "./log.js";
+import { captureWorkerError } from "./telemetry.js";
 import {
   concatenateFiles,
   fileSize,
@@ -358,6 +359,13 @@ export async function runJob(job: ProcessingJob) {
         jobId: job.id,
         error: sanitizedError(error),
       });
+      captureWorkerError(error, {
+        jobId: job.id,
+        callId: job.call_id,
+        jobKind: job.kind,
+        errorClass:
+          error instanceof Error ? error.constructor.name : "UnknownError",
+      });
     },
   });
   try {
@@ -398,6 +406,13 @@ export async function runJob(job: ProcessingJob) {
       kind: job.kind,
     });
   } catch (error) {
+    captureWorkerError(error, {
+      jobId: job.id,
+      callId: job.call_id,
+      jobKind: job.kind,
+      errorClass:
+        error instanceof Error ? error.constructor.name : "UnknownError",
+    });
     const ownsLease = await heartbeat.stop();
     const message = sanitizedError(error);
     const transcriptionError =

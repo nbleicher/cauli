@@ -11,7 +11,8 @@ the organization is configured. `packages/shared/src/telemetry.test.ts` is the
 canary: it builds an event containing every forbidden value in the shapes a
 real event carries them and fails if any survives.
 
-**Scrubbed before sending.** Emails, IP addresses, URLs of every scheme, query
+**Scrubbed before sending.** Free-form strings are denied unless their field is
+an allowlisted operational dimension. Emails, IP addresses, URLs of every scheme, query
 strings, signed URLs, bearer tokens, OpenRouter and Supabase credentials, JWTs,
 and absolute file paths are replaced wherever they appear — as a field, nested
 in a breadcrumb, or in free-form message text. Fields named for content
@@ -34,6 +35,10 @@ provider and model identity, error class, and pseudonymous identifiers.
 Both configurable rates come from `TELEMETRY_CRITICAL_SAMPLE_RATE` and
 `TELEMETRY_ROUTINE_SAMPLE_RATE`; a value outside 0–1 falls back to the default
 rather than being obeyed.
+
+**Runtime capture.** `@sentry/nextjs` captures browser and server errors and
+route traces; `@sentry/node` captures worker failures and wraps every claimed
+job in a critical trace. Both SDKs apply the shared scrubber before transport.
 
 **Same-origin tunnel.** `connect-src` names only Cauli and Supabase, so the
 browser cannot reach Sentry directly and widening the policy is not on the
@@ -75,13 +80,16 @@ above is the first. Both are required.
 
 ## Environment
 
-| Variable                         | Purpose                                    |
-| -------------------------------- | ------------------------------------------ |
-| `SENTRY_DSN`                     | Server-side only; the tunnel's destination |
-| `SENTRY_ENVIRONMENT`             | `staging` or `production`                  |
-| `SENTRY_RELEASE`                 | Commit SHA and image digest                |
-| `TELEMETRY_CRITICAL_SAMPLE_RATE` | Default 1                                  |
-| `TELEMETRY_ROUTINE_SAMPLE_RATE`  | Default 0.1                                |
+| Variable                                   | Purpose                                    |
+| ------------------------------------------ | ------------------------------------------ |
+| `SENTRY_DSN`                               | Server, worker, and tunnel project routing |
+| `NEXT_PUBLIC_SENTRY_DSN`                   | Browser project routing through the tunnel |
+| `SENTRY_ENVIRONMENT` / public equivalent   | `staging` or `production`                  |
+| `SENTRY_RELEASE` / public equivalent       | Commit SHA and image digest                |
+| `TELEMETRY_CRITICAL_SAMPLE_RATE` / public  | Default 1                                  |
+| `TELEMETRY_ROUTINE_SAMPLE_RATE` / public   | Default 0.1                                |
+| `SENTRY_ORG`, `SENTRY_PROJECT`, auth token | Build-only private source-map upload       |
 
-The DSN is deliberately not exposed to the browser: the browser posts to
-`/api/monitoring` and the server holds the destination.
+A DSN contains a public routing key, not a provider credential. The browser
+needs it to construct valid envelopes, but sends those envelopes only to
+`/api/monitoring`; the server validates the destination and forwards them.

@@ -89,6 +89,40 @@ function normalizeKey(key: string) {
   return key.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
 }
 
+/**
+ * Strings are content-bearing until proven otherwise. These are the only
+ * string fields an operational event may retain; identifiers are opaque,
+ * pseudonymous database/event identifiers rather than names or addresses.
+ */
+const ALLOWED_STRING_KEYS = new Set([
+  "category",
+  "environment",
+  "errorclass",
+  "jobkind",
+  "level",
+  "mechanism",
+  "method",
+  "model",
+  "op",
+  "platform",
+  "provider",
+  "release",
+  "route",
+  "status",
+  "transaction",
+  "type",
+]);
+
+function isAllowedStringKey(key: string | undefined) {
+  if (!key) return false;
+  const normalized = normalizeKey(key);
+  return (
+    ALLOWED_STRING_KEYS.has(normalized) ||
+    normalized === "id" ||
+    normalized.endsWith("id")
+  );
+}
+
 function isForbiddenKey(key: string) {
   const normalized = normalizeKey(key);
   return FORBIDDEN_KEYS.some(
@@ -120,16 +154,24 @@ export function scrubTelemetryString(value: string) {
  * null, array, or plain object is dropped rather than serialized, because an
  * unexpected shape is exactly where content hides.
  */
-export function scrubTelemetryValue(value: unknown, depth = 0): unknown {
+export function scrubTelemetryValue(
+  value: unknown,
+  depth = 0,
+  key?: string
+): unknown {
   if (depth > 8) return TELEMETRY_REDACTED;
   if (value === null) return null;
-  if (typeof value === "string") return scrubTelemetryString(value);
+  if (typeof value === "string") {
+    return isAllowedStringKey(key)
+      ? scrubTelemetryString(value)
+      : TELEMETRY_REDACTED;
+  }
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (Array.isArray(value)) {
     return value
       .slice(0, 50)
-      .map((item) => scrubTelemetryValue(item, depth + 1));
+      .map((item) => scrubTelemetryValue(item, depth + 1, key));
   }
   if (typeof value === "object") {
     const source = value as Record<string, unknown>;
@@ -143,7 +185,7 @@ export function scrubTelemetryValue(value: unknown, depth = 0): unknown {
     for (const [key, item] of Object.entries(source)) {
       result[key] = isForbiddenKey(key)
         ? TELEMETRY_REDACTED
-        : scrubTelemetryValue(item, depth + 1);
+        : scrubTelemetryValue(item, depth + 1, key);
     }
     return result;
   }
@@ -154,7 +196,10 @@ export function scrubTelemetryValue(value: unknown, depth = 0): unknown {
  * The canary's assertion. Returns the forbidden values it can still find, so a
  * test can fail with the actual leak rather than a bare boolean.
  */
-export function findForbiddenTelemetry(value: unknown): string[] {
+export function findForbiddenTelemetry(
+  value: unknown,
+  exactValues: readonly string[] = []
+): string[] {
   const found: string[] = [];
   const serialized = JSON.stringify(value) ?? "";
   const patterns: Array<[string, RegExp]> = [
@@ -167,6 +212,11 @@ export function findForbiddenTelemetry(value: unknown): string[] {
   ];
   for (const [label, pattern] of patterns) {
     if (pattern.test(serialized)) found.push(label);
+  }
+  for (const exactValue of exactValues) {
+    if (exactValue && serialized.includes(exactValue)) {
+      found.push(`content:${exactValue}`);
+    }
   }
   return found;
 }

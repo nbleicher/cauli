@@ -1,4 +1,9 @@
 import { createServer } from "node:http";
+import {
+  captureWorkerError,
+  flushTelemetry,
+  traceWorkerJob,
+} from "./telemetry.js";
 import { config } from "./config.js";
 import {
   assertTranscriptionModelsPriced,
@@ -36,13 +41,18 @@ async function workerLoop(index: number) {
         continue;
       }
       activeJobs += 1;
-      await runJob(job);
+      await traceWorkerJob(job, () => runJob(job));
       activeJobs -= 1;
     } catch (error) {
       activeJobs = Math.max(0, activeJobs - 1);
       log.error("worker_loop_error", {
         workerIndex: index,
         error: sanitizedError(error),
+      });
+      captureWorkerError(error, {
+        workerIndex: index,
+        errorClass:
+          error instanceof Error ? error.constructor.name : "UnknownError",
       });
       await delay(config.pollMs);
     }
@@ -74,6 +84,10 @@ const server = createServer((request, response) => {
         response.end(JSON.stringify(metrics));
       })
       .catch((error) => {
+        captureWorkerError(error, {
+          errorClass:
+            error instanceof Error ? error.constructor.name : "UnknownError",
+        });
         response.writeHead(503, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: sanitizedError(error) }));
       });
@@ -95,6 +109,11 @@ try {
   await assertTranscriptionModelsPriced();
 } catch (error) {
   log.error("worker_pricing_unconfigured", { error: sanitizedError(error) });
+  captureWorkerError(error, {
+    errorClass:
+      error instanceof Error ? error.constructor.name : "UnknownError",
+  });
+  await flushTelemetry();
   process.exit(1);
 }
 
@@ -109,6 +128,7 @@ async function shutdown(signal: string) {
   server.close();
   const deadline = Date.now() + 30_000;
   while (activeJobs > 0 && Date.now() < deadline) await delay(250);
+  await flushTelemetry();
   process.exit(activeJobs > 0 ? 1 : 0);
 }
 

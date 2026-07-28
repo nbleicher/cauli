@@ -126,7 +126,14 @@ with check (
   bucket_id = 'recordings'
   and (storage.foldername(name))[3] = 'artifacts'
   and name ~ '/artifacts/transcript\.(txt|srt)$'
-  and public.can_view_call(((storage.foldername(name))[2])::uuid)
+  and exists (
+    select 1
+    from public.calls call
+    where call.id = ((storage.foldername(name))[2])::uuid
+      and call.workspace_id = ((storage.foldername(name))[1])::uuid
+      and call.deleted_at is null
+      and public.can_view_call(call.id)
+  )
 );
 
 drop policy if exists transcript_exports_update on storage.objects;
@@ -135,12 +142,26 @@ for update to authenticated
 using (
   bucket_id = 'recordings'
   and name ~ '/artifacts/transcript\.(txt|srt)$'
-  and public.can_view_call(((storage.foldername(name))[2])::uuid)
+  and exists (
+    select 1
+    from public.calls call
+    where call.id = ((storage.foldername(name))[2])::uuid
+      and call.workspace_id = ((storage.foldername(name))[1])::uuid
+      and call.deleted_at is null
+      and public.can_view_call(call.id)
+  )
 )
 with check (
   bucket_id = 'recordings'
   and name ~ '/artifacts/transcript\.(txt|srt)$'
-  and public.can_view_call(((storage.foldername(name))[2])::uuid)
+  and exists (
+    select 1
+    from public.calls call
+    where call.id = ((storage.foldername(name))[2])::uuid
+      and call.workspace_id = ((storage.foldername(name))[1])::uuid
+      and call.deleted_at is null
+      and public.can_view_call(call.id)
+  )
 );
 
 revoke all on function public.authorize_call_download(

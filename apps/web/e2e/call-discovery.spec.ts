@@ -61,6 +61,15 @@ test("a Manager pages, filters, and searches more than 250 Calls", async ({
     });
     const { error: seedError } = await admin.from("calls").insert(rows);
     if (seedError) throw seedError;
+    const { error: assignmentError } = await admin
+      .from("call_review_assignments")
+      .insert({
+        call_id: rows[7]!.id,
+        workspace_id: workspaceId,
+        assignee_id: created.user.id,
+        assigned_by: created.user.id,
+      });
+    if (assignmentError) throw assignmentError;
 
     const userClient = createClient(localUrl, anonKey, {
       auth: { persistSession: false },
@@ -120,6 +129,23 @@ test("a Manager pages, filters, and searches more than 250 Calls", async ({
     await page.getByRole("button", { name: /Clear filters/ }).click();
     await expect(rowLocator).toHaveCount(50);
     await expect(page.getByLabel("Processing")).toHaveValue("");
+
+    // Owner and assignee filters name a specific Workspace member, rather than
+    // collapsing every manager question into "mine".
+    await page.getByLabel("Owner").selectOption(created.user.id);
+    await expect(rowLocator).toHaveCount(50);
+    expect(new URL(page.url()).searchParams.get("owner")).toBe(created.user.id);
+    await page.getByRole("button", { name: /Clear filters/ }).click();
+
+    await page.getByLabel("Assignment").selectOption(created.user.id);
+    await expect(rowLocator).toHaveCount(1);
+    await expect(
+      page.getByRole("link", { name: /Discovery call 007/ })
+    ).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("assignment")).toBe(
+      created.user.id
+    );
+    await page.getByRole("button", { name: /Clear filters/ }).click();
 
     // The processing-state filter alone matches exactly one seeded Call.
     await page.getByLabel("Processing").selectOption("failed");
