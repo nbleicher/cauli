@@ -3,6 +3,7 @@ import {
   ClipboardCheck,
   FileClock,
   Headphones,
+  ListTodo,
   LogOut,
   Mic2,
   TriangleAlert,
@@ -14,6 +15,7 @@ import Image from "next/image";
 import { NavItem } from "@/components/NavItem";
 
 interface AppShellProps {
+  breakGlassNoticeCount?: number;
   children: React.ReactNode;
   email: string;
   needsAttentionCount?: number;
@@ -23,6 +25,7 @@ interface AppShellProps {
 const memberNav = [
   { href: "/record", label: "Record", icon: Mic2 },
   { href: "/calls", label: "My Calls", icon: Headphones },
+  { href: "/follow-ups", label: "Follow-ups", icon: ListTodo },
 ];
 
 const accountNav = [{ href: "/account", label: "Account", icon: ShieldCheck }];
@@ -39,6 +42,7 @@ const adminNav = [
 ];
 
 export function AppShell({
+  breakGlassNoticeCount = 0,
   children,
   email,
   needsAttentionCount = 0,
@@ -100,7 +104,15 @@ export function AppShell({
           </form>
         </div>
       </aside>
-      <div className="app-content">{children}</div>
+      <div className="app-content">
+        {breakGlassNoticeCount > 0 ? (
+          <div className="break-glass-notice" role="alert">
+            Platform break-glass access was activated for this Workspace. The
+            immutable Audit Log records its scope and expiration.
+          </div>
+        ) : null}
+        {children}
+      </div>
     </div>
   );
 }

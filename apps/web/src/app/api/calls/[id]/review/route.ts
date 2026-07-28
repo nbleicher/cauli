@@ -63,24 +63,32 @@ export async function POST(
     );
   }
 
-  const { data, error } = await supabase.rpc("submit_call_review", {
-    target_call_id: id,
-    target_scorecard_version_id: scorecardVersionId,
-    expected_version: parsed.data.expectedVersion,
-    target_status: parsed.data.status,
-    target_summary: parsed.data.summary,
-    target_follow_up: parsed.data.followUp,
-    target_answers: parsed.data.answers,
-  });
+  const { data, error } = await supabase.rpc(
+    "submit_call_review_with_follow_up",
+    {
+      target_call_id: id,
+      target_scorecard_version_id: scorecardVersionId,
+      expected_version: parsed.data.expectedVersion,
+      expected_assignment_version: parsed.data.expectedAssignmentVersion,
+      target_status: parsed.data.status,
+      target_summary: parsed.data.summary,
+      target_follow_up: parsed.data.followUp,
+      target_follow_up_due_date: parsed.data.followUpDueDate,
+      target_answers: parsed.data.answers,
+    }
+  );
 
   if (error) {
     const limited = await rateLimitResponse(error, supabase, "review.submit");
     if (limited) return limited;
     const conflict = /version conflict/i.test(error.message);
+    const forbidden = /only the Review Assignee|not authorized/i.test(
+      error.message
+    );
     return NextResponse.json(
       { error: sanitizeError(error) },
       {
-        status: conflict ? 409 : 500,
+        status: conflict ? 409 : forbidden ? 403 : 500,
       }
     );
   }
