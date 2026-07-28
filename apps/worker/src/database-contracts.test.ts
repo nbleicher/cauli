@@ -67,7 +67,7 @@ afterEach(async () => {
   }
   await admin
     .from("workspaces")
-    .update({ legal_gate_required: false })
+    .update({ legal_gate_required: false, retention_days: 90 })
     .eq("id", workspaceId);
   // Rate-limit counters are Workspace- and Call-scoped, so one test's spending
   // would otherwise be charged to the next.
@@ -1743,5 +1743,190 @@ describe.skipIf(
       call_id: null,
       lease_token: null,
     });
+  });
+
+  it("gives every Workspace one bounded Retention Policy nobody but an Admin can change", async () => {
+    const bareWorkspaceId = crypto.randomUUID();
+    createdWorkspaceIds.push(bareWorkspaceId);
+    const { data: defaulted, error: defaultError } = await admin
+      .from("workspaces")
+      .insert({
+        id: bareWorkspaceId,
+        name: "Retention Default",
+        slug: `retention-${bareWorkspaceId.slice(0, 8)}`,
+      })
+      .select("retention_days")
+      .single();
+    if (defaultError) throw defaultError;
+    expect(defaulted?.retention_days).toBe(90);
+
+    // The bound is a table constraint, so it holds against the service role and
+    // not only against the Admin command.
+    const { error: unboundedError } = await admin
+      .from("workspaces")
+      .update({ retention_days: 3650 })
+      .eq("id", bareWorkspaceId);
+    expect(unboundedError?.message).toMatch(
+      /workspaces_retention_days_allowed/
+    );
+
+    const { client: retentionAdmin, userId: retentionAdminId } =
+      await createWorkspaceMember("admin");
+    const { client: retentionManager } = await createWorkspaceMember("manager");
+    const { client: retentionMember, userId: retentionMemberId } =
+      await createWorkspaceMember("member");
+
+    for (const [role, client] of [
+      ["Manager", retentionManager],
+      ["Member Role", retentionMember],
+    ] as const) {
+      const { data: readable } = await client
+        .from("workspaces")
+        .select("retention_days")
+        .eq("id", workspaceId)
+        .single();
+      expect(readable?.retention_days, `${role} reads the policy`).toBe(90);
+
+      const { error: writeError } = await client
+        .from("workspaces")
+        .update({ retention_days: 30 })
+        .eq("id", workspaceId);
+      const { data: unchanged } = await admin
+        .from("workspaces")
+        .select("retention_days")
+        .eq("id", workspaceId)
+        .single();
+      expect(unchanged?.retention_days, `${role} cannot write it`).toBe(90);
+      expect(writeError === null || writeError.code === "42501").toBe(true);
+
+      const { error: commandError } = await client.rpc(
+        "set_workspace_retention_days_for_current_admin",
+        { target_retention_days: 30 }
+      );
+      expect(commandError?.message).toMatch(/only an admin/i);
+    }
+
+    // There is no retain-forever value and no unlisted period.
+    for (const rejected of [0, 45, 730]) {
+      const { error: valueError } = await retentionAdmin.rpc(
+        "set_workspace_retention_days_for_current_admin",
+        { target_retention_days: rejected }
+      );
+      expect(valueError?.message).toMatch(/30, 60, 90, 180, or 365 days/);
+    }
+
+    const { data: scheduledCalls, error: scheduledCallsError } = await admin
+      .from("calls")
+      .insert(
+        ["2026-01-01T00:00:00Z", "2026-03-15T12:00:00Z"].map((startedAt) => ({
+          workspace_id: workspaceId,
+          owner_id: retentionMemberId,
+          source_mode: "both",
+          chunk_prefix: `${workspaceId}/${startedAt}/chunks`,
+          started_at: startedAt,
+          recording_attested_by: retentionMemberId,
+          recording_attested_at: startedAt,
+        }))
+      )
+      .select("id, started_at");
+    if (scheduledCallsError) throw scheduledCallsError;
+    for (const scheduled of scheduledCalls ?? [])
+      createdCallIds.push(scheduled.id);
+
+    const { data: beforeChange } = await retentionAdmin
+      .from("call_retention_schedule")
+      .select("retention_days, scheduled_deletion_at")
+      .in(
+        "call_id",
+        (scheduledCalls ?? []).map((scheduled) => scheduled.id)
+      )
+      .order("scheduled_deletion_at");
+    expect(beforeChange).toEqual([
+      {
+        retention_days: 90,
+        scheduled_deletion_at: "2026-04-01T00:00:00+00:00",
+      },
+      {
+        retention_days: 90,
+        scheduled_deletion_at: "2026-06-13T12:00:00+00:00",
+      },
+    ]);
+
+    const { data: applied, error: changeError } = await retentionAdmin.rpc(
+      "set_workspace_retention_days_for_current_admin",
+      { target_retention_days: 30 }
+    );
+    expect(changeError).toBeNull();
+    expect(applied).toBe(30);
+
+    // The schedule is calculated from the policy, so every existing Call moved
+    // with it rather than keeping a date written when it was recorded.
+    const { data: afterChange } = await retentionAdmin
+      .from("call_retention_schedule")
+      .select("retention_days, scheduled_deletion_at")
+      .in(
+        "call_id",
+        (scheduledCalls ?? []).map((scheduled) => scheduled.id)
+      )
+      .order("scheduled_deletion_at");
+    expect(afterChange).toEqual([
+      {
+        retention_days: 30,
+        scheduled_deletion_at: "2026-01-31T00:00:00+00:00",
+      },
+      {
+        retention_days: 30,
+        scheduled_deletion_at: "2026-04-14T12:00:00+00:00",
+      },
+    ]);
+
+    const { data: retentionAudit } = await admin
+      .from("audit_events")
+      .select("action, entity_type, entity_id, metadata")
+      .eq("workspace_id", workspaceId)
+      .eq("action", "workspace.retention.changed")
+      .eq("actor_id", retentionAdminId)
+      .single();
+    expect(retentionAudit).toMatchObject({
+      entity_type: "workspace",
+      entity_id: workspaceId,
+      metadata: { previous_days: 90, retention_days: 30 },
+    });
+
+    // Another Workspace's policy and schedules stay out of reach.
+    const { data: isolated } = await retentionAdmin
+      .from("workspaces")
+      .select("id")
+      .eq("id", bareWorkspaceId);
+    expect(isolated).toEqual([]);
+  });
+
+  it("keeps retention a Workspace rule with no per-Call exception or hold", async () => {
+    const { client: exceptionAdmin, userId: exceptionAdminId } =
+      await createWorkspaceMember("admin");
+    const { callId } = await createCall(exceptionAdminId);
+
+    // A per-Call override would have to land somewhere. Nothing accepts one —
+    // not even the service role, which every other escape hatch answers to.
+    for (const override of [
+      { retention_days: 365 },
+      { retained_until: "2099-01-01T00:00:00Z" },
+      { legal_hold: true },
+    ]) {
+      const { error: overrideError } = await admin
+        .from("calls")
+        .update(override)
+        .eq("id", callId);
+      expect(overrideError?.code, JSON.stringify(override)).toBe("PGRST204");
+    }
+
+    // The schedule an Admin can read reports the Workspace policy, so no Call
+    // can be carrying a different one.
+    const { data: schedule } = await exceptionAdmin
+      .from("call_retention_schedule")
+      .select("retention_days")
+      .eq("call_id", callId)
+      .single();
+    expect(schedule?.retention_days).toBe(90);
   });
 });

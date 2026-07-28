@@ -52,6 +52,8 @@ interface CallDetail {
   hasSource: boolean;
   hasMp3: boolean;
   hasWav: boolean;
+  retentionDays: number | null;
+  scheduledDeletionAt: string | null;
 }
 
 type CallOperation =
@@ -296,6 +298,16 @@ export function CallDetailClient({
               <StatusPill status={call.status} />
             </dd>
           </div>
+          {call.scheduledDeletionAt && (
+            <div>
+              <dt>Scheduled deletion</dt>
+              <dd
+                title={`The Workspace Retention Policy deletes Calls after ${call.retentionDays} days.`}
+              >
+                {formatDate(call.scheduledDeletionAt)}
+              </dd>
+            </div>
+          )}
         </dl>
       </section>
 

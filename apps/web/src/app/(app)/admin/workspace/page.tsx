@@ -26,6 +26,7 @@ export default async function WorkspaceAdminPage() {
     { data: invites },
     { data: mfaStatusResult },
     { data: recoveryLockouts },
+    { data: workspace },
   ] = await Promise.all([
     supabase
       .from("workspace_members")
@@ -48,6 +49,11 @@ export default async function WorkspaceAdminPage() {
       body: { action: "list_mfa_status" },
     }),
     supabase.rpc("workspace_recovery_lockouts"),
+    supabase
+      .from("workspaces")
+      .select("retention_days")
+      .eq("id", member.workspaceId)
+      .single(),
   ]);
   const mfaStatuses = new Map(
     (
@@ -67,6 +73,7 @@ export default async function WorkspaceAdminPage() {
       />
       <WorkspaceAdmin
         currentUserId={user.id}
+        retentionDays={workspace?.retention_days ?? 90}
         members={(memberships ?? []).map((membership) => {
           const profile = firstProfile(membership.profile);
           return {

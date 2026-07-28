@@ -4,6 +4,14 @@ export type Role = (typeof ROLES)[number];
 export const SOURCE_MODES = ["mic", "tab", "both"] as const;
 export type SourceMode = (typeof SOURCE_MODES)[number];
 
+/**
+ * The complete Retention Policy vocabulary. There is deliberately no
+ * retain-forever value, so every Workspace deletes its Calls eventually.
+ */
+export const RETENTION_DAY_OPTIONS = [30, 60, 90, 180, 365] as const;
+export type RetentionDays = (typeof RETENTION_DAY_OPTIONS)[number];
+export const DEFAULT_RETENTION_DAYS: RetentionDays = 90;
+
 export interface DegradedInterval {
   source: "mic" | "tab";
   startMs: number;
