@@ -2319,6 +2319,268 @@ describe.skipIf(
     ).toContain("processing.provider_incident");
   });
 
+  it("pages 250+ Calls by cursor and stays correct as Calls change", async () => {
+    const { client, userId } = await createWorkspaceMember("manager");
+    const total = 260;
+    const base = Date.parse("2026-06-01T00:00:00.000Z");
+    // Seeded rows are cleaned up in bulk by owner below rather than one
+    // identifier at a time: 260 of them in a shared teardown makes a request
+    // line long enough to be its own failure.
+    const rows = Array.from({ length: total }, (_unused, index) => {
+      const callId = crypto.randomUUID();
+      return {
+        id: callId,
+        workspace_id: workspaceId,
+        owner_id: userId,
+        title: `Call ${String(index).padStart(3, "0")}`,
+        source_mode: "mic" as const,
+        status: "ready" as const,
+        chunk_prefix: `${workspaceId}/${callId}/chunks`,
+        started_at: new Date(base + index * 60_000).toISOString(),
+        recording_attested_by: userId,
+        recording_attested_at: new Date(base).toISOString(),
+      };
+    });
+    const { error: seedError } = await admin.from("calls").insert(rows);
+    if (seedError) throw seedError;
+
+    async function page(cursor: { startedAt: string; id: string } | null) {
+      const { data, error } = await client.rpc("list_calls_page", {
+        cursor_started_at: cursor?.startedAt ?? null,
+        cursor_id: cursor?.id ?? null,
+      });
+      if (error) throw error;
+      return data as Array<{ id: string; started_at: string; title: string }>;
+    }
+
+    // A page is 50 Calls plus the one row that answers "is there more".
+    const first = await page(null);
+    expect(first).toHaveLength(51);
+    const seen = new Set<string>();
+    let walked = 0;
+    let cursor: { startedAt: string; id: string } | null = null;
+    for (let index = 0; index < 8; index += 1) {
+      const rowsPage: Array<{ id: string; started_at: string }> =
+        await page(cursor);
+      const visible = rowsPage.slice(0, 50);
+      for (const row of visible) {
+        // No Call is ever shown twice, which is the whole point of a cursor.
+        expect(seen.has(row.id)).toBe(false);
+        seen.add(row.id);
+      }
+      walked += visible.length;
+      if (rowsPage.length <= 50) break;
+      const last = visible[visible.length - 1]!;
+      cursor = { startedAt: last.started_at, id: last.id };
+    }
+    expect(walked).toBe(total);
+
+    // Now change the set between two page requests: a newer Call inserted
+    // above page one, and a Call deleted below the cursor.
+    const restartFirst = await page(null);
+    const boundary = restartFirst[49]!;
+    const newerId = crypto.randomUUID();
+    await admin.from("calls").insert({
+      id: newerId,
+      workspace_id: workspaceId,
+      owner_id: userId,
+      title: "Inserted between pages",
+      source_mode: "mic",
+      status: "ready",
+      chunk_prefix: `${workspaceId}/${newerId}/chunks`,
+      started_at: new Date(base + total * 60_000).toISOString(),
+      recording_attested_by: userId,
+      recording_attested_at: new Date(base).toISOString(),
+    });
+    const droppedId = restartFirst[50]!.id;
+    await admin
+      .from("calls")
+      .update({ deleted_at: new Date().toISOString() })
+      .eq("id", droppedId);
+
+    const secondPage = await page({
+      startedAt: boundary.started_at,
+      id: boundary.id,
+    });
+    // The insert went above the cursor, so it cannot shift page two down...
+    expect(secondPage.map((row) => row.id)).not.toContain(newerId);
+    // ...and the deleted Call is simply gone rather than leaving a hole.
+    expect(secondPage.map((row) => row.id)).not.toContain(droppedId);
+    for (const row of secondPage) {
+      expect(
+        restartFirst.slice(0, 50).map((seenRow) => seenRow.id)
+      ).not.toContain(row.id);
+    }
+
+    const { error: cleanupError } = await admin
+      .from("calls")
+      .delete()
+      .eq("owner_id", userId);
+    if (cleanupError) throw cleanupError;
+  });
+
+  it("filters, searches metadata only, and never reads a Transcript", async () => {
+    const { client, userId } = await createWorkspaceMember("manager");
+    const { callId: degradedId } = await createCall(userId, {
+      title: "Renewal conversation",
+      status: "ready",
+      degraded_intervals: [{ source: "mic", startMs: 0, endMs: 10 }],
+      started_at: "2026-06-10T10:00:00.000Z",
+    });
+    const { callId: cleanId } = await createCall(userId, {
+      title: "Onboarding walkthrough",
+      status: "failed",
+      started_at: "2026-06-11T10:00:00.000Z",
+    });
+
+    // A Transcript whose text matches nothing in any title.
+    const { data: transcript, error: transcriptError } = await admin
+      .from("transcripts")
+      .insert({
+        call_id: cleanId,
+        model: "openai/whisper-large-v3-turbo",
+        full_text: "the customer mentioned pomegranate pricing",
+      })
+      .select("id")
+      .single();
+    if (transcriptError) throw transcriptError;
+    expect(transcript.id).toBeTruthy();
+
+    async function search(args: Record<string, unknown>) {
+      const { data, error } = await client.rpc("list_calls_page", args);
+      if (error) throw error;
+      return (data as Array<{ id: string }>).map((row) => row.id);
+    }
+
+    expect(await search({ target_search: "renewal" })).toEqual([degradedId]);
+    expect(await search({ target_quality: "degraded" })).toEqual([degradedId]);
+    expect(await search({ target_quality: "complete" })).toEqual([cleanId]);
+    expect(await search({ target_statuses: ["failed"] })).toEqual([cleanId]);
+    // Metadata search matches the owner too.
+    expect(
+      (await search({ target_search: "database-contract" })).sort()
+    ).toEqual([cleanId, degradedId].sort());
+    // Combined filters narrow rather than widen.
+    expect(
+      await search({ target_search: "renewal", target_statuses: ["failed"] })
+    ).toEqual([]);
+    // Transcript content is not searchable, and the empty result is the proof.
+    expect(await search({ target_search: "pomegranate" })).toEqual([]);
+
+    // Date filters bound both ends.
+    expect(await search({ target_from: "2026-06-11T00:00:00.000Z" })).toEqual([
+      cleanId,
+    ]);
+    expect(await search({ target_to: "2026-06-10T23:59:59.000Z" })).toEqual([
+      degradedId,
+    ]);
+  });
+
+  it("bounds and validates every discovery parameter", async () => {
+    const { client } = await createWorkspaceMember("manager");
+
+    const { error: longSearch } = await client.rpc("list_calls_page", {
+      target_search: "x".repeat(121),
+    });
+    expect(longSearch?.message).toContain("120 characters");
+
+    const { error: badQuality } = await client.rpc("list_calls_page", {
+      target_quality: "excellent",
+    });
+    expect(badQuality?.message).toContain("complete or degraded");
+
+    const { error: badFollowUp } = await client.rpc("list_calls_page", {
+      target_follow_up: "someday",
+    });
+    expect(badFollowUp?.message).toContain("open or resolved");
+
+    const { error: halfCursor } = await client.rpc("list_calls_page", {
+      cursor_started_at: new Date().toISOString(),
+    });
+    expect(halfCursor?.message).toContain("both its parts");
+
+    const { error: backwardsRange } = await client.rpc("list_calls_page", {
+      target_from: "2026-06-11T00:00:00.000Z",
+      target_to: "2026-06-01T00:00:00.000Z",
+    });
+    expect(backwardsRange?.message).toContain("starts after it ends");
+
+    // An unknown processing state is refused by the type, not silently ignored.
+    const { error: badStatus } = await client.rpc("list_calls_page", {
+      target_statuses: ["not_a_status"],
+    });
+    expect(badStatus).not.toBeNull();
+  });
+
+  it("keeps Call access rules and Workspace isolation inside the page", async () => {
+    const otherWorkspaceId = crypto.randomUUID();
+    const { error: workspaceError } = await admin.from("workspaces").insert({
+      id: otherWorkspaceId,
+      name: "Other pilot",
+      slug: `other-${otherWorkspaceId.slice(0, 8)}`,
+    });
+    if (workspaceError) throw workspaceError;
+    createdWorkspaceIds.push(otherWorkspaceId);
+
+    const { client: memberClient, userId: memberId } =
+      await createWorkspaceMember();
+    const { userId: colleagueId } = await createWorkspaceMember();
+    const { client: managerClient } = await createWorkspaceMember("manager");
+    const { userId: outsiderId } = await createWorkspaceMember(
+      "admin",
+      otherWorkspaceId
+    );
+
+    const { callId: ownCallId } = await createCall(memberId, {
+      title: "Mine",
+      status: "ready",
+    });
+    const { callId: colleagueCallId } = await createCall(colleagueId, {
+      title: "Not mine",
+      status: "ready",
+    });
+    const foreignCallId = crypto.randomUUID();
+    createdCallIds.push(foreignCallId);
+    await admin.from("calls").insert({
+      id: foreignCallId,
+      workspace_id: otherWorkspaceId,
+      owner_id: outsiderId,
+      title: "Another Workspace",
+      source_mode: "mic",
+      status: "ready",
+      chunk_prefix: `${otherWorkspaceId}/${foreignCallId}/chunks`,
+      recording_attested_by: outsiderId,
+      recording_attested_at: new Date().toISOString(),
+    });
+
+    const { data: memberPage, error: memberError } =
+      await memberClient.rpc("list_calls_page");
+    if (memberError) throw memberError;
+    const memberIds = (memberPage as Array<{ id: string }>).map(
+      (row) => row.id
+    );
+    // A Member Role sees only their own Calls, filtered or not.
+    expect(memberIds).toContain(ownCallId);
+    expect(memberIds).not.toContain(colleagueCallId);
+    expect(memberIds).not.toContain(foreignCallId);
+
+    const { data: managerPage } = await managerClient.rpc("list_calls_page");
+    const managerIds = (managerPage as Array<{ id: string }>).map(
+      (row) => row.id
+    );
+    expect(managerIds).toEqual(
+      expect.arrayContaining([ownCallId, colleagueCallId])
+    );
+    // Never across the Workspace boundary, whoever is asking.
+    expect(managerIds).not.toContain(foreignCallId);
+
+    // Naming another Workspace's Call explicitly does not reveal it either.
+    const { data: targeted } = await managerClient.rpc("list_calls_page", {
+      target_search: "Another Workspace",
+    });
+    expect(targeted).toEqual([]);
+  });
+
   it("holds work rather than spending against an unpriced model", async () => {
     const { userId } = await createWorkspaceMember();
     const { callId } = await createCall(userId, {

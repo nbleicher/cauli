@@ -2198,3 +2198,49 @@ textarea:focus {
   gap: 4px;
   margin-top: 10px;
 }
+
+.call-filters {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.call-search {
+  display: flex;
+  gap: 8px;
+  max-width: 460px;
+}
+
+.call-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.call-filter-row label {
+  display: grid;
+  gap: 3px;
+}
+
+.call-filter-row label span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.call-filter-row select,
+.call-filter-row input {
+  min-width: 132px;
+  min-height: 34px;
+  padding: 5px 9px;
+}
+
+.call-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  font-size: 12px;
+}
