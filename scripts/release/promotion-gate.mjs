@@ -11,6 +11,8 @@ const evidenceFields = [
   "securityHeaderEvidence",
   "vulnerabilityEvidence",
   "manualSignoffEvidence",
+  // Recovery is proven before promotion, not after an incident.
+  "recoveryDrillEvidence",
 ];
 
 export function validatePromotionEvidence(input) {
@@ -68,6 +70,7 @@ async function run() {
     securityHeaderEvidence: process.env.SECURITY_HEADER_EVIDENCE ?? "",
     vulnerabilityEvidence: process.env.VULNERABILITY_EVIDENCE ?? "",
     manualSignoffEvidence: process.env.MANUAL_SIGNOFF_EVIDENCE ?? "",
+    recoveryDrillEvidence: process.env.RECOVERY_DRILL_EVIDENCE ?? "",
   });
   await verifyHumanGates({
     repository: process.env.GITHUB_REPOSITORY ?? "",

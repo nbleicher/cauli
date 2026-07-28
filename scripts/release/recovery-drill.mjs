@@ -1,0 +1,155 @@
+#!/usr/bin/env node
+
+import { pathToFileURL } from "node:url";
+
+/**
+ * Recovery is a release gate, not an aspiration. This refuses a promotion whose
+ * recovery evidence has gone stale, whose offline path has never been proven
+ * with the real tool, or whose demonstrated recovery time is slower than the
+ * four-hour objective.
+ *
+ * It reads only content-free drill records — a kind, a timestamp, a reference,
+ * and whether it worked. Never what was recovered.
+ */
+
+const QUARTER_DAYS = 92;
+const RECOVERY_TIME_OBJECTIVE_SECONDS = 4 * 60 * 60;
+const PEELY_SYNC_THRESHOLD_HOURS = 48;
+
+/** Every drill that must have happened, and how recently. */
+const requiredDrills = [
+  {
+    kind: "database_point_in_time",
+    label: "A database point-in-time recovery",
+    withinDays: QUARTER_DAYS,
+  },
+  {
+    kind: "kms_source_audio_restore",
+    label: "A KMS Source Audio restore",
+    withinDays: QUARTER_DAYS,
+  },
+  {
+    kind: "seal_inspection",
+    label: "An offline recovery bundle seal inspection",
+    withinDays: QUARTER_DAYS,
+  },
+  {
+    // Proven before launch, after each rotation, and annually — so a year is
+    // the standing interval once the pre-launch proof exists.
+    kind: "offline_age_restore",
+    label: "An offline age identity restore",
+    withinDays: 365,
+  },
+];
+
+function daysBetween(later, earlier) {
+  return (later.getTime() - earlier.getTime()) / 86_400_000;
+}
+
+export function validateRecoveryDrills({
+  drills,
+  peelySyncHours,
+  now = new Date(),
+}) {
+  if (!Array.isArray(drills)) {
+    throw new Error("Recovery drill evidence is missing");
+  }
+
+  for (const drill of drills) {
+    if (drill.succeeded === false && !String(drill.remediation ?? "").trim()) {
+      throw new Error(
+        `The failed ${drill.kind} drill has no remediation record`
+      );
+    }
+  }
+
+  for (const required of requiredDrills) {
+    const candidates = drills
+      .filter((drill) => drill.kind === required.kind && drill.succeeded)
+      .map((drill) => ({ ...drill, performedAt: new Date(drill.performedAt) }))
+      .filter((drill) => !Number.isNaN(drill.performedAt.valueOf()))
+      .sort((first, second) => second.performedAt - first.performedAt);
+
+    const latest = candidates[0];
+    if (!latest) {
+      throw new Error(`${required.label} has never been demonstrated`);
+    }
+    if (daysBetween(now, latest.performedAt) > required.withinDays) {
+      throw new Error(
+        `${required.label} is older than ${required.withinDays} days`
+      );
+    }
+    if (!String(latest.evidenceReference ?? "").trim()) {
+      throw new Error(`${required.label} has no evidence reference`);
+    }
+  }
+
+  // The objective is what was demonstrated, not what was hoped for, so the
+  // slowest proven restore is the one that has to fit inside four hours.
+  const timedRestores = drills.filter(
+    (drill) =>
+      drill.succeeded &&
+      typeof drill.recoverySeconds === "number" &&
+      (drill.kind === "kms_source_audio_restore" ||
+        drill.kind === "offline_age_restore" ||
+        drill.kind === "database_point_in_time")
+  );
+  if (!timedRestores.length) {
+    throw new Error("No recovery drill recorded how long it took");
+  }
+  const slowest = Math.max(
+    ...timedRestores.map((drill) => drill.recoverySeconds)
+  );
+  if (slowest > RECOVERY_TIME_OBJECTIVE_SECONDS) {
+    throw new Error(
+      `The demonstrated recovery time of ${Math.round(slowest / 60)} minutes exceeds the four-hour objective`
+    );
+  }
+
+  if (
+    typeof peelySyncHours !== "number" ||
+    Number.isNaN(peelySyncHours) ||
+    peelySyncHours > PEELY_SYNC_THRESHOLD_HOURS
+  ) {
+    throw new Error(
+      "The Peely offline copy has not synchronized within 48 hours"
+    );
+  }
+}
+
+async function run() {
+  const response = await fetch(
+    `${process.env.SUPABASE_URL}/rest/v1/recovery_drills?select=kind,performed_at,evidence_reference,recovery_seconds,succeeded,remediation`,
+    {
+      headers: {
+        apikey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
+        authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
+      },
+    }
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Unable to read recovery drill evidence (${response.status})`
+    );
+  }
+  const rows = await response.json();
+  validateRecoveryDrills({
+    drills: rows.map((row) => ({
+      kind: row.kind,
+      performedAt: row.performed_at,
+      evidenceReference: row.evidence_reference,
+      recoverySeconds: row.recovery_seconds,
+      succeeded: row.succeeded,
+      remediation: row.remediation,
+    })),
+    peelySyncHours: Number(process.env.PEELY_SYNC_HOURS ?? Number.NaN),
+  });
+  console.log("Recovery drill evidence is complete and current.");
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  run().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  });
+}

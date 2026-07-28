@@ -47,6 +47,10 @@ on:
         description: Phase B exact-candidate sign-off reference
         required: false
         type: string
+      recovery_drill_evidence:
+        description: Current recovery-drill and Peely freshness evidence reference
+        required: false
+        type: string
 
 concurrency:
   group: immutable-release
@@ -170,6 +174,7 @@ jobs:
           SECURITY_HEADER_EVIDENCE: ${{ inputs.security_header_evidence }}
           VULNERABILITY_EVIDENCE: ${{ inputs.vulnerability_evidence }}
           MANUAL_SIGNOFF_EVIDENCE: ${{ inputs.manual_signoff_evidence }}
+          RECOVERY_DRILL_EVIDENCE: ${{ inputs.recovery_drill_evidence }}
         run: node scripts/release/promotion-gate.mjs
 
       - name: Authenticate to GHCR

@@ -15,6 +15,7 @@ const complete = {
   securityHeaderEvidence: "header-check-1",
   vulnerabilityEvidence: "trivy-run-1",
   manualSignoffEvidence: "release-signoff-1",
+  recoveryDrillEvidence: "recovery-drills-1",
 };
 
 test("requires every production evidence category", () => {
@@ -22,6 +23,10 @@ test("requires every production evidence category", () => {
   assert.throws(
     () => validatePromotionEvidence({ ...complete, regionEvidence: "" }),
     /regionEvidence/
+  );
+  assert.throws(
+    () => validatePromotionEvidence({ ...complete, recoveryDrillEvidence: "" }),
+    /recoveryDrillEvidence/
   );
 });
 
