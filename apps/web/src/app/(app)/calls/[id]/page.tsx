@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CallDetailClient } from "@/components/CallDetailClient";
+import { ProcessingPoller } from "@/components/ProcessingPoller";
 import type { ReviewEditorProps } from "@/components/ReviewEditor";
 import { PageHeader } from "@/components/PageHeader";
 import { formatDate } from "@/lib/format";
@@ -65,6 +66,14 @@ export default async function CallDetailPage({
         .eq("transcript_id", transcript.id)
         .order("sequence")
     : { data: [] };
+
+  const { data: activeExport } = await supabase
+    .from("export_jobs")
+    .select("id")
+    .eq("call_id", id)
+    .in("status", ["queued", "processing", "retrying"])
+    .limit(1)
+    .maybeSingle();
 
   const { data: existingReview } = await supabase
     .from("call_reviews")
@@ -207,6 +216,13 @@ export default async function CallDetailPage({
       <PageHeader
         title={rawCall.title || `Call · ${formatDate(rawCall.started_at)}`}
         description="Recording, transcript, exports, and QA review."
+      />
+      <ProcessingPoller
+        active={
+          ["recording", "uploading", "queued", "processing"].includes(
+            rawCall.status
+          ) || Boolean(activeExport)
+        }
       />
       <CallDetailClient
         call={{

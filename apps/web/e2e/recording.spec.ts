@@ -370,7 +370,7 @@ test("the Call owner can rename after capture while a Manager cannot", async ({
         workspace_id: workspaceId,
         owner_id: owner.user.id,
         source_mode: "both",
-        status: "ready",
+        status: "queued",
         stopped_at: new Date().toISOString(),
         title: "Original title",
         chunk_prefix: `${workspaceId}/${crypto.randomUUID()}/chunks`,
@@ -384,6 +384,15 @@ test("the Call owner can rename after capture while a Manager cannot", async ({
 
     await signInAsWorkspaceMember(page, ownerEmail, ownerPassword);
     await page.goto(`/calls/${callId}`);
+    await expect(page.getByText("queued", { exact: true })).toBeVisible();
+    const { error: readyError } = await admin
+      .from("calls")
+      .update({ status: "ready" })
+      .eq("id", callId);
+    if (readyError) throw readyError;
+    await expect(page.getByText("ready", { exact: true })).toBeVisible({
+      timeout: 8_000,
+    });
     await page.getByLabel("Call title").fill("Customer discovery");
     await page.getByRole("button", { name: "Save title" }).click();
     await expect(

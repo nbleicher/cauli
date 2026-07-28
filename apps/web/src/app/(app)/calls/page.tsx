@@ -1,5 +1,6 @@
 import { CallTable } from "@/components/CallTable";
 import { PageHeader } from "@/components/PageHeader";
+import { ProcessingPoller } from "@/components/ProcessingPoller";
 import { listCalls } from "@/lib/server/call-queries";
 import { requirePageAuth } from "@/lib/server/auth";
 
@@ -12,6 +13,13 @@ export default async function MyCallsPage() {
       <PageHeader
         title="My Calls"
         description="Your recordings, transcripts, exports, and completed reviews."
+      />
+      <ProcessingPoller
+        active={calls.some((call) =>
+          ["recording", "uploading", "queued", "processing"].includes(
+            call.status
+          )
+        )}
       />
       <CallTable calls={calls} showOwner={false} />
     </main>
