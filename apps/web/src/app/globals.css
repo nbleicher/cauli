@@ -2197,3 +2197,118 @@ textarea:focus {
   gap: 4px;
   margin-top: 10px;
 }
+
+.platform-auth-page {
+  background:
+    radial-gradient(1000px 600px at 50% 0%, #e8edf7 0%, transparent 58%),
+    #f5f6f8;
+}
+
+.platform-page {
+  min-height: 100vh;
+  padding: 32px;
+  background: #f5f6f8;
+}
+
+.platform-console {
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  display: grid;
+  gap: 22px;
+}
+
+.platform-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.platform-header h1 {
+  margin: 4px 0 8px;
+}
+
+.platform-header p:last-child {
+  max-width: 720px;
+  color: var(--muted);
+}
+
+.platform-card {
+  padding: 22px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+
+.platform-card > h2 {
+  margin-bottom: 16px;
+}
+
+.platform-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+}
+
+.platform-form {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.platform-form h2 {
+  margin-bottom: 4px;
+}
+
+.platform-form textarea {
+  min-height: 92px;
+  resize: vertical;
+}
+
+.platform-content {
+  max-height: 360px;
+  margin: 8px 0 0;
+  padding: 14px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #20242b;
+  color: #f4f6f8;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.platform-status {
+  position: sticky;
+  bottom: 18px;
+  padding: 12px 16px;
+  background: #20242b;
+  color: #fff;
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+}
+
+.break-glass-notice {
+  margin: 14px 20px 0;
+  padding: 11px 14px;
+  background: var(--red-soft);
+  color: var(--red-text);
+  border: 1px solid var(--red-line);
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+@media (max-width: 760px) {
+  .platform-page {
+    padding: 20px 14px;
+  }
+
+  .platform-header {
+    flex-direction: column;
+  }
+
+  .platform-grid {
+    grid-template-columns: 1fr;
+  }
+}

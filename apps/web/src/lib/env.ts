@@ -17,6 +17,9 @@ export const publicEnv = {
   supabaseUrl,
   supabaseAnonKey,
   appUrl: (process.env.APP_URL ?? "http://localhost:3000").replace(/\/$/, ""),
+  platformAdminHost: (process.env.PLATFORM_ADMIN_HOST ?? "")
+    .trim()
+    .toLowerCase(),
   cspMode,
   hstsIncludeSubdomains:
     process.env.HSTS_INCLUDE_SUBDOMAINS?.toLowerCase() === "true",

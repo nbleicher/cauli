@@ -2,7 +2,8 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createHash, createHmac } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
-const localUrl = "http://127.0.0.1:54321";
+const localUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54321";
 const serviceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const anonKey =
@@ -18,6 +19,9 @@ const admin = createClient(localUrl, serviceRoleKey, {
 });
 const createdCallIds: string[] = [];
 const createdJobIds: string[] = [];
+const createdBreakGlassGrantIds: string[] = [];
+const createdScorecardTemplateIds: string[] = [];
+const createdStoragePaths: string[] = [];
 const createdUserIds: string[] = [];
 const createdWorkspaceIds: string[] = [];
 
@@ -34,6 +38,25 @@ async function deleteAuthUser(userId: string) {
 }
 
 afterEach(async () => {
+  if (createdStoragePaths.length) {
+    const { error: storageCleanupError } = await admin.storage
+      .from("recordings")
+      .remove(createdStoragePaths.splice(0));
+    if (storageCleanupError) throw storageCleanupError;
+  }
+  if (createdBreakGlassGrantIds.length) {
+    const grantIds = createdBreakGlassGrantIds.splice(0);
+    const { error: notificationCleanupError } = await admin
+      .from("workspace_admin_notifications")
+      .delete()
+      .in("entity_id", grantIds);
+    if (notificationCleanupError) throw notificationCleanupError;
+    const { error: grantCleanupError } = await admin
+      .from("break_glass_grants")
+      .delete()
+      .in("id", grantIds);
+    if (grantCleanupError) throw grantCleanupError;
+  }
   if (createdJobIds.length) {
     await admin
       .from("processing_jobs")
@@ -42,6 +65,13 @@ afterEach(async () => {
   }
   if (createdCallIds.length) {
     await admin.from("calls").delete().in("id", createdCallIds.splice(0));
+  }
+  if (createdScorecardTemplateIds.length) {
+    const { error: scorecardCleanupError } = await admin
+      .from("scorecard_templates")
+      .delete()
+      .in("id", createdScorecardTemplateIds.splice(0));
+    if (scorecardCleanupError) throw scorecardCleanupError;
   }
   const userIds = createdUserIds.splice(0);
   if (userIds.length) {
@@ -124,6 +154,59 @@ async function createWorkspaceMember(
     if (verificationError) throw verificationError;
   }
   return { client, userId: created.user.id };
+}
+
+async function createPlatformAdmin(
+  environment: "staging" | "production" = "staging"
+) {
+  const password = `Platform-${crypto.randomUUID()}!`;
+  const { data: created, error: createError } =
+    await admin.auth.admin.createUser({
+      email: `platform-admin-${crypto.randomUUID()}@example.com`,
+      password,
+      email_confirm: true,
+    });
+  if (createError) throw createError;
+  createdUserIds.push(created.user.id);
+
+  const { error: platformAdminError } = await admin
+    .from("platform_admins")
+    .insert({
+      user_id: created.user.id,
+      environment,
+    });
+  if (platformAdminError) throw platformAdminError;
+
+  const client = createClient(localUrl, anonKey, {
+    auth: { persistSession: false },
+  });
+  const { error: signInError } = await client.auth.signInWithPassword({
+    email: created.user.email!,
+    password,
+  });
+  if (signInError) throw signInError;
+  const { data: enrollment, error: enrollmentError } =
+    await client.auth.mfa.enroll({
+      factorType: "totp",
+      friendlyName: `platform-contract-${crypto.randomUUID()}`,
+    });
+  if (enrollmentError) throw enrollmentError;
+  const { data: challenge, error: challengeError } =
+    await client.auth.mfa.challenge({ factorId: enrollment.id });
+  if (challengeError) throw challengeError;
+  const { error: verificationError } = await client.auth.mfa.verify({
+    factorId: enrollment.id,
+    challengeId: challenge.id,
+    code: totpCode(enrollment.totp.secret),
+  });
+  if (verificationError) throw verificationError;
+
+  return {
+    client,
+    userId: created.user.id,
+    email: created.user.email!,
+    password,
+  };
 }
 
 function totpCode(secret: string) {
@@ -694,6 +777,268 @@ describe.skipIf(
       .single();
     if (unchangedError) throw unchangedError;
     expect(unchanged.role).toBe("member");
+  });
+
+  it("separates Platform Admin authority and enforces audited break-glass scope", async () => {
+    const platformAdmin = await createPlatformAdmin();
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const owner = await createWorkspaceMember("member");
+    const sourcePath = `${workspaceId}/${crypto.randomUUID()}/source.webm`;
+    const first = await createCall(owner.userId, {
+      status: "ready",
+      title: "Customer escalation",
+      source_path: sourcePath,
+    });
+    const second = await createCall(owner.userId, {
+      status: "ready",
+      title: "Neighboring Call",
+      source_path: `${workspaceId}/${crypto.randomUUID()}/source.webm`,
+    });
+    const transcriptText = `private-${crypto.randomUUID()}`;
+    const reviewSummary = `review-${crypto.randomUUID()}`;
+    const { error: transcriptError } = await admin.from("transcripts").insert({
+      call_id: first.callId,
+      model: "contract-test",
+      full_text: transcriptText,
+    });
+    if (transcriptError) throw transcriptError;
+    const { data: scorecardVersionId, error: scorecardError } = await admin.rpc(
+      "publish_scorecard",
+      {
+        target_workspace_id: workspaceId,
+        target_template_id: null,
+        target_name: "Break-glass contract",
+        target_actor_id: workspaceAdmin.userId,
+        target_categories: [
+          {
+            name: "Quality",
+            criteria: [
+              {
+                label: "Clear",
+                weight: 1,
+                required: true,
+              },
+            ],
+          },
+        ],
+      }
+    );
+    if (scorecardError) throw scorecardError;
+    const { data: scorecardVersion, error: scorecardVersionError } = await admin
+      .from("scorecard_versions")
+      .select("template_id")
+      .eq("id", scorecardVersionId)
+      .single();
+    if (scorecardVersionError) throw scorecardVersionError;
+    createdScorecardTemplateIds.push(scorecardVersion.template_id);
+    const { error: reviewError } = await admin.from("call_reviews").insert({
+      call_id: first.callId,
+      scorecard_version_id: scorecardVersionId,
+      status: "reviewed",
+      summary: reviewSummary,
+      updated_by: workspaceAdmin.userId,
+    });
+    if (reviewError) throw reviewError;
+    const { error: sourceUploadError } = await admin.storage
+      .from("recordings")
+      .upload(sourcePath, Buffer.from("private source audio"));
+    if (sourceUploadError) throw sourceUploadError;
+    createdStoragePaths.push(sourcePath);
+
+    const { error: mixedAuthorityError } = await admin
+      .from("workspace_members")
+      .insert({
+        workspace_id: workspaceId,
+        user_id: platformAdmin.userId,
+        role: "admin",
+      });
+    expect(mixedAuthorityError?.message).toMatch(
+      /cannot be Workspace Members/i
+    );
+
+    const { data: routineCalls, error: routineCallsError } =
+      await platformAdmin.client.from("calls").select("id, title");
+    expect(routineCallsError).toBeNull();
+    expect(routineCalls).toEqual([]);
+    const { data: routineTranscripts, error: routineTranscriptsError } =
+      await platformAdmin.client.from("transcripts").select("full_text");
+    expect(routineTranscriptsError).toBeNull();
+    expect(routineTranscripts).toEqual([]);
+    const { data: routineReviews, error: routineReviewsError } =
+      await platformAdmin.client
+        .from("call_reviews")
+        .select("summary, follow_up");
+    expect(routineReviewsError).toBeNull();
+    expect(routineReviews).toEqual([]);
+    const { data: routineSignedUrl, error: routineSignedUrlError } =
+      await platformAdmin.client.storage
+        .from("recordings")
+        .createSignedUrl(sourcePath, 60);
+    expect(routineSignedUrl).toBeNull();
+    expect(routineSignedUrlError).not.toBeNull();
+    const { error: grantTableError } = await platformAdmin.client
+      .from("break_glass_grants")
+      .select("reason");
+    expect(grantTableError).not.toBeNull();
+
+    const { error: workspaceNeighborError } = await workspaceAdmin.client.rpc(
+      "platform_workspace_health"
+    );
+    expect(workspaceNeighborError).not.toBeNull();
+    const { error: serviceNeighborError } = await admin.rpc(
+      "platform_workspace_health"
+    );
+    expect(serviceNeighborError).not.toBeNull();
+    const { error: workerAuthorityError } = await platformAdmin.client.rpc(
+      "claim_processing_job",
+      { worker_name: "forged-platform-worker" }
+    );
+    expect(workerAuthorityError).not.toBeNull();
+    const { error: retentionAuthorityError } = await platformAdmin.client.rpc(
+      "purge_expired_audit_events"
+    );
+    expect(retentionAuthorityError).not.toBeNull();
+
+    const { data: touchResult, error: touchError } =
+      await platformAdmin.client.rpc("touch_platform_admin_session");
+    if (touchError) throw touchError;
+    expect(touchResult).toBeNull();
+    const { data: health, error: healthError } = await platformAdmin.client.rpc(
+      "platform_workspace_health"
+    );
+    if (healthError) throw healthError;
+    expect(health).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          workspace_id: workspaceId,
+          workspace_name: "cauli",
+        }),
+      ])
+    );
+
+    const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    const reason = "Customer-approved incident investigation";
+    const { data: grantData, error: grantError } =
+      await platformAdmin.client.rpc("grant_break_glass_access", {
+        target_workspace_id: workspaceId,
+        target_call_id: first.callId,
+        target_reason: reason,
+        target_expires_at: expiresAt,
+      });
+    if (grantError) throw grantError;
+    const callGrant = Array.isArray(grantData) ? grantData[0] : grantData;
+    createdBreakGlassGrantIds.push(callGrant.id);
+
+    const { data: notification, error: notificationError } =
+      await workspaceAdmin.client
+        .from("workspace_admin_notifications")
+        .select("notification_type, entity_id")
+        .eq("entity_id", callGrant.id)
+        .single();
+    if (notificationError) throw notificationError;
+    expect(notification).toEqual({
+      notification_type: "break_glass.activated",
+      entity_id: callGrant.id,
+    });
+
+    const { data: content, error: contentError } =
+      await platformAdmin.client.rpc("platform_read_call_content", {
+        target_call_id: first.callId,
+      });
+    if (contentError) throw contentError;
+    expect(content).toMatchObject({
+      call_id: first.callId,
+      workspace_id: workspaceId,
+      title: "Customer escalation",
+      transcript: transcriptText,
+      review: expect.objectContaining({ summary: reviewSummary }),
+    });
+    const { error: neighboringCallError } = await platformAdmin.client.rpc(
+      "platform_read_call_content",
+      { target_call_id: second.callId }
+    );
+    expect(neighboringCallError?.message).toMatch(
+      /No active break-glass grant/i
+    );
+
+    const expiredCreatedAt = new Date(Date.now() - 2 * 60 * 60_000);
+    const { error: expireError } = await admin
+      .from("break_glass_grants")
+      .update({
+        created_at: expiredCreatedAt.toISOString(),
+        expires_at: new Date(
+          expiredCreatedAt.getTime() + 30 * 60_000
+        ).toISOString(),
+      })
+      .eq("id", callGrant.id);
+    if (expireError) throw expireError;
+    const { error: expiredReadError } = await platformAdmin.client.rpc(
+      "platform_read_call_content",
+      { target_call_id: first.callId }
+    );
+    expect(expiredReadError?.message).toMatch(/No active break-glass grant/i);
+
+    const { data: replacementData, error: replacementError } =
+      await platformAdmin.client.rpc("grant_break_glass_access", {
+        target_workspace_id: workspaceId,
+        target_call_id: null,
+        target_reason: "Re-approved incident investigation",
+        target_expires_at: expiresAt,
+      });
+    if (replacementError) throw replacementError;
+    const replacementGrant = Array.isArray(replacementData)
+      ? replacementData[0]
+      : replacementData;
+    createdBreakGlassGrantIds.push(replacementGrant.id);
+    const { data: workspaceScopedContent, error: workspaceScopedError } =
+      await platformAdmin.client.rpc("platform_read_call_content", {
+        target_call_id: second.callId,
+      });
+    if (workspaceScopedError) throw workspaceScopedError;
+    expect(workspaceScopedContent).toMatchObject({ call_id: second.callId });
+    const { error: revokeError } = await platformAdmin.client.rpc(
+      "revoke_break_glass_access",
+      { target_grant_id: replacementGrant.id }
+    );
+    if (revokeError) throw revokeError;
+    const { error: revokedReadError } = await platformAdmin.client.rpc(
+      "platform_read_call_content",
+      { target_call_id: second.callId }
+    );
+    expect(revokedReadError?.message).toMatch(/No active break-glass grant/i);
+
+    const { data: audit, error: auditError } = await admin
+      .from("audit_events")
+      .select("action, entity_id, metadata")
+      .eq("actor_id", platformAdmin.userId);
+    if (auditError) throw auditError;
+    expect(audit.map((event) => event.action)).toEqual(
+      expect.arrayContaining([
+        "platform_admin.session.started",
+        "platform_admin.health.inspected",
+        "platform_admin.break_glass.activated",
+        "platform_admin.break_glass.content_read",
+        "platform_admin.break_glass.revoked",
+      ])
+    );
+    expect(JSON.stringify(audit)).not.toContain(reason);
+    expect(JSON.stringify(audit)).not.toContain(transcriptText);
+    expect(JSON.stringify(audit)).not.toContain(reviewSummary);
+    expect(JSON.stringify(audit)).not.toContain("Customer escalation");
+
+    const { error: ageSessionError } = await admin
+      .from("platform_admin_sessions")
+      .update({
+        started_at: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
+      })
+      .eq("user_id", platformAdmin.userId);
+    if (ageSessionError) throw ageSessionError;
+    const { error: agedSessionError } = await platformAdmin.client.rpc(
+      "platform_workspace_health"
+    );
+    expect(agedSessionError?.message).toMatch(
+      /Active Platform Admin AAL2 session required/i
+    );
   });
 
   it("requires a Recording Attestation and stores its actor, time, and optional Call title", async () => {
