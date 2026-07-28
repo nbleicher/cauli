@@ -129,7 +129,7 @@ test("Both mode continues degraded after one source ends and saves the recording
   }
 });
 
-test("leaving the Record page stops capture and retains an Incomplete Recording", async ({
+test("navigation offers Stay or Leave, then stops capture and retains an Incomplete Recording", async ({
   page,
 }) => {
   const email = `recording-unmount-${crypto.randomUUID()}@example.com`;
@@ -162,6 +162,21 @@ test("leaving the Record page stops capture and retains an Incomplete Recording"
       page.getByRole("button", { name: "Stop and save" })
     ).toBeVisible();
 
+    page.once("dialog", async (dialog) => {
+      expect(dialog.type()).toBe("confirm");
+      expect(dialog.message()).toMatch(/leave this recording/i);
+      await dialog.dismiss();
+    });
+    await page.getByRole("link", { name: "My Calls" }).click();
+    await expect(page).toHaveURL(/\/record$/);
+    await expect(
+      page.getByRole("button", { name: "Stop and save" })
+    ).toBeVisible();
+
+    page.once("dialog", async (dialog) => {
+      expect(dialog.type()).toBe("confirm");
+      await dialog.accept();
+    });
     await page.getByRole("link", { name: "My Calls" }).click();
     await expect(page).toHaveURL(/\/calls$/);
 
