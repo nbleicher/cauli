@@ -13,12 +13,17 @@ export async function POST(request: Request) {
 
   const callId = crypto.randomUUID();
   const supabase = await createServerSupabaseClient();
-  const { data, error } = await supabase.rpc("create_call_for_current_user", {
-    target_call_id: callId,
-    target_source_mode: parsed.data.sourceMode,
-    target_mic_label: parsed.data.micLabel ?? "",
-    target_tab_label: parsed.data.tabLabel ?? "",
-  });
+  const { data, error } = await supabase.rpc(
+    "create_attested_call_for_current_user",
+    {
+      target_call_id: callId,
+      target_source_mode: parsed.data.sourceMode,
+      target_mic_label: parsed.data.micLabel ?? "",
+      target_tab_label: parsed.data.tabLabel ?? "",
+      target_title: parsed.data.title ?? null,
+      target_recording_attested: parsed.data.recordingAttested,
+    }
+  );
 
   if (error) {
     const limited = await rateLimitResponse(error, supabase, "call.create");

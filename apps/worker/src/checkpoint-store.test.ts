@@ -59,6 +59,8 @@ describe.skipIf(
         owner_id: user.user.id,
         source_mode: "both",
         chunk_prefix: `${workspaceId}/checkpoint-test/chunks`,
+        recording_attested_by: user.user.id,
+        recording_attested_at: new Date().toISOString(),
       })
       .select("id")
       .single();

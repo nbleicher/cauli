@@ -131,7 +131,13 @@ export function useRecordingController() {
     [cleanCapture, refreshDrafts]
   );
 
-  async function startRecording() {
+  async function startRecording({
+    recordingAttested,
+    title,
+  }: {
+    recordingAttested: true;
+    title: string;
+  }) {
     setError("");
     setNotice("");
     setElapsedMs(0);
@@ -155,6 +161,8 @@ export function useRecordingController() {
           sourceMode: mode,
           micLabel: capture.micLabel,
           tabLabel: capture.tabLabel,
+          title,
+          recordingAttested,
         }),
       });
       const created = await response.json().catch(() => ({}));
@@ -271,6 +279,7 @@ export function useRecordingController() {
           }
         }
       }, 250);
+      return true;
     } catch (startError) {
       await closeActiveCapture(capture);
       captureRef.current = null;
@@ -280,6 +289,7 @@ export function useRecordingController() {
           ? startError.message
           : "Recording could not start"
       );
+      return false;
     }
   }
 

@@ -943,6 +943,19 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.call-title-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.call-title-editor .button {
+  margin-bottom: 1px;
+}
+
 .processing-error {
   display: flex;
   justify-content: space-between;
@@ -1744,6 +1757,61 @@ textarea:focus {
   border-bottom: 1px solid var(--line);
 }
 
+.recording-preflight {
+  display: grid;
+  gap: 16px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.recording-attestation {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.recording-attestation input {
+  width: 16px;
+  min-height: 16px;
+  margin-top: 2px;
+}
+
+.recording-attestation small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.transcript-language {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.recording-unsupported {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.recording-unsupported svg {
+  flex: 0 0 auto;
+  color: var(--coral-strong);
+}
+
+.recording-unsupported p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .recorder-toolbar {
   min-height: 78px;
   display: flex;
@@ -1965,6 +2033,10 @@ textarea:focus {
 }
 
 @media (max-width: 560px) {
+  .call-title-editor {
+    grid-template-columns: 1fr;
+  }
+
   .recorder-toolbar {
     align-items: flex-start;
   }

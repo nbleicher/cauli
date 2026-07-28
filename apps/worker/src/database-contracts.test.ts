@@ -173,6 +173,8 @@ async function createCall(
     owner_id: userId,
     source_mode: "both",
     chunk_prefix: chunkPrefix,
+    recording_attested_by: userId,
+    recording_attested_at: new Date().toISOString(),
     ...overrides,
   });
   if (error) throw error;
@@ -567,12 +569,14 @@ describe.skipIf(
     createdCallIds.push(callId);
 
     const { data: createdCall, error: createError } = await client.rpc(
-      "create_call_for_current_user",
+      "create_attested_call_for_current_user",
       {
         target_call_id: callId,
         target_source_mode: "both",
         target_mic_label: "Microphone",
         target_tab_label: "Browser tab",
+        target_title: "Principal boundary",
+        target_recording_attested: true,
       }
     );
     expect(createError).toBeNull();
@@ -580,7 +584,9 @@ describe.skipIf(
       id: callId,
       workspace_id: workspaceId,
       owner_id: userId,
+      recording_attested_by: userId,
       status: "recording",
+      title: "Principal boundary",
     });
 
     const { error: jobWriteError } = await client
@@ -688,6 +694,135 @@ describe.skipIf(
       .single();
     if (unchangedError) throw unchangedError;
     expect(unchanged.role).toBe("member");
+  });
+
+  it("requires a Recording Attestation and stores its actor, time, and optional Call title", async () => {
+    const owner = await createWorkspaceMember("member");
+    const unattestedCallId = crypto.randomUUID();
+    const beforeAttestation = Date.now();
+
+    const { error: privilegedBypassError } = await admin.from("calls").insert({
+      id: crypto.randomUUID(),
+      workspace_id: workspaceId,
+      owner_id: owner.userId,
+      source_mode: "both",
+      chunk_prefix: `${workspaceId}/${crypto.randomUUID()}/chunks`,
+      recording_attestation_required: false,
+    });
+    expect(privilegedBypassError?.message).toMatch(
+      /Recording Attestation is required/i
+    );
+
+    const { error: unattestedError } = await owner.client.rpc(
+      "create_call_for_current_user",
+      {
+        target_call_id: unattestedCallId,
+        target_source_mode: "both",
+        target_mic_label: "Test microphone",
+        target_tab_label: "Test call tab",
+      }
+    );
+    if (!unattestedError) createdCallIds.push(unattestedCallId);
+    expect(unattestedError?.message).toMatch(
+      /Recording Attestation is required/i
+    );
+
+    const callId = crypto.randomUUID();
+    const { data: created, error: createError } = await owner.client.rpc(
+      "create_attested_call_for_current_user",
+      {
+        target_call_id: callId,
+        target_source_mode: "both",
+        target_mic_label: "Test microphone",
+        target_tab_label: "Test call tab",
+        target_title: "  Pilot kickoff  ",
+        target_recording_attested: true,
+      }
+    );
+    if (createError) throw createError;
+    createdCallIds.push(callId);
+
+    const call = Array.isArray(created) ? created[0] : created;
+    expect(call).toMatchObject({
+      id: callId,
+      owner_id: owner.userId,
+      recording_attested_by: owner.userId,
+      title: "Pilot kickoff",
+    });
+    expect(Date.parse(call.recording_attested_at)).toBeGreaterThanOrEqual(
+      beforeAttestation - 5_000
+    );
+    expect(Date.parse(call.recording_attested_at)).toBeLessThanOrEqual(
+      Date.now() + 5_000
+    );
+
+    const missingConfirmationId = crypto.randomUUID();
+    const { error: missingConfirmationError } = await owner.client.rpc(
+      "create_attested_call_for_current_user",
+      {
+        target_call_id: missingConfirmationId,
+        target_source_mode: "both",
+        target_mic_label: "Test microphone",
+        target_tab_label: "Test call tab",
+        target_title: null,
+        target_recording_attested: false,
+      }
+    );
+    expect(missingConfirmationError?.message).toMatch(
+      /Recording Attestation is required/i
+    );
+  });
+
+  it("allows only the Call owner to rename after capture", async () => {
+    const owner = await createWorkspaceMember("member");
+    const manager = await createWorkspaceMember("manager");
+    const workspaceAdmin = await createWorkspaceMember("admin");
+    const { callId } = await createCall(owner.userId, {
+      status: "recording",
+      title: "Original title",
+    });
+
+    const { error: activeRenameError } = await owner.client.rpc(
+      "rename_owned_call",
+      {
+        target_call_id: callId,
+        target_title: "Too early",
+      }
+    );
+    expect(activeRenameError?.message).toMatch(/after capture/i);
+
+    const { error: readyError } = await admin
+      .from("calls")
+      .update({ status: "ready", stopped_at: new Date().toISOString() })
+      .eq("id", callId);
+    if (readyError) throw readyError;
+
+    for (const privileged of [manager, workspaceAdmin]) {
+      const { error } = await privileged.client.rpc("rename_owned_call", {
+        target_call_id: callId,
+        target_title: "Privileged rewrite",
+      });
+      expect(error?.message).toMatch(/Only the Call owner can rename/i);
+    }
+
+    const { data: renamed, error: renameError } = await owner.client.rpc(
+      "rename_owned_call",
+      {
+        target_call_id: callId,
+        target_title: "  Customer discovery  ",
+      }
+    );
+    if (renameError) throw renameError;
+    const call = Array.isArray(renamed) ? renamed[0] : renamed;
+    expect(call.title).toBe("Customer discovery");
+
+    const { data: persisted, error: persistedError } = await admin
+      .from("calls")
+      .select("title")
+      .eq("id", callId)
+      .single();
+    if (persistedError) throw persistedError;
+    expect(persisted.title).toBe("Customer discovery");
   });
 
   it("issues Recovery Codes that are single-use, replaceable, and unreadable", async () => {

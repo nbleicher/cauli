@@ -108,6 +108,8 @@ test("an idle session locks, an active Recording is spared, and twelve hours end
       source_mode: "both",
       status: "recording",
       chunk_prefix: `${workspaceId}/${callId}/chunks`,
+      recording_attested_by: member.id,
+      recording_attested_at: new Date().toISOString(),
     });
     if (callError) throw callError;
     await ageSession(member.id, "last_seen_at", thirtyOneMinutes);
@@ -158,7 +160,10 @@ test("Call creation is throttled and the refusal reaches the browser", async ({
         const response = await fetch("/api/calls", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sourceMode: "both" }),
+          body: JSON.stringify({
+            sourceMode: "both",
+            recordingAttested: true,
+          }),
         });
         seen.push(response.status);
       }

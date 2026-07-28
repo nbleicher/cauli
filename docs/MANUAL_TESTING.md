@@ -15,9 +15,19 @@ Primary release matrix:
 
 - Chrome stable on macOS: complete before this release.
 - Chrome stable on Windows 11: complete on the Windows test machine.
+- Firefox, Safari, and Edge: confirm recording controls are unavailable with a
+  clear Chrome desktop explanation while Calls, Reviews, administration, and
+  account settings remain usable.
 - SalesGod CRM and Athena Text: full Mic, Tab, and Both coverage.
 - Google Meet and Zoom: smoke coverage for capture and playback.
 
+- Confirm Start recording remains disabled until the Recording Attestation is
+  checked, and confirm the wording neither claims the checkbox establishes
+  lawfulness nor says counsel reviewed it.
+- Give one Call a title before capture and leave another blank. Confirm the
+  first keeps its title and the second uses its date and time.
+- Confirm the capture experience states that Transcript generation is
+  English-only.
 - Mic: allow permission, speak, stop, and confirm audible playback.
 - Tab: choose the call tab, enable tab audio, stop, and confirm playback.
 - Both: confirm both sides are audible and synchronized.
@@ -52,6 +62,8 @@ Primary release matrix:
 ## Authorization
 
 - Member can see, download, review-read, and delete only their own calls.
+- A Call owner can rename after capture. A Manager and Admin can see another
+  owner’s title but cannot rename it through the UI, API, or database RPC.
 - Manager can see all calls and submit reviews but cannot delete another user's call.
 - Admin can manage roles, publish scorecards, and delete any call.
 - Attempt direct table and Storage reads with each role to verify RLS.

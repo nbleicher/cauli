@@ -13,10 +13,11 @@ import {
   FileAudio,
   LoaderCircle,
   RefreshCw,
+  Save,
   Trash2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { StatusPill } from "@/components/StatusPill";
 import { formatBytes, formatDate, formatDuration } from "@/lib/format";
 import {
@@ -53,6 +54,15 @@ interface CallDetail {
   hasWav: boolean;
 }
 
+type CallOperation =
+  | "retry"
+  | "export"
+  | "delete"
+  | "rename"
+  | "download-mp3"
+  | "download-source"
+  | "download-wav";
+
 export function CallDetailClient({
   call,
   segments,
@@ -72,7 +82,11 @@ export function CallDetailClient({
   const audioRef = useRef<HTMLAudioElement>(null);
   const [audioUrl, setAudioUrl] = useState("");
   const [mediaError, setMediaError] = useState("");
-  const [working, setWorking] = useState("");
+  const [notice, setNotice] = useState("");
+  const [title, setTitle] = useState(call.title ?? "");
+  const [activeOperation, setActiveOperation] = useState<CallOperation | null>(
+    null
+  );
 
   useEffect(() => {
     if (!call.hasMp3 && !call.hasSource) return;
@@ -88,7 +102,7 @@ export function CallDetailClient({
   }, [call.hasMp3, call.hasSource, call.id]);
 
   async function runAction(action: "retry" | "export" | "delete") {
-    setWorking(action);
+    setActiveOperation(action);
     setMediaError("");
     try {
       const response = await fetch(
@@ -113,12 +127,12 @@ export function CallDetailClient({
         error instanceof Error ? error.message : `${action} failed`
       );
     } finally {
-      setWorking("");
+      setActiveOperation(null);
     }
   }
 
   async function download(format: "mp3" | "source" | "wav") {
-    setWorking(`download-${format}`);
+    setActiveOperation(`download-${format}`);
     try {
       const response = await fetch(
         `/api/calls/${call.id}/media?format=${format}&download=1`
@@ -129,7 +143,7 @@ export function CallDetailClient({
     } catch (error) {
       setMediaError(error instanceof Error ? error.message : "Download failed");
     } finally {
-      setWorking("");
+      setActiveOperation(null);
     }
   }
 
@@ -140,7 +154,40 @@ export function CallDetailClient({
   }
 
   const canDelete = role === "admin" || currentUserId === call.ownerId;
+  const canRename =
+    currentUserId === call.ownerId &&
+    call.status !== "recording" &&
+    call.status !== "uploading";
   const canReview = role === "manager" || role === "admin";
+
+  async function renameCall(event: FormEvent) {
+    event.preventDefault();
+    setActiveOperation("rename");
+    setMediaError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/calls/${call.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result.error || "Call title could not be updated");
+      }
+      setTitle(result.title ?? "");
+      setNotice("Call title updated.");
+      router.refresh();
+    } catch (error) {
+      setMediaError(
+        error instanceof Error
+          ? error.message
+          : "Call title could not be updated"
+      );
+    } finally {
+      setActiveOperation(null);
+    }
+  }
 
   return (
     <>
@@ -148,6 +195,12 @@ export function CallDetailClient({
         <div className="error-banner">
           <AlertTriangle size={17} />
           {mediaError}
+        </div>
+      )}
+      {notice && (
+        <div className="notice-banner" role="status">
+          <CheckCircle2 size={17} />
+          {notice}
         </div>
       )}
 
@@ -172,14 +225,14 @@ export function CallDetailClient({
           <div className="audio-downloads">
             <button
               className="button button-quiet"
-              disabled={!call.hasMp3 || Boolean(working)}
+              disabled={!call.hasMp3 || activeOperation !== null}
               onClick={() => void download("mp3")}
             >
               <Download size={14} /> MP3
             </button>
             <button
               className="button button-quiet"
-              disabled={!call.hasSource || Boolean(working)}
+              disabled={!call.hasSource || activeOperation !== null}
               onClick={() => void download("source")}
             >
               <FileAudio size={14} /> Source
@@ -187,7 +240,7 @@ export function CallDetailClient({
             {call.hasWav ? (
               <button
                 className="button button-quiet"
-                disabled={Boolean(working)}
+                disabled={activeOperation !== null}
                 onClick={() => void download("wav")}
               >
                 <Download size={14} /> WAV
@@ -195,10 +248,10 @@ export function CallDetailClient({
             ) : (
               <button
                 className="button button-quiet"
-                disabled={call.status !== "ready" || Boolean(working)}
+                disabled={call.status !== "ready" || activeOperation !== null}
                 onClick={() => void runAction("export")}
               >
-                {working === "export" ? (
+                {activeOperation === "export" ? (
                   <LoaderCircle className="spin" size={14} />
                 ) : (
                   <FileAudio size={14} />
@@ -246,6 +299,35 @@ export function CallDetailClient({
         </dl>
       </section>
 
+      {canRename && (
+        <form className="call-title-editor" onSubmit={renameCall}>
+          <div className="field">
+            <label htmlFor="call-title">Call title</label>
+            <input
+              id="call-title"
+              value={title}
+              maxLength={240}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder={formatDate(call.startedAt)}
+            />
+            <p className="field-hint">
+              Leave blank to identify the Call by its date and time.
+            </p>
+          </div>
+          <button
+            className="button button-secondary"
+            disabled={activeOperation !== null}
+          >
+            {activeOperation === "rename" ? (
+              <LoaderCircle className="spin" size={15} />
+            ) : (
+              <Save size={15} />
+            )}
+            Save title
+          </button>
+        </form>
+      )}
+
       {call.errorMessage && (
         <div className="processing-error">
           <div>
@@ -257,7 +339,7 @@ export function CallDetailClient({
               className="button button-secondary"
               onClick={() => void runAction("retry")}
             >
-              {working === "retry" ? (
+              {activeOperation === "retry" ? (
                 <LoaderCircle className="spin" size={15} />
               ) : (
                 <RefreshCw size={15} />
@@ -328,7 +410,7 @@ export function CallDetailClient({
           </div>
           <button
             className="button button-danger"
-            disabled={Boolean(working)}
+            disabled={activeOperation !== null}
             onClick={() => {
               if (window.confirm("Permanently delete this recording?")) {
                 void runAction("delete");

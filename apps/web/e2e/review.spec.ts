@@ -79,6 +79,8 @@ test("review API enforces completion and optimistic concurrency", async ({
         source_mode: "both",
         status: "ready",
         chunk_prefix: `${workspaceId}/review-test/chunks`,
+        recording_attested_by: owner.user.id,
+        recording_attested_at: new Date().toISOString(),
       })
       .select("id")
       .single();
