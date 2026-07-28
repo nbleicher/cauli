@@ -94,6 +94,10 @@ docs/
   TECHNICAL_REFERENCE.md
 railway.web.toml        Railway web build and health configuration
 railway.worker.toml     Railway worker build and health configuration
+railway.backup-worker.toml
+                        Isolated backup-writer build and health configuration
+railway.retention-worker.toml
+                        Isolated backup-deleter build and health configuration
 package.json            npm workspace orchestration
 ```
 

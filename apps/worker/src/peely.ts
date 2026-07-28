@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import {
   readFile,
   readdir,
+  mkdtemp,
+  rename,
   rm,
   stat,
   writeFile,
@@ -49,26 +51,122 @@ interface SyncObject {
   ciphertext_sha256: string;
 }
 
-function objectPath(directory: string, objectName: string) {
+function bundlePath(directory: string, objectName: string) {
   if (!/^[0-9a-f]{64}$/.test(objectName)) {
     throw new Error("Backup object names must be opaque 256-bit identifiers");
   }
-  return join(directory, `${objectName}.backup`);
+  return join(directory, `${objectName}.bundle`);
 }
 
-function manifestPath(directory: string, objectName: string) {
-  return join(directory, `${objectName}.manifest`);
+function bundleFile(bundle: string, name: string) {
+  return join(bundle, name);
 }
 
 function sha256(value: Buffer) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function storedChecksum(path: string) {
+interface PeelyBundleMetadata {
+  formatVersion: 1;
+  ciphertextSha256: string;
+  manifestSha256: string;
+  kmsWrappedKey: string;
+  ageWrappedKey: string;
+  keyVersion: number;
+}
+
+async function readBundleAt(bundle: string) {
   try {
-    return sha256(await readFile(path));
+    const [ciphertext, manifest, metadataBytes] = await Promise.all([
+      readFile(bundleFile(bundle, "source-audio.backup")),
+      readFile(bundleFile(bundle, "manifest.encrypted")),
+      readFile(bundleFile(bundle, "wrapped-keys.json")),
+    ]);
+    const metadata = JSON.parse(
+      metadataBytes.toString("utf8")
+    ) as PeelyBundleMetadata;
+    if (
+      metadata.formatVersion !== 1 ||
+      !/^[0-9a-f]{64}$/.test(metadata.ciphertextSha256) ||
+      !/^[0-9a-f]{64}$/.test(metadata.manifestSha256) ||
+      !metadata.kmsWrappedKey ||
+      !metadata.ageWrappedKey ||
+      !Number.isInteger(metadata.keyVersion) ||
+      metadata.keyVersion <= 0 ||
+      sha256(ciphertext) !== metadata.ciphertextSha256 ||
+      sha256(manifest) !== metadata.manifestSha256
+    ) {
+      throw new Error("Peely recovery bundle verification failed");
+    }
+    return { ciphertext, manifest, ...metadata };
   } catch {
     return null;
+  }
+}
+
+export async function readPeelyRecoveryBundle(
+  directory: string,
+  objectName: string
+) {
+  return readBundleAt(bundlePath(directory, objectName));
+}
+
+async function publishRecoveryBundle(
+  directory: string,
+  objectName: string,
+  fetched: Awaited<ReturnType<typeof readBackupObject>>
+) {
+  const temporary = await mkdtemp(join(directory, `.${objectName}.tmp-`));
+  const destination = bundlePath(directory, objectName);
+  const displaced = join(
+    directory,
+    `.${objectName}.replaced-${crypto.randomUUID()}`
+  );
+  try {
+    const metadata: PeelyBundleMetadata = {
+      formatVersion: 1,
+      ciphertextSha256: fetched.ciphertextSha256,
+      manifestSha256: sha256(fetched.manifest),
+      kmsWrappedKey: fetched.kmsWrappedKey,
+      ageWrappedKey: fetched.ageWrappedKey,
+      keyVersion: fetched.keyVersion,
+    };
+    await Promise.all([
+      writeFile(
+        bundleFile(temporary, "source-audio.backup"),
+        fetched.ciphertext,
+        { mode: 0o600 }
+      ),
+      writeFile(bundleFile(temporary, "manifest.encrypted"), fetched.manifest, {
+        mode: 0o600,
+      }),
+      writeFile(
+        bundleFile(temporary, "wrapped-keys.json"),
+        JSON.stringify(metadata),
+        { mode: 0o600 }
+      ),
+    ]);
+
+    if (!(await readBundleAt(temporary))) {
+      throw new Error("The staged Peely recovery bundle did not verify");
+    }
+
+    let hadDestination = false;
+    try {
+      await rename(destination, displaced);
+      hadDestination = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    try {
+      await rename(temporary, destination);
+    } catch (error) {
+      if (hadDestination) await rename(displaced, destination);
+      throw error;
+    }
+    if (hadDestination) await rm(displaced, { recursive: true, force: true });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
   }
 }
 
@@ -101,7 +199,7 @@ export async function synchronizePeely(
     object_name: string;
   }[]) {
     try {
-      const localPath = objectPath(directory, objectName);
+      const localPath = bundlePath(directory, objectName);
       // Authorizations outlive the copies they removed, so every run sees all
       // of them. Only a copy that was still here counts as removed by this run.
       const present = await stat(localPath).then(
@@ -109,8 +207,7 @@ export async function synchronizePeely(
         () => false
       );
       if (!present) continue;
-      await rm(localPath, { force: true });
-      await rm(manifestPath(directory, objectName), { force: true });
+      await rm(localPath, { recursive: true, force: true });
       result.removed += 1;
     } catch (error) {
       result.failures.push(sanitizedError(error));
@@ -123,10 +220,12 @@ export async function synchronizePeely(
   if (listError) throw listError;
 
   for (const object of (objects ?? []) as SyncObject[]) {
-    const localPath = objectPath(directory, object.object_name);
     try {
-      const existing = await storedChecksum(localPath);
-      if (existing === object.ciphertext_sha256) {
+      const existing = await readPeelyRecoveryBundle(
+        directory,
+        object.object_name
+      );
+      if (existing?.ciphertextSha256 === object.ciphertext_sha256) {
         result.verified += 1;
         continue;
       }
@@ -146,12 +245,19 @@ export async function synchronizePeely(
           "The Source Audio Backup on the VPS does not match its recorded checksum"
         );
       }
+      if (
+        !fetched.manifest.length ||
+        !fetched.kmsWrappedKey ||
+        !fetched.ageWrappedKey ||
+        !Number.isInteger(fetched.keyVersion) ||
+        fetched.keyVersion <= 0
+      ) {
+        throw new Error(
+          "The Source Audio Backup is missing recovery bundle material"
+        );
+      }
 
-      await writeFile(localPath, fetched.ciphertext);
-      await writeFile(
-        manifestPath(directory, object.object_name),
-        fetched.manifest
-      );
+      await publishRecoveryBundle(directory, object.object_name, fetched);
       result.copied += 1;
     } catch (error) {
       // One bad object does not abandon the rest of the run.
@@ -192,6 +298,98 @@ export interface OperatorAlert {
 export interface FreshnessDependencies {
   client: SupabaseClient;
   sendOperatorEmail: (alert: OperatorAlert) => Promise<void>;
+}
+
+interface LocalFreshnessDependencies {
+  directory: string;
+  sendOperatorEmail: (alert: OperatorAlert) => Promise<void>;
+  now?: Date;
+}
+
+const LAST_SUCCESS_FILE = ".last-success.json";
+
+export async function recordLocalPeelySyncSuccess(
+  directory: string,
+  completedAt = new Date()
+) {
+  await mkdir(directory, { recursive: true });
+  const temporary = join(
+    directory,
+    `.${LAST_SUCCESS_FILE}.${process.pid}.${crypto.randomUUID()}`
+  );
+  await writeFile(
+    temporary,
+    JSON.stringify({ completedAt: completedAt.toISOString() }),
+    { mode: 0o600 }
+  );
+  await rename(temporary, join(directory, LAST_SUCCESS_FILE));
+}
+
+/**
+ * This check depends only on Peely's own disk and the alert channel. It still
+ * fires when the production database or VPS failure that broke synchronization
+ * would also make the server-side freshness RPC unavailable.
+ */
+export async function alertOnStaleLocalPeelySync(
+  dependencies: LocalFreshnessDependencies
+) {
+  const now = dependencies.now ?? new Date();
+  let lastSuccess: Date | null = null;
+  try {
+    const state = JSON.parse(
+      await readFile(join(dependencies.directory, LAST_SUCCESS_FILE), "utf8")
+    ) as { completedAt?: unknown };
+    if (typeof state.completedAt === "string") {
+      const parsed = new Date(state.completedAt);
+      if (Number.isFinite(parsed.valueOf())) lastSuccess = parsed;
+    }
+  } catch {
+    lastSuccess = null;
+  }
+
+  const staleHours = lastSuccess
+    ? Math.floor((now.getTime() - lastSuccess.getTime()) / 3_600_000)
+    : null;
+  if (staleHours !== null && staleHours <= 48 && staleHours >= 0) return false;
+
+  await dependencies.sendOperatorEmail({
+    subject: "Cauli: the Peely offline backup copy is stale",
+    body: lastSuccess
+      ? `The last successful Peely synchronization completed ${staleHours} hours ago, past the 48-hour threshold.`
+      : "Peely has never completed a successful synchronization.",
+  });
+  log.error("peely_sync_stale", { staleHours: staleHours ?? -1 });
+  return true;
+}
+
+export interface IndependentAlertDependencies {
+  directory: string;
+  synchronize: () => Promise<PeelySyncResult>;
+  sendOperatorEmail: (alert: OperatorAlert) => Promise<void>;
+  now?: Date;
+}
+
+/** Runs the alert even when synchronization itself throws. */
+export async function synchronizePeelyWithIndependentAlert(
+  dependencies: IndependentAlertDependencies
+) {
+  let result: PeelySyncResult | undefined;
+  let syncError: unknown;
+  try {
+    result = await dependencies.synchronize();
+    if (result.failures.length === 0) {
+      await recordLocalPeelySyncSuccess(
+        dependencies.directory,
+        dependencies.now
+      );
+    }
+  } catch (error) {
+    syncError = error;
+  }
+
+  await alertOnStaleLocalPeelySync(dependencies);
+  if (syncError) throw syncError;
+  return result!;
 }
 
 /**

@@ -13,12 +13,18 @@ Each project contains:
 - `web`, the only public service, with separate Workspace and Platform Admin
   domains enforced again by the application host boundary;
 - `worker`, with private networking only and no generated or custom public
-  domain.
+  domain;
+- `backup-writer`, with only the `cauli_backup_writer` database credential and
+  create/read mTLS certificate; and
+- `retention-worker`, with only the `cauli_retention` database credential and
+  delete-only mTLS certificate.
 
 Both services use the same `ghcr.io/nbleicher/cauli@sha256:…` source and are
 pinned to Railway Virginia `us-east4-eqdc4a`. Railway uses
 `node apps/web/server.js` for web and `node apps/worker/dist/index.js` for the
-worker.
+worker. The recovery services start `dist/backup-worker.js` and
+`dist/retention-worker.js`; their credentials must never be set on another
+service.
 
 Each environment has its own Supabase project and Storage in `us-east-1`,
 OpenRouter key and cap, Sentry environment, credentials, and data. Staging is
@@ -70,6 +76,35 @@ holds neither OpenRouter access nor a Supabase service-role credential. The
 worker key must be the separately inventoried worker principal; do not reuse it
 for identity, backup, retention, migration, Platform Admin, Sentry, or web.
 
+Backup writer (use `apps/worker/.env.backup.example`):
+
+```text
+SUPABASE_URL
+SUPABASE_BACKUP_KEY
+BACKUP_VPS_URL
+BACKUP_VPS_CLIENT_CERT
+BACKUP_VPS_CLIENT_KEY
+BACKUP_VPS_CA_CERT
+BACKUP_KMS_PUBLIC_KEY
+```
+
+Retention worker (use `apps/worker/.env.retention.example`):
+
+```text
+SUPABASE_URL
+SUPABASE_RETENTION_KEY
+BACKUP_VPS_URL
+RETENTION_VPS_CLIENT_CERT
+RETENTION_VPS_CLIENT_KEY
+BACKUP_VPS_CA_CERT
+```
+
+Peely uses the separate `.env.peely.example` only on the operator machine. It
+atomically publishes one opaque `.bundle` directory containing ciphertext,
+encrypted manifest, both wrapped keys, key version, and checksums. A successful
+restore needs only that bundle and an out-of-band KMS key or sealed age
+identity; it does not query Supabase or the VPS.
+
 Identity Edge Function (`identity-admin`):
 
 ```text
@@ -97,8 +132,11 @@ Variables:
 ```text
 RAILWAY_WEB_SERVICE_ID
 RAILWAY_WORKER_SERVICE_ID
+RAILWAY_BACKUP_SERVICE_ID
+RAILWAY_RETENTION_SERVICE_ID
 RAILWAY_ENVIRONMENT_ID
 SUPABASE_PROJECT_REF
+SUPABASE_URL
 CAULI_APP_URL
 ```
 
@@ -108,6 +146,7 @@ Secrets:
 RAILWAY_PROJECT_TOKEN
 SUPABASE_ACCESS_TOKEN
 SUPABASE_DB_PASSWORD
+SUPABASE_SERVICE_ROLE_KEY
 ```
 
 The Railway token is scoped to only that project/environment. The Supabase

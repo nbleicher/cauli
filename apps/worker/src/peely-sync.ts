@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { createClient } from "@supabase/supabase-js";
 import { log, sanitizedError } from "./log.js";
-import { alertOnStalePeelySync, synchronizePeely } from "./peely.js";
+import {
+  synchronizePeely,
+  synchronizePeelyWithIndependentAlert,
+} from "./peely.js";
 
 /**
  * The daily Peely synchronization, run from the operator's own machine by
@@ -19,6 +22,7 @@ function required(name: string) {
 }
 
 async function run() {
+  const directory = process.env.PEELY_DIRECTORY?.trim() || "/Volumes/Peely SSD";
   const client = createClient(
     required("SUPABASE_URL"),
     // The Peely credential, which can read opaque names and digests and
@@ -33,28 +37,32 @@ async function run() {
     certificateAuthorityPem: required("BACKUP_VPS_CA_CERT"),
   };
 
-  const result = await synchronizePeely({
-    directory: process.env.PEELY_DIRECTORY?.trim() || "/Volumes/Peely SSD",
-    target,
-    client,
-  });
-
-  await alertOnStalePeelySync({
-    client,
-    sendOperatorEmail: async (alert) => {
-      const response = await fetch(required("OPERATOR_ALERT_WEBHOOK"), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          to: required("OPERATOR_ALERT_EMAIL"),
-          subject: alert.subject,
-          text: alert.body,
-        }),
-      });
-      if (!response.ok) {
-        throw new Error(`Operator alert failed (${response.status})`);
-      }
-    },
+  const sendOperatorEmail = async (alert: {
+    subject: string;
+    body: string;
+  }) => {
+    const response = await fetch(required("OPERATOR_ALERT_WEBHOOK"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        to: required("OPERATOR_ALERT_EMAIL"),
+        subject: alert.subject,
+        text: alert.body,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Operator alert failed (${response.status})`);
+    }
+  };
+  const result = await synchronizePeelyWithIndependentAlert({
+    directory,
+    synchronize: () =>
+      synchronizePeely({
+        directory,
+        target,
+        client,
+      }),
+    sendOperatorEmail,
   });
 
   if (result.failures.length) process.exitCode = 1;

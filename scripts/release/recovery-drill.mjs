@@ -48,7 +48,7 @@ function daysBetween(later, earlier) {
 
 export function validateRecoveryDrills({
   drills,
-  peelySyncHours,
+  peelyLastSuccessAt,
   now = new Date(),
 }) {
   if (!Array.isArray(drills)) {
@@ -111,9 +111,12 @@ export function validateRecoveryDrills({
     );
   }
 
+  const lastPeelySync = new Date(peelyLastSuccessAt);
+  const peelySyncHours =
+    (now.getTime() - lastPeelySync.getTime()) / (60 * 60 * 1_000);
   if (
-    typeof peelySyncHours !== "number" ||
-    Number.isNaN(peelySyncHours) ||
+    Number.isNaN(lastPeelySync.valueOf()) ||
+    peelySyncHours < 0 ||
     peelySyncHours > PEELY_SYNC_THRESHOLD_HOURS
   ) {
     throw new Error(
@@ -123,21 +126,32 @@ export function validateRecoveryDrills({
 }
 
 async function run() {
-  const response = await fetch(
-    `${process.env.SUPABASE_URL}/rest/v1/recovery_drills?select=kind,performed_at,evidence_reference,recovery_seconds,succeeded,remediation`,
-    {
-      headers: {
-        apikey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
-        authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
-      },
-    }
-  );
-  if (!response.ok) {
+  const headers = {
+    apikey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
+    authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
+  };
+  const [drillResponse, peelyResponse] = await Promise.all([
+    fetch(
+      `${process.env.SUPABASE_URL}/rest/v1/recovery_drills?select=kind,performed_at,evidence_reference,recovery_seconds,succeeded,remediation`,
+      { headers }
+    ),
+    fetch(
+      `${process.env.SUPABASE_URL}/rest/v1/peely_sync_runs?select=completed_at&completed_at=not.is.null&failure_reason=is.null&order=completed_at.desc&limit=1`,
+      { headers }
+    ),
+  ]);
+  if (!drillResponse.ok) {
     throw new Error(
-      `Unable to read recovery drill evidence (${response.status})`
+      `Unable to read recovery drill evidence (${drillResponse.status})`
     );
   }
-  const rows = await response.json();
+  if (!peelyResponse.ok) {
+    throw new Error(
+      `Unable to read Peely freshness evidence (${peelyResponse.status})`
+    );
+  }
+  const rows = await drillResponse.json();
+  const peelyRows = await peelyResponse.json();
   validateRecoveryDrills({
     drills: rows.map((row) => ({
       kind: row.kind,
@@ -147,7 +161,7 @@ async function run() {
       succeeded: row.succeeded,
       remediation: row.remediation,
     })),
-    peelySyncHours: Number(process.env.PEELY_SYNC_HOURS ?? Number.NaN),
+    peelyLastSuccessAt: peelyRows[0]?.completed_at,
   });
   console.log("Recovery drill evidence is complete and current.");
 }

@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+!apps/worker/.env.*.example
 .next/
 .railway/
 .vercel/

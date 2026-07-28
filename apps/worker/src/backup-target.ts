@@ -119,6 +119,7 @@ export async function createBackupObject(
         "x-cauli-wrapped-age": object.ageWrappedKey,
       },
       body: new Uint8Array(object.ciphertext),
+      signal: AbortSignal.timeout(60_000),
     }
   );
 

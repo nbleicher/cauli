@@ -2,7 +2,8 @@ import { createClient } from "@supabase/supabase-js";
 import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
-const localUrl = "http://127.0.0.1:54321";
+const localUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54321";
 const serviceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const jwtSecret = process.env.SUPABASE_JWT_SECRET ?? "";
@@ -214,6 +215,8 @@ describe.skipIf(
     const requests: string[] = [];
     const worked = await deleteOneAuthorizedBackup({
       target,
+      client: admin,
+      workerName: "retention-test",
       fetch: async (url) => {
         requests.push(String(url));
         return new Response(null, { status: 204 });
@@ -239,6 +242,8 @@ describe.skipIf(
     expect(
       await deleteOneAuthorizedBackup({
         target,
+        client: admin,
+        workerName: "retention-test",
         fetch: async () => {
           throw new Error("should not delete an already removed copy");
         },
@@ -252,6 +257,8 @@ describe.skipIf(
 
     const worked = await deleteOneAuthorizedBackup({
       target,
+      client: admin,
+      workerName: "retention-test",
       fetch: async () => new Response(null, { status: 503 }),
     });
     expect(worked).toBe(true);

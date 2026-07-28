@@ -220,6 +220,11 @@ async function generateWav(job: ProcessingJob, stopHeartbeat: StopHeartbeat) {
 
 async function deleteCall(job: ProcessingJob, stopHeartbeat: StopHeartbeat) {
   if (!job.call_id) throw new Error("Delete job has no call");
+  const { error: startError } = await supabase.rpc(
+    "start_call_deletion_execution",
+    { target_call_id: job.call_id }
+  );
+  if (startError) throw startError;
   const prefix = `${job.workspace_id}/${job.call_id}`;
   const chunkFiles = await listStorageFiles(`${prefix}/chunks`);
   const artifactFiles = await listStorageFiles(`${prefix}/artifacts`);

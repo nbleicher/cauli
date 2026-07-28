@@ -1,11 +1,12 @@
 import { createClient } from "@supabase/supabase-js";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-const localUrl = "http://127.0.0.1:54321";
+const localUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54321";
 const serviceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const workspaceId = "00000000-0000-0000-0000-000000000001";
@@ -156,7 +157,14 @@ async function storeBackup(sourceAudio: Buffer) {
 function fakeVps(
   objects: Map<
     string,
-    { ciphertext: Buffer; manifest: Buffer; checksum: string }
+    {
+      ciphertext: Buffer;
+      manifest: Buffer;
+      checksum: string;
+      kmsWrappedKey?: string;
+      ageWrappedKey?: string;
+      keyVersion?: number;
+    }
   >
 ) {
   return async (url: string | URL | Request) => {
@@ -168,7 +176,11 @@ function fakeVps(
       headers: {
         "x-cauli-checksum-sha256": stored.checksum,
         "x-cauli-manifest": stored.manifest.toString("base64"),
-        "x-cauli-key-version": "1",
+        "x-cauli-key-version": String(stored.keyVersion ?? 1),
+        "x-cauli-wrapped-kms":
+          stored.kmsWrappedKey ?? "fixture-kms-wrapped-key",
+        "x-cauli-wrapped-age":
+          stored.ageWrappedKey ?? "fixture-age-wrapped-key",
       },
     });
   };
@@ -191,6 +203,53 @@ describe("the Peely sync agent", () => {
     );
     expect(source).not.toMatch(/from "\.\/backup-crypto\.js"/);
     expect(source).not.toMatch(/createBackupObject/);
+  });
+
+  it("alerts from local state even when synchronization cannot reach its dependencies", async () => {
+    const { synchronizePeelyWithIndependentAlert } = await import("./peely.js");
+    const directory = await workspaceDirectory();
+    const alerts: { subject: string; body: string }[] = [];
+
+    await expect(
+      synchronizePeelyWithIndependentAlert({
+        directory,
+        synchronize: async () => {
+          throw new Error("the production database is unavailable");
+        },
+        sendOperatorEmail: async (alert) => {
+          alerts.push(alert);
+        },
+      })
+    ).rejects.toThrow(/database is unavailable/);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.body).toMatch(/never completed a successful/);
+  });
+
+  it("rejects an interrupted or incomplete offline recovery bundle", async () => {
+    const { readPeelyRecoveryBundle } = await import("./peely.js");
+    const directory = await workspaceDirectory();
+    const objectName = "a".repeat(64);
+    const bundle = join(directory, `${objectName}.bundle`);
+    const ciphertext = Buffer.from("ciphertext");
+    const manifest = Buffer.from("encrypted manifest");
+    await mkdir(bundle);
+    await writeFile(join(bundle, "source-audio.backup"), ciphertext);
+    await writeFile(join(bundle, "manifest.encrypted"), manifest);
+    await writeFile(
+      join(bundle, "wrapped-keys.json"),
+      JSON.stringify({
+        formatVersion: 1,
+        ciphertextSha256: sha256(ciphertext),
+        manifestSha256: sha256(manifest),
+        kmsWrappedKey: "kms-wrapped",
+        ageWrappedKey: "age-wrapped",
+        keyVersion: 1,
+      })
+    );
+    expect(await readPeelyRecoveryBundle(directory, objectName)).not.toBeNull();
+
+    await rm(join(bundle, "manifest.encrypted"));
+    expect(await readPeelyRecoveryBundle(directory, objectName)).toBeNull();
   });
 });
 
@@ -223,13 +282,13 @@ describe.skipIf(
     });
     expect(first).toMatchObject({ copied: 1, verified: 0, failures: [] });
 
-    // What landed is the ciphertext, under an opaque name, with the encrypted
-    // manifest beside it — and nothing that says whose Call it was.
+    // What landed is one atomically published, self-contained recovery bundle
+    // under an opaque name — and nothing that says whose Call it was.
     const contents = await listPeelyContents(directory);
-    expect(contents.sort()).toEqual(
-      [`${objectName}.backup`, `${objectName}.manifest`].sort()
+    expect(contents).toEqual([`${objectName}.bundle`]);
+    const stored = await readFile(
+      join(directory, `${objectName}.bundle`, "source-audio.backup")
     );
-    const stored = await readFile(join(directory, `${objectName}.backup`));
     expect(sha256(stored)).toBe(encrypted.ciphertextSha256);
     expect(stored.includes(sourceAudio)).toBe(false);
     expect(contents.join(" ")).not.toContain(callId);
@@ -320,7 +379,7 @@ describe.skipIf(
       client: admin,
       fetch: fakeVps(vps),
     });
-    expect(await listPeelyContents(directory)).toHaveLength(2);
+    expect(await listPeelyContents(directory)).toHaveLength(1);
 
     // The object vanishes from the VPS with no authorization behind it — a
     // host-root compromise, or an accident. Peely must not follow.
@@ -332,7 +391,7 @@ describe.skipIf(
       fetch: fakeVps(vps),
     });
     expect(unauthorized.removed).toBe(0);
-    expect(await listPeelyContents(directory)).toHaveLength(2);
+    expect(await listPeelyContents(directory)).toHaveLength(1);
 
     // Now the application authorizes the deletion, and only now does the
     // offline copy go.
@@ -465,7 +524,8 @@ describe.skipIf(
   });
 
   it("restores Source Audio from the Peely copy only after it verifies", async () => {
-    const { synchronizePeely } = await import("./peely.js");
+    const { readPeelyRecoveryBundle, synchronizePeely } =
+      await import("./peely.js");
     const { restoreSourceAudio } = await import("./backup-crypto.js");
     const { privateDecrypt, constants } = await import("node:crypto");
 
@@ -486,34 +546,32 @@ describe.skipIf(
               ciphertext: encrypted.ciphertext,
               manifest: encrypted.manifest,
               checksum: encrypted.ciphertextSha256,
+              kmsWrappedKey: encrypted.wrapped.kmsWrappedKey,
+              ageWrappedKey: encrypted.wrapped.ageWrappedKey,
+              keyVersion: encrypted.wrapped.keyVersion,
             },
           ],
         ])
       ),
     });
 
-    // Recovery reads the offline copy and the key comes from KMS, which Peely
-    // has no access to — the two failure domains meeting only at restore time.
-    const { data: wrapped } = await admin
-      .from("source_audio_backups")
-      .select("kms_wrapped_key, ciphertext_sha256")
-      .eq("object_name", objectName)
-      .single();
+    // Recovery uses only the self-contained offline bundle plus the
+    // out-of-band KMS private key. It does not query the database or VPS.
+    const bundle = await readPeelyRecoveryBundle(directory, objectName);
+    expect(bundle).not.toBeNull();
     const dataKey = privateDecrypt(
       {
         key: kms.privateKey,
         padding: constants.RSA_PKCS1_OAEP_PADDING,
         oaepHash: "sha256",
       },
-      Buffer.from(wrapped!.kms_wrapped_key, "base64")
+      Buffer.from(bundle!.kmsWrappedKey, "base64")
     );
 
-    const ciphertext = await readFile(join(directory, `${objectName}.backup`));
-    const manifest = await readFile(join(directory, `${objectName}.manifest`));
     const restored = restoreSourceAudio({
-      ciphertext,
-      manifest,
-      ciphertextSha256: wrapped!.ciphertext_sha256,
+      ciphertext: bundle!.ciphertext,
+      manifest: bundle!.manifest,
+      ciphertextSha256: bundle!.ciphertextSha256,
       dataKey,
     });
     expect(restored.sourceAudio.equals(sourceAudio)).toBe(true);
@@ -522,21 +580,12 @@ describe.skipIf(
     // A copy that has rotted on the drive is rejected rather than accepted as
     // the authoritative media.
     await writeFile(
-      join(directory, `${objectName}.backup`),
-      Buffer.concat([ciphertext.subarray(0, 1), ciphertext.subarray(1)]).fill(
-        0,
-        0,
-        1
-      )
+      join(directory, `${objectName}.bundle`, "source-audio.backup"),
+      Buffer.concat([
+        bundle!.ciphertext.subarray(0, 1),
+        bundle!.ciphertext.subarray(1),
+      ]).fill(0, 0, 1)
     );
-    const rotted = await readFile(join(directory, `${objectName}.backup`));
-    expect(() =>
-      restoreSourceAudio({
-        ciphertext: rotted,
-        manifest,
-        ciphertextSha256: wrapped!.ciphertext_sha256,
-        dataKey,
-      })
-    ).toThrow(/checksum does not match/);
+    expect(await readPeelyRecoveryBundle(directory, objectName)).toBeNull();
   });
 });

@@ -8,6 +8,7 @@ const serviceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const anonKey =
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "integration-test-anon-key";
+const jwtSecret = process.env.SUPABASE_JWT_SECRET ?? "";
 const workspaceId = "00000000-0000-0000-0000-000000000001";
 
 process.env.NEXT_PUBLIC_SUPABASE_URL = localUrl;
@@ -26,6 +27,29 @@ const createdUserIds: string[] = [];
 const createdWorkspaceIds: string[] = [];
 const createdKeyVersions: number[] = [];
 const createdObjectNames: string[] = [];
+
+function base64Url(value: Buffer | string) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+function roleCredential(role: string) {
+  const header = base64Url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payload = base64Url(
+    JSON.stringify({
+      role,
+      iss: "supabase-demo",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+    })
+  );
+  const signature = base64Url(
+    createHmac("sha256", jwtSecret).update(`${header}.${payload}`).digest()
+  );
+  return `${header}.${payload}.${signature}`;
+}
 
 async function deleteAuthUser(userId: string) {
   let lastError: { message: string; status?: number } | null = null;
@@ -3864,6 +3888,15 @@ describe.skipIf(
     });
     const inFlightName = claimed.object_name as string;
     expect(inFlightName).toMatch(/^[0-9a-f]{64}$/);
+    const { data: uploadAuthorized } = await admin.rpc(
+      "authorize_source_audio_backup_upload",
+      {
+        target_call_id: callId,
+        target_lease_token: claimed.lease_token,
+        target_object_name: inFlightName,
+      }
+    );
+    expect(uploadAuthorized).toBe(true);
 
     // Deletion arrives mid-upload. The copy has not committed and now never
     // will, but it may already be sitting on the VPS.
@@ -3891,7 +3924,104 @@ describe.skipIf(
       backup_deletion_requested: true,
       backup_objects_authorized: 1,
     });
+
+    // DELETE waits while the bounded PUT is active, then becomes claimable as
+    // soon as the writer records that its request has settled.
+    const { data: whileUploading } = await admin.rpc("claim_backup_deletion", {
+      worker_name: "too-early-retention",
+    });
+    expect(whileUploading).not.toBe(inFlightName);
+    await admin.rpc("finish_source_audio_backup_upload", {
+      target_call_id: callId,
+      target_lease_token: claimed.lease_token,
+      target_object_name: inFlightName,
+    });
+    const { data: afterUpload } = await admin.rpc("claim_backup_deletion", {
+      worker_name: "retention-after-upload",
+    });
+    expect(afterUpload).toBe(inFlightName);
   });
+
+  it.skipIf(!jwtSecret)(
+    "lets deletion tombstone a reserved name before the narrow backup writer can upload",
+    async () => {
+      const { userId } = await createWorkspaceMember("member");
+      const { callId } = await createCall(userId);
+      await admin
+        .from("calls")
+        .update({
+          source_path: `${workspaceId}/${callId}/artifacts/source.webm`,
+        })
+        .eq("id", callId);
+
+      const writer = createClient(
+        localUrl,
+        roleCredential("cauli_backup_writer"),
+        { auth: { persistSession: false } }
+      );
+      const { data: claimed, error: claimError } = await writer.rpc(
+        "claim_source_audio_backup",
+        { worker_name: "narrow-backup-writer" }
+      );
+      if (claimError) throw claimError;
+
+      // The writer cannot use its credential to inspect Calls or carry out
+      // retention. It receives only the source descriptor for its own lease.
+      expect((await writer.from("calls").select("id")).error).toBeTruthy();
+      expect(
+        (
+          await writer.rpc("commit_backup_deletion", {
+            target_object_name: claimed.object_name,
+          })
+        ).error
+      ).toBeTruthy();
+      const source = await writer.rpc("claimed_source_audio_backup_source", {
+        target_call_id: callId,
+        target_lease_token: claimed.lease_token,
+      });
+      expect(source.error).toBeNull();
+      expect(source.data?.[0]?.source_path).toContain(callId);
+
+      await admin.rpc("begin_call_deletion", {
+        target_call_id: callId,
+        target_actor_id: userId,
+        target_reason: "manual",
+        target_actor_role: "member",
+      });
+
+      // This is the 404-delete/late-PUT race: once deletion has acknowledged
+      // the reserved name, no later PUT can receive authorization.
+      const lateUpload = await writer.rpc(
+        "authorize_source_audio_backup_upload",
+        {
+          target_call_id: callId,
+          target_lease_token: claimed.lease_token,
+          target_object_name: claimed.object_name,
+        }
+      );
+      expect(lateUpload.error).toBeNull();
+      expect(lateUpload.data).toBe(false);
+
+      const deletion = await admin.rpc("claim_backup_deletion", {
+        worker_name: "retention-after-404",
+      });
+      expect(deletion.data).toBe(claimed.object_name);
+      await admin.rpc("commit_backup_deletion", {
+        target_object_name: claimed.object_name,
+      });
+      const committedLate = await writer.rpc("commit_source_audio_backup", {
+        target_call_id: callId,
+        target_lease_token: claimed.lease_token,
+        target_object_name: claimed.object_name,
+        target_key_version: 1,
+        target_kms_wrapped_key: "kms",
+        target_age_wrapped_key: "age",
+        target_ciphertext_sha256: "d".repeat(64),
+        target_ciphertext_bytes: 1,
+      });
+      expect(committedLate.data).toBe(false);
+    }
+  );
 
   it("retries a failed copy on a backoff until it succeeds", async () => {
     const { userId } = await createWorkspaceMember("member");
@@ -4340,6 +4470,9 @@ describe.skipIf(
       (job: { call_id: string | null }) => job.call_id === callId
     );
     expect(deleteJob).toBeTruthy();
+    await admin.rpc("start_call_deletion_execution", {
+      target_call_id: callId,
+    });
     const { data: committed } = await admin.rpc("commit_call_deletion", {
       target_job_id: deleteJob.id,
       target_lease_token: deleteJob.lease_token,
@@ -4385,6 +4518,39 @@ describe.skipIf(
     expect(survivingAudit).toBeTruthy();
     expect(new Date(survivingAudit!.retained_until).getTime()).toBeGreaterThan(
       Date.now() + 300 * 24 * 60 * 60 * 1_000
+    );
+
+    const { data: backupClaimed } = await admin.rpc("claim_backup_deletion", {
+      worker_name: "retention-audit",
+    });
+    expect(backupClaimed).toBe(objectName);
+    await admin.rpc("fail_backup_deletion", {
+      target_object_name: objectName,
+      target_reason: "receiver unavailable",
+    });
+    await admin.rpc("commit_backup_deletion", {
+      target_object_name: objectName,
+    });
+
+    const { data: lifecycleEvents } = await admin
+      .from("audit_events")
+      .select("action")
+      .eq("entity_id", callId)
+      .in("action", [
+        "call.deletion.execution_started",
+        "call.deletion.primary_completed",
+        "call.deletion.backup_execution_started",
+        "call.deletion.backup_failed",
+        "call.deletion.backup_completed",
+      ]);
+    expect(lifecycleEvents?.map((event) => event.action).sort()).toEqual(
+      [
+        "call.deletion.backup_completed",
+        "call.deletion.backup_execution_started",
+        "call.deletion.backup_failed",
+        "call.deletion.execution_started",
+        "call.deletion.primary_completed",
+      ].sort()
     );
   });
 

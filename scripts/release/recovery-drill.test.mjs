@@ -8,7 +8,7 @@ const daysAgo = (days) =>
 
 const complete = {
   now,
-  peelySyncHours: 12,
+  peelyLastSuccessAt: new Date(now.getTime() - 12 * 3_600_000).toISOString(),
   drills: [
     {
       kind: "database_point_in_time",
@@ -160,11 +160,18 @@ test("holds the demonstrated recovery time to four hours", () => {
 
 test("requires the offline copy to be fresh", () => {
   assert.throws(
-    () => validateRecoveryDrills({ ...complete, peelySyncHours: 60 }),
+    () =>
+      validateRecoveryDrills({
+        ...complete,
+        peelyLastSuccessAt: new Date(
+          now.getTime() - 60 * 3_600_000
+        ).toISOString(),
+      }),
     /has not synchronized within 48 hours/
   );
   assert.throws(
-    () => validateRecoveryDrills({ ...complete, peelySyncHours: undefined }),
+    () =>
+      validateRecoveryDrills({ ...complete, peelyLastSuccessAt: undefined }),
     /has not synchronized within 48 hours/
   );
 });

@@ -143,6 +143,24 @@ jobs:
           RAILWAY_HEALTHCHECK_PATH: /health
         run: node scripts/release/railway-image.mjs
 
+      - name: Deploy the isolated staging backup writer by the same digest
+        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PROJECT_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_BACKUP_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_START_COMMAND: node apps/worker/dist/backup-worker.js
+          RAILWAY_HEALTHCHECK_PATH: /health
+        run: node scripts/release/railway-image.mjs
+
+      - name: Deploy the isolated staging retention worker by the same digest
+        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PROJECT_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_RETENTION_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_START_COMMAND: node apps/worker/dist/retention-worker.js
+          RAILWAY_HEALTHCHECK_PATH: /health
+        run: node scripts/release/railway-image.mjs
+
       - name: Verify staging public path and report-only CSP
         env:
           CAULI_APP_URL: ${{ vars.CAULI_APP_URL }}
@@ -165,6 +183,12 @@ jobs:
           ref: ${{ inputs.commit_sha }}
 
       - name: Fail closed on missing Phase B evidence
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/release/recovery-drill.mjs
+
+      - name: Fail closed on missing Phase B evidence references
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PRE_MIGRATION_TIMESTAMP: ${{ inputs.pre_migration_timestamp }}
@@ -232,6 +256,24 @@ jobs:
           RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_WORKER_SERVICE_ID }}
           RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
           RAILWAY_START_COMMAND: node apps/worker/dist/index.js
+          RAILWAY_HEALTHCHECK_PATH: /health
+        run: node scripts/release/railway-image.mjs
+
+      - name: Deploy the isolated production backup writer by the staged digest
+        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PROJECT_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_BACKUP_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_START_COMMAND: node apps/worker/dist/backup-worker.js
+          RAILWAY_HEALTHCHECK_PATH: /health
+        run: node scripts/release/railway-image.mjs
+
+      - name: Deploy the isolated production retention worker by the staged digest
+        env:
+          RAILWAY_PROJECT_TOKEN: ${{ secrets.RAILWAY_PROJECT_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_RETENTION_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+          RAILWAY_START_COMMAND: node apps/worker/dist/retention-worker.js
           RAILWAY_HEALTHCHECK_PATH: /health
         run: node scripts/release/railway-image.mjs
 

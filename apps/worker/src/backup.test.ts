@@ -7,7 +7,8 @@ import {
 } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
-const localUrl = "http://127.0.0.1:54321";
+const localUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54321";
 const serviceRoleKey =
   process.env.SUPABASE_SERVICE_ROLE_KEY ?? "integration-test-service-key";
 const workspaceId = "00000000-0000-0000-0000-000000000001";
@@ -124,7 +125,7 @@ describe.skipIf(
     const callId = await createReadyCall();
 
     process.env.BACKUP_KMS_PUBLIC_KEY = kmsPublicKeyPem;
-    const recipients = await loadActiveBackupRecipients();
+    const recipients = await loadActiveBackupRecipients(admin, kmsPublicKeyPem);
     expect(recipients).toMatchObject({ ageRecipient, keyVersion });
 
     const received: {
@@ -133,6 +134,8 @@ describe.skipIf(
       body: Buffer;
     }[] = [];
     const worked = await backUpOneSourceAudio({
+      client: admin,
+      workerName: "backup-test",
       downloadSourceAudio: async (storagePath) => {
         expect(storagePath).toContain(callId);
         return sourceAudio;
@@ -202,6 +205,8 @@ describe.skipIf(
     // Nothing is left to do, so a second pass finds no work.
     expect(
       await backUpOneSourceAudio({
+        client: admin,
+        workerName: "backup-test",
         downloadSourceAudio: async () => {
           throw new Error("should not download an already stored Call");
         },
@@ -224,7 +229,9 @@ describe.skipIf(
     );
     process.env.BACKUP_KMS_PUBLIC_KEY = kmsPublicKeyPem;
 
-    await expect(loadActiveBackupRecipients()).rejects.toThrow(
+    await expect(
+      loadActiveBackupRecipients(admin, kmsPublicKeyPem)
+    ).rejects.toThrow(
       new RegExp(`does not match backup key version ${version}`)
     );
   });
@@ -235,6 +242,8 @@ describe.skipIf(
     const callId = await createReadyCall();
 
     const worked = await backUpOneSourceAudio({
+      client: admin,
+      workerName: "backup-test",
       downloadSourceAudio: async () => sourceAudio,
       target,
       recipients: {

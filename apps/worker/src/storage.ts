@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { config } from "./config.js";
 import { ensureDirectory } from "./process.js";
 import { supabase } from "./supabase.js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 const BUCKET = "recordings";
 
@@ -48,6 +49,17 @@ export async function downloadStorageFile(
 /** Reads an object straight into memory, for callers that never need it on disk. */
 export async function downloadStorageBuffer(storagePath: string) {
   const { data, error } = await supabase.storage
+    .from(BUCKET)
+    .download(storagePath);
+  if (error) throw error;
+  return Buffer.from(await data.arrayBuffer());
+}
+
+export async function downloadStorageBufferWithClient(
+  client: SupabaseClient,
+  storagePath: string
+) {
+  const { data, error } = await client.storage
     .from(BUCKET)
     .download(storagePath);
   if (error) throw error;

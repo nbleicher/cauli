@@ -1,8 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { config } from "./config.js";
 import { mutualTlsFetch } from "./mutual-tls.js";
 import { log, sanitizedError } from "./log.js";
-import { supabase } from "./supabase.js";
 
 /**
  * The retention principal.
@@ -29,8 +27,9 @@ export interface RetentionTargetConfig {
 
 export interface RetentionDependencies {
   target: RetentionTargetConfig;
+  workerName: string;
   /** A Supabase client authenticated as `cauli_retention`, not the worker. */
-  client?: SupabaseClient;
+  client: SupabaseClient;
   fetch?: typeof fetch;
 }
 
@@ -61,8 +60,9 @@ export function retentionClientFromEnvironment(
   environment: NodeJS.ProcessEnv = process.env
 ): SupabaseClient | null {
   const key = environment.SUPABASE_RETENTION_KEY?.trim();
-  if (!key) return null;
-  return createClient(config.supabaseUrl, key, {
+  const url = environment.SUPABASE_URL?.trim();
+  if (!key || !url) return null;
+  return createClient(url, key, {
     auth: { persistSession: false },
   });
 }
@@ -105,10 +105,10 @@ export async function deleteBackupObject(
 export async function deleteOneAuthorizedBackup(
   dependencies: RetentionDependencies
 ): Promise<boolean> {
-  const client = dependencies.client ?? supabase;
+  const client = dependencies.client;
   const { data: objectName, error: claimError } = await client.rpc(
     "claim_backup_deletion",
-    { worker_name: config.workerName }
+    { worker_name: dependencies.workerName }
   );
   if (claimError) throw claimError;
   if (!objectName) return false;
@@ -133,40 +133,4 @@ export async function deleteOneAuthorizedBackup(
     });
   }
   return true;
-}
-
-/**
- * Enters expired Calls into the same deletion workflow a Workspace Member's
- * manual delete uses. This runs as the application, not as the retention
- * principal — deciding what may go is the application's authority, and acting
- * on that decision is the retention principal's.
- */
-export async function expireCallsForRetention() {
-  const { data, error } = await supabase.rpc("expire_calls_for_retention", {
-    batch_size: 100,
-  });
-  if (error) throw error;
-  const expired = Number(data ?? 0);
-  if (expired > 0) log.info("calls_expired_by_retention", { expired });
-  return expired;
-}
-
-/**
- * Deletion the application authorized and nobody has carried out. Every one of
- * these is an encrypted copy still sitting on the VPS after the Workspace was
- * told its Call was gone, so it is reported rather than left to be inferred.
- */
-export async function reportBackupDeletionBacklog() {
-  const { data, error } = await supabase.rpc("backup_deletion_backlog");
-  if (error) throw error;
-  const backlog = (
-    data as { outstanding: number; oldest_seconds: number }[]
-  )?.[0];
-  if (backlog && backlog.outstanding > 0) {
-    log.error("backup_deletion_backlog", {
-      outstanding: backlog.outstanding,
-      oldestSeconds: backlog.oldest_seconds,
-    });
-  }
-  return backlog ?? { outstanding: 0, oldest_seconds: 0 };
 }
