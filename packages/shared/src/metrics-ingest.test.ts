@@ -133,8 +133,7 @@ describe("metrics delivery", () => {
     expect(result).toBe("delivered");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const callArgs = fetchImpl.mock.calls[0] as unknown as
-      | [string, RequestInit | undefined]
-      | undefined;
+      [string, RequestInit | undefined] | undefined;
     expect(callArgs?.[0]).toBe("https://metrics.example/ingest/cauli");
     const init = callArgs?.[1];
     expect(init?.method).toBe("POST");
@@ -177,6 +176,141 @@ describe("metrics delivery", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(scheduleRetry).toHaveBeenCalled();
+  });
+
+  it("treats a 422 held answer as delivered because the backend keeps the event for replay", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            status: "held",
+            reason: "unmapped_agent",
+            held_event_id: "33333333-3333-3333-3333-333333333333",
+            source: "cauli",
+            source_identity: "profile-1",
+            detail:
+              "source-agent identity has no mapping; event held for replay",
+          }),
+          { status: 422, headers: { "Content-Type": "application/json" } }
+        )
+    );
+    const scheduleRetry = vi.fn((fn: () => void) => fn());
+
+    await expect(
+      deliverCallStarted(
+        {
+          callId: "call-1",
+          profileId: "profile-1",
+          occurredAt: "2026-08-03T18:00:00.000Z",
+        },
+        {
+          apiUrl: "https://metrics.example",
+          secret: "secret",
+          fetchImpl,
+          scheduleRetry,
+          backoffMs: [0],
+          maxAttempts: 5,
+          uuid: () => "evt-1",
+        }
+      )
+    ).resolves.toBe("delivered");
+
+    // Every retry would create another held-event row and operator alert.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(scheduleRetry).not.toHaveBeenCalled();
+  });
+
+  it("stops after one attempt on a 422 that is not held", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ detail: "invalid payload" }), {
+          status: 422,
+          headers: { "Content-Type": "application/json" },
+        })
+    );
+
+    await expect(
+      deliverCallStarted(
+        {
+          callId: "call-1",
+          profileId: "profile-1",
+          occurredAt: "2026-08-03T18:00:00.000Z",
+        },
+        {
+          apiUrl: "https://metrics.example",
+          secret: "secret",
+          fetchImpl,
+          scheduleRetry: (fn) => fn(),
+          backoffMs: [0],
+          maxAttempts: 5,
+          uuid: () => "evt-1",
+        }
+      )
+    ).resolves.toBe("rejected");
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after one attempt on other permanent 4xx answers", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const fetchImpl = vi.fn(async () => new Response("nope", { status: 401 }));
+
+    await expect(
+      deliverCallEnded(
+        {
+          callId: "call-1",
+          profileId: "profile-1",
+          durationMs: 5_000,
+        },
+        {
+          apiUrl: "https://metrics.example",
+          secret: "secret",
+          fetchImpl,
+          scheduleRetry: (fn) => fn(),
+          backoffMs: [0],
+          maxAttempts: 5,
+          uuid: () => "evt-1",
+          now: () => new Date("2026-08-03T18:05:00.000Z"),
+        }
+      )
+    ).resolves.toBe("rejected");
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps retrying 5xx answers until delivery", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 201 }));
+
+    await expect(
+      deliverCallStarted(
+        {
+          callId: "call-1",
+          profileId: "profile-1",
+          occurredAt: "2026-08-03T18:00:00.000Z",
+        },
+        {
+          apiUrl: "https://metrics.example",
+          secret: "secret",
+          fetchImpl,
+          scheduleRetry: (fn) => fn(),
+          backoffMs: [0],
+          maxAttempts: 3,
+          uuid: () => "evt-1",
+        }
+      )
+    ).resolves.toBe("delivered");
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("exhausts retries without throwing", async () => {

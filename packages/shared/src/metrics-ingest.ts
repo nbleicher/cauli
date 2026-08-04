@@ -44,13 +44,15 @@ export type MetricsEventBody = {
   };
 };
 
-export type MetricsDeliveryResult = "skipped" | "delivered" | "exhausted";
+export type MetricsDeliveryResult =
+  "skipped" | "delivered" | "rejected" | "exhausted";
 
 const DEFAULT_BACKOFF_MS = [250, 1_000, 3_000, 10_000] as const;
 
 function readProcessEnv(): Record<string, string | undefined> {
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } })
-    .process;
+  const proc = (
+    globalThis as { process?: { env?: Record<string, string | undefined> } }
+  ).process;
   return proc?.env ?? {};
 }
 
@@ -121,10 +123,32 @@ function ingestUrl(apiUrl: string) {
   return `${apiUrl.replace(/\/$/, "")}/ingest/cauli`;
 }
 
+type PostOutcome =
+  | { kind: "delivered" }
+  | { kind: "rejected"; status: number }
+  | { kind: "retry" };
+
+/**
+ * The metrics backend answers 422 with `{"status": "held", ...}` when the
+ * source-agent identity has no mapping yet: the event is stored server-side
+ * as a held-event row for replay. Retrying a held event would create a NEW
+ * held row (plus an operator alert) per attempt, so a held answer is success
+ * from the emitter's point of view — the backend has the event.
+ */
+async function heldForReplay(response: Response): Promise<boolean> {
+  if (response.status !== 422) return false;
+  try {
+    const body = (await response.json()) as { status?: unknown };
+    return body?.status === "held";
+  } catch {
+    return false;
+  }
+}
+
 async function postOnce(
   body: MetricsEventBody,
   config: { apiUrl: string; secret: string; fetchImpl: typeof fetch }
-): Promise<boolean> {
+): Promise<PostOutcome> {
   const response = await config.fetchImpl(ingestUrl(config.apiUrl), {
     method: "POST",
     headers: {
@@ -134,7 +158,15 @@ async function postOnce(
     body: JSON.stringify(body),
   });
   // 2xx and duplicate acknowledgements (typically 200) are success.
-  return response.ok;
+  if (response.ok) return { kind: "delivered" };
+  // Held for replay is delivered as far as this emitter is concerned.
+  if (await heldForReplay(response)) return { kind: "delivered" };
+  // Any other 4xx is permanent: the same request will fail the same way.
+  if (response.status >= 400 && response.status < 500) {
+    return { kind: "rejected", status: response.status };
+  }
+  // 5xx (and anything else transient-looking) is worth retrying.
+  return { kind: "retry" };
 }
 
 function wait(ms: number, scheduleRetry: MetricsIngestConfig["scheduleRetry"]) {
@@ -165,13 +197,22 @@ export async function deliverMetricsEvent(
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
-      const ok = await postOnce(body, { apiUrl, secret, fetchImpl });
-      if (ok) return "delivered";
+      const outcome = await postOnce(body, { apiUrl, secret, fetchImpl });
+      if (outcome.kind === "delivered") return "delivered";
+      if (outcome.kind === "rejected") {
+        // Permanent: retrying an unprocessable request only repeats the
+        // failure (and multiplies backend side effects). Log once and stop.
+        console.error(
+          `metrics ingest rejected ${body.type} (${body.dedup_key}) with status ${outcome.status}; not retrying`
+        );
+        return "rejected";
+      }
     } catch {
       // Network / abort — retry below.
     }
     if (attempt < maxAttempts - 1) {
-      const delay = backoffMs[Math.min(attempt, backoffMs.length - 1)] ?? 10_000;
+      const delay =
+        backoffMs[Math.min(attempt, backoffMs.length - 1)] ?? 10_000;
       await wait(delay, config.scheduleRetry);
     }
   }
