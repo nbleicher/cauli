@@ -1,8 +1,9 @@
 import { finalizeCallSchema } from "@calllog/shared";
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { authorizeCall } from "@/lib/server/calls";
 import { isAuthError, requireApiAuth } from "@/lib/server/auth";
 import { parseJson, sanitizeError } from "@/lib/server/http";
+import { emitCallEndedMetric } from "@/lib/server/metrics";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export async function POST(
@@ -36,5 +37,18 @@ export async function POST(
   if (error) {
     return NextResponse.json({ error: sanitizeError(error) }, { status: 500 });
   }
+  const call = Array.isArray(data) ? data[0] : data;
+  // After the primary success path (same placement as audit side effects).
+  // Fire-and-forget: metrics must never block or fail finalization / recording.
+  after(() => {
+    emitCallEndedMetric({
+      callId: id,
+      profileId: call?.owner_id ?? auth.user.id,
+      durationMs: Number(call?.duration_ms ?? body.durationMs),
+      // Call id is the durable Recording reference until processing stores paths.
+      recordingRef: id,
+      occurredAt: call?.stopped_at ?? undefined,
+    });
+  });
   return NextResponse.json({ call: data });
 }

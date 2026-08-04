@@ -1,7 +1,8 @@
 import { createCallSchema } from "@calllog/shared";
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { isAuthError, requireApiAuth } from "@/lib/server/auth";
 import { parseJson, rateLimitResponse, sanitizeError } from "@/lib/server/http";
+import { emitCallStartedMetric } from "@/lib/server/metrics";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export async function POST(request: Request) {
@@ -31,6 +32,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: sanitizeError(error) }, { status: 500 });
   }
   const call = Array.isArray(data) ? data[0] : data;
+  // After the primary success path (same placement as audit side effects).
+  // Fire-and-forget: metrics must never block or fail Call creation.
+  after(() => {
+    emitCallStartedMetric({
+      callId: call.id,
+      profileId: call.owner_id,
+      occurredAt: call.started_at,
+    });
+  });
   return NextResponse.json(
     {
       callId: call.id,

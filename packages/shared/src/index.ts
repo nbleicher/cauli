@@ -1,5 +1,6 @@
 export * from "./authorization.js";
 export * from "./capture.js";
+export * from "./metrics-ingest.js";
 export * from "./schemas.js";
 export * from "./scoring.js";
 export * from "./reviews.js";
