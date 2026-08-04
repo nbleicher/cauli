@@ -1,4 +1,8 @@
-import type { ProcessingJobKind } from "@calllog/shared";
+import {
+  emitCallEnded,
+  metricsConfigFromEnv,
+  type ProcessingJobKind,
+} from "@calllog/shared";
 import { copyFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,11 +47,14 @@ interface ProcessingJob {
 interface CallRow {
   id: string;
   workspace_id: string;
+  owner_id: string;
+  duration_ms: number;
   expected_final_chunk: number | null;
   chunk_prefix: string;
   source_path: string | null;
   mp3_path: string | null;
   mime_type: string;
+  stopped_at: string | null;
 }
 
 type StopHeartbeat = () => Promise<boolean>;
@@ -56,12 +63,29 @@ async function loadCall(callId: string) {
   const { data, error } = await supabase
     .from("calls")
     .select(
-      "id, workspace_id, expected_final_chunk, chunk_prefix, source_path, mp3_path, mime_type"
+      "id, workspace_id, owner_id, duration_ms, expected_final_chunk, chunk_prefix, source_path, mp3_path, mime_type, stopped_at"
     )
     .eq("id", callId)
     .single();
   if (error) throw error;
   return data as CallRow;
+}
+
+/** Optional processing-complete emit for the Recording storage reference. */
+function emitProcessedCallEnded(
+  call: CallRow,
+  recordingRef: string
+) {
+  emitCallEnded(
+    {
+      callId: call.id,
+      profileId: call.owner_id,
+      durationMs: Number(call.duration_ms),
+      recordingRef,
+      occurredAt: call.stopped_at ?? undefined,
+    },
+    metricsConfigFromEnv()
+  );
 }
 
 async function processRecording(
@@ -170,6 +194,11 @@ async function processRecording(
     if (commitError) throw commitError;
     if (!committed)
       throw new Error("Job lease was lost before recording commit");
+
+    // Optional: enrich call.ended with the durable Recording reference.
+    // Dedup key is call id + ended — duplicate of finalize is acknowledged.
+    // Never block or fail processing on metrics.
+    emitProcessedCallEnded(call, finalMp3Path);
 
     if (chunkStoragePaths.length) await removeStorageFiles(chunkStoragePaths);
   } finally {
