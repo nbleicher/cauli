@@ -71,11 +71,15 @@ async function loadCall(callId: string) {
   return data as CallRow;
 }
 
-/** Optional processing-complete emit for the Recording storage reference. */
-function emitProcessedCallEnded(
-  call: CallRow,
-  recordingRef: string
-) {
+/**
+ * Delivery backstop for the finalize-time call.ended emission — NOT a payload
+ * enrichment path. This re-emit uses the SAME dedup key as finalize (call id
+ * + "ended"), so whenever finalize's emission reached the metrics backend
+ * this one is acknowledged as a duplicate and its recording_ref is discarded.
+ * It only lands when the finalize emission was lost; the recording_ref it
+ * carries is intentionally best-effort and must not be relied on downstream.
+ */
+function emitProcessedCallEnded(call: CallRow, recordingRef: string) {
   emitCallEnded(
     {
       callId: call.id,
@@ -195,8 +199,9 @@ async function processRecording(
     if (!committed)
       throw new Error("Job lease was lost before recording commit");
 
-    // Optional: enrich call.ended with the durable Recording reference.
-    // Dedup key is call id + ended — duplicate of finalize is acknowledged.
+    // Backstop for a lost finalize-time call.ended emission — same dedup key,
+    // so this is acknowledged as a duplicate (recording_ref discarded)
+    // whenever finalize's emission already arrived. Not an enrichment path.
     // Never block or fail processing on metrics.
     emitProcessedCallEnded(call, finalMp3Path);
 
